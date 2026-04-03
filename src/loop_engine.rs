@@ -16,6 +16,8 @@ pub enum TerminationReason {
     Interrupted,
     /// A provider spawn error occurred and the loop was aborted.
     ProviderError(String),
+    /// An iteration failed and `stop_on_failure` was set.
+    StoppedOnFailure,
 }
 
 impl std::fmt::Display for TerminationReason {
@@ -24,6 +26,7 @@ impl std::fmt::Display for TerminationReason {
             TerminationReason::Completed => write!(f, "completed"),
             TerminationReason::Interrupted => write!(f, "interrupted"),
             TerminationReason::ProviderError(msg) => write!(f, "provider error: {msg}"),
+            TerminationReason::StoppedOnFailure => write!(f, "stopped on failure"),
         }
     }
 }
@@ -34,6 +37,7 @@ pub struct SessionSummary {
     pub iterations_run: u64,
     pub successes: u64,
     pub failures: u64,
+    pub retries: u64,
     pub termination_reason: Option<TerminationReason>,
 }
 
@@ -43,6 +47,7 @@ impl SessionSummary {
             iterations_run = self.iterations_run,
             successes = self.successes,
             failures = self.failures,
+            retries = self.retries,
             termination_reason = %self.termination_reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
             "Session summary"
         );
@@ -51,6 +56,7 @@ impl SessionSummary {
         println!("  Iterations run : {}", self.iterations_run);
         println!("  Successes      : {}", self.successes);
         println!("  Failures       : {}", self.failures);
+        println!("  Retries        : {}", self.retries);
         if let Some(reason) = &self.termination_reason {
             println!("  Termination    : {reason}");
         }
@@ -213,46 +219,94 @@ impl LoopEngine {
             // Augment prompt with MCP-use preamble (no-op when allow_direct_github is set).
             let effective_prompt = self.guard.augment_prompt(&raw_prompt);
 
-            match self.adapter.execute(&effective_prompt) {
-                Ok(result) => {
-                    let duration_ms = result.duration.as_millis();
-                    summary.iterations_run += 1;
+            // Execute with retry/backoff.
+            let mut attempt = 0u32;
+            let mut iteration_succeeded = false;
+            let mut abort_loop = false;
 
-                    if result.succeeded() {
-                        summary.successes += 1;
-                        info!(
-                            iteration = i,
-                            provider = self.adapter.name(),
-                            exit_code = result.exit_code,
-                            duration_ms,
-                            output = %result.stdout.trim(),
-                            "Iteration succeeded"
-                        );
-                    } else {
-                        summary.failures += 1;
-                        warn!(
-                            iteration = i,
-                            provider = self.adapter.name(),
-                            exit_code = result.exit_code,
-                            duration_ms,
-                            stderr = %result.stderr.trim(),
-                            "Iteration failed (non-zero exit)"
-                        );
+            loop {
+                match self.adapter.execute(&effective_prompt) {
+                    Ok(result) => {
+                        let duration_ms = result.duration.as_millis();
+
+                        if result.succeeded() {
+                            if attempt > 0 {
+                                info!(
+                                    iteration = i,
+                                    attempt = attempt + 1,
+                                    provider = self.adapter.name(),
+                                    exit_code = result.exit_code,
+                                    duration_ms,
+                                    "Iteration succeeded after retry"
+                                );
+                            } else {
+                                info!(
+                                    iteration = i,
+                                    provider = self.adapter.name(),
+                                    exit_code = result.exit_code,
+                                    duration_ms,
+                                    output = %result.stdout.trim(),
+                                    "Iteration succeeded"
+                                );
+                            }
+                            iteration_succeeded = true;
+                            break;
+                        } else if attempt < self.config.max_retries {
+                            summary.retries += 1;
+                            warn!(
+                                iteration = i,
+                                attempt = attempt + 1,
+                                max_retries = self.config.max_retries,
+                                provider = self.adapter.name(),
+                                exit_code = result.exit_code,
+                                backoff_ms = self.config.retry_backoff_ms,
+                                "Iteration failed, retrying"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                self.config.retry_backoff_ms,
+                            ));
+                            attempt += 1;
+                        } else {
+                            warn!(
+                                iteration = i,
+                                provider = self.adapter.name(),
+                                exit_code = result.exit_code,
+                                duration_ms,
+                                stderr = %result.stderr.trim(),
+                                "Iteration failed (non-zero exit)"
+                            );
+                            break;
+                        }
+                    }
+                    Err(crate::error::LooperError::ProviderSpawn { binary, source }) => {
+                        let msg = format!("failed to spawn '{binary}': {source}");
+                        error!(iteration = i, provider = self.adapter.name(), "{msg}");
+                        summary.termination_reason = Some(TerminationReason::ProviderError(msg));
+                        abort_loop = true;
+                        break;
+                    }
+                    Err(e) => {
+                        error!(iteration = i, provider = self.adapter.name(), error = %e, "Iteration error");
+                        break;
                     }
                 }
-                Err(crate::error::LooperError::ProviderSpawn { binary, source }) => {
-                    summary.iterations_run += 1;
-                    summary.failures += 1;
-                    let msg = format!("failed to spawn '{binary}': {source}");
-                    error!(iteration = i, provider = self.adapter.name(), "{msg}");
-                    summary.termination_reason = Some(TerminationReason::ProviderError(msg));
-                    break;
-                }
-                Err(e) => {
-                    summary.iterations_run += 1;
-                    summary.failures += 1;
-                    error!(iteration = i, provider = self.adapter.name(), error = %e, "Iteration error");
-                }
+            }
+
+            summary.iterations_run += 1;
+            if iteration_succeeded {
+                summary.successes += 1;
+            } else {
+                summary.failures += 1;
+            }
+
+            if abort_loop {
+                break;
+            }
+
+            if !iteration_succeeded && self.config.stop_on_failure {
+                info!(iteration = i, "stop_on_failure is set; halting loop after failed iteration");
+                summary.termination_reason = Some(TerminationReason::StoppedOnFailure);
+                break;
             }
 
             let _ = iter_start; // elapsed captured inside result.duration
@@ -274,6 +328,28 @@ impl LoopEngine {
         );
 
         summary.print();
+
+        // Run completion hook if configured.
+        if let Some(cmd) = &self.config.on_complete {
+            info!(command = %cmd, "Running on_complete hook");
+            match std::process::Command::new("sh").args(["-c", cmd]).status() {
+                Ok(status) => {
+                    if status.success() {
+                        info!(command = %cmd, "on_complete hook succeeded");
+                    } else {
+                        warn!(
+                            command = %cmd,
+                            exit_code = status.code().unwrap_or(-1),
+                            "on_complete hook exited with non-zero status"
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(command = %cmd, error = %e, "Failed to spawn on_complete hook");
+                }
+            }
+        }
+
         summary
     }
 }
@@ -377,6 +453,152 @@ mod tests {
             TerminationReason::ProviderError("bad".to_string()).to_string(),
             "provider error: bad"
         );
+        assert_eq!(TerminationReason::StoppedOnFailure.to_string(), "stopped on failure");
+    }
+
+    #[test]
+    fn stop_on_failure_halts_after_first_failed_iteration() {
+        let config = LoopConfig {
+            iterations: 5,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            stop_on_failure: true,
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::failure("fake");
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.termination_reason, Some(TerminationReason::StoppedOnFailure));
+    }
+
+    #[test]
+    fn stop_on_failure_false_continues_after_failure() {
+        let config = LoopConfig {
+            iterations: 3,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            stop_on_failure: false,
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::failure("fake");
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 3);
+        assert_eq!(summary.failures, 3);
+        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+    }
+
+    #[test]
+    fn retries_counted_in_summary_on_repeated_failure() {
+        use crate::error::LooperError;
+        use crate::provider::ExecutionResult;
+        use std::time::Duration;
+
+        // Adapter that always returns exit code 1.
+        struct AlwaysFailAdapter;
+        impl ProviderAdapter for AlwaysFailAdapter {
+            fn name(&self) -> &str { "always-fail" }
+            fn execute(&self, _prompt: &str) -> Result<ExecutionResult, LooperError> {
+                Ok(ExecutionResult {
+                    exit_code: Some(1),
+                    stdout: String::new(),
+                    stderr: "error".to_string(),
+                    duration: Duration::from_millis(1),
+                })
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 2,
+            retry_backoff_ms: 0, // no sleep in tests
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter(config, Box::new(AlwaysFailAdapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.retries, 2);
+    }
+
+    #[test]
+    fn retry_succeeds_on_second_attempt() {
+        use crate::error::LooperError;
+        use crate::provider::ExecutionResult;
+        use std::sync::atomic::{AtomicU32, Ordering as AtomOrd};
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        // Adapter that fails on first call, succeeds on subsequent calls.
+        struct FlipFlopAdapter {
+            calls: Arc<AtomicU32>,
+        }
+        impl ProviderAdapter for FlipFlopAdapter {
+            fn name(&self) -> &str { "flip-flop" }
+            fn execute(&self, _prompt: &str) -> Result<ExecutionResult, LooperError> {
+                let n = self.calls.fetch_add(1, AtomOrd::SeqCst);
+                Ok(ExecutionResult {
+                    exit_code: if n == 0 { Some(1) } else { Some(0) },
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration: Duration::from_millis(1),
+                })
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 3,
+            retry_backoff_ms: 0,
+            ..Default::default()
+        };
+        let calls = Arc::new(AtomicU32::new(0));
+        let adapter = FlipFlopAdapter { calls };
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.successes, 1);
+        assert_eq!(summary.failures, 0);
+        assert_eq!(summary.retries, 1);
+    }
+
+    #[test]
+    fn on_complete_hook_runs_without_error() {
+        // Use a shell command that always succeeds.
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            on_complete: Some("true".to_string()),
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::success("fake");
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        // The hook runs after run() returns the summary — just confirm loop completed.
+        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+    }
+
+    #[test]
+    fn retries_zero_means_no_retry() {
+        let config = LoopConfig {
+            iterations: 2,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 0,
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::failure("fake");
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.retries, 0);
+        assert_eq!(summary.failures, 2);
     }
 
     #[test]

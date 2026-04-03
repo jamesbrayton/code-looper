@@ -58,6 +58,23 @@ pub struct Cli {
     /// write-path enforcement preamble in provider prompts.
     #[arg(long)]
     pub allow_direct_github: bool,
+
+    /// Stop the loop after the first iteration that fails (after all retries
+    /// are exhausted).
+    #[arg(long)]
+    pub stop_on_failure: bool,
+
+    /// Number of additional retry attempts per iteration on non-zero exit.
+    #[arg(long)]
+    pub max_retries: Option<u32>,
+
+    /// Milliseconds to wait between retry attempts (default: 500).
+    #[arg(long)]
+    pub retry_backoff_ms: Option<u64>,
+
+    /// Shell command to run once after the loop finishes (run via `sh -c`).
+    #[arg(long)]
+    pub on_complete: Option<String>,
 }
 
 impl Cli {
@@ -101,6 +118,18 @@ impl Cli {
         if self.allow_direct_github {
             base.allow_direct_github = true;
         }
+        if self.stop_on_failure {
+            base.stop_on_failure = true;
+        }
+        if let Some(n) = self.max_retries {
+            base.max_retries = n;
+        }
+        if let Some(ms) = self.retry_backoff_ms {
+            base.retry_backoff_ms = ms;
+        }
+        if let Some(cmd) = self.on_complete {
+            base.on_complete = Some(cmd);
+        }
         base
     }
 }
@@ -128,6 +157,10 @@ mod tests {
             workspace_dir: None,
             skip_prereq_check: false,
             allow_direct_github: false,
+            stop_on_failure: false,
+            max_retries: None,
+            retry_backoff_ms: None,
+            on_complete: None,
         }
     }
 
@@ -217,5 +250,42 @@ mod tests {
         assert!(!config.skip_prereq_check);
         assert!(!config.allow_direct_github);
         assert!(config.workspace_dir.is_none());
+    }
+
+    #[test]
+    fn cli_stop_on_failure_sets_flag() {
+        let cli = Cli { stop_on_failure: true, ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.stop_on_failure);
+    }
+
+    #[test]
+    fn cli_max_retries_propagates() {
+        let cli = Cli { max_retries: Some(3), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.max_retries, 3);
+    }
+
+    #[test]
+    fn cli_retry_backoff_ms_propagates() {
+        let cli = Cli { retry_backoff_ms: Some(1000), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.retry_backoff_ms, 1000);
+    }
+
+    #[test]
+    fn cli_on_complete_propagates() {
+        let cli = Cli { on_complete: Some("echo done".to_string()), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.on_complete.as_deref(), Some("echo done"));
+    }
+
+    #[test]
+    fn cli_defaults_leave_retry_fields_at_defaults() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(!config.stop_on_failure);
+        assert_eq!(config.max_retries, 0);
+        assert_eq!(config.retry_backoff_ms, 500);
+        assert!(config.on_complete.is_none());
     }
 }

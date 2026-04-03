@@ -60,6 +60,25 @@ pub struct LoopConfig {
     /// disable the MCP-only prompt preamble.
     #[serde(default)]
     pub allow_direct_github: bool,
+    /// Stop the loop after the first iteration that fails (non-zero exit after
+    /// all retries are exhausted).
+    #[serde(default)]
+    pub stop_on_failure: bool,
+    /// Number of additional retry attempts per iteration on non-zero exit.
+    /// `0` means no retries (fail fast).
+    #[serde(default)]
+    pub max_retries: u32,
+    /// Milliseconds to wait between retry attempts.
+    #[serde(default = "default_retry_backoff_ms")]
+    pub retry_backoff_ms: u64,
+    /// Optional shell command to execute once after the loop finishes.
+    /// The command is run via the system shell (`sh -c` on Unix).
+    #[serde(default)]
+    pub on_complete: Option<String>,
+}
+
+fn default_retry_backoff_ms() -> u64 {
+    500
 }
 
 impl Default for LoopConfig {
@@ -74,6 +93,10 @@ impl Default for LoopConfig {
             workspace_dir: None,
             skip_prereq_check: false,
             allow_direct_github: false,
+            stop_on_failure: false,
+            max_retries: 0,
+            retry_backoff_ms: default_retry_backoff_ms(),
+            on_complete: None,
         }
     }
 }
@@ -107,6 +130,13 @@ impl LoopConfig {
             if self.orchestration.repo_name.is_none() {
                 return Err(LooperError::InvalidArgument(
                     "orchestration requires --repo-name".to_string(),
+                ));
+            }
+        }
+        if let Some(cmd) = &self.on_complete {
+            if cmd.trim().is_empty() {
+                return Err(LooperError::InvalidArgument(
+                    "--on-complete must not be an empty string".to_string(),
                 ));
             }
         }
@@ -248,6 +278,56 @@ prompt_inline = "run the tests"
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn default_retry_fields() {
+        let config = LoopConfig::default();
+        assert!(!config.stop_on_failure);
+        assert_eq!(config.max_retries, 0);
+        assert_eq!(config.retry_backoff_ms, 500);
+        assert!(config.on_complete.is_none());
+    }
+
+    #[test]
+    fn empty_on_complete_is_invalid() {
+        let config = LoopConfig {
+            on_complete: Some("  ".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn nonempty_on_complete_is_valid() {
+        let config = LoopConfig {
+            on_complete: Some("echo done".to_string()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_toml_with_retry_fields() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 5
+log_level = "info"
+stop_on_failure = true
+max_retries = 2
+retry_backoff_ms = 250
+on_complete = "echo done"
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert!(config.stop_on_failure);
+        assert_eq!(config.max_retries, 2);
+        assert_eq!(config.retry_backoff_ms, 250);
+        assert_eq!(config.on_complete.as_deref(), Some("echo done"));
     }
 
     #[test]
