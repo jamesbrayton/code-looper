@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod error;
 mod loop_engine;
+mod orchestration;
 mod provider;
 
 use anyhow::Context;

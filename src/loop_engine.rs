@@ -1,4 +1,5 @@
 use crate::config::LoopConfig;
+use crate::orchestration::{GhCliContextResolver, PolicyEngine};
 use crate::provider::{build_adapter, ProviderAdapter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -60,6 +61,8 @@ impl SessionSummary {
 pub struct LoopEngine {
     config: LoopConfig,
     adapter: Box<dyn ProviderAdapter>,
+    /// Optional orchestration policy engine (present when orchestration is enabled).
+    policy_engine: Option<PolicyEngine>,
     /// Shared flag set to `true` when SIGINT is received.
     interrupted: Arc<AtomicBool>,
 }
@@ -67,17 +70,33 @@ pub struct LoopEngine {
 impl LoopEngine {
     pub fn new(config: LoopConfig) -> Self {
         let adapter = build_adapter(&config.provider);
-        Self::with_adapter(config, adapter)
+        let policy_engine = if config.orchestration.enabled {
+            let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
+            let repo = config.orchestration.repo_name.clone().unwrap_or_default();
+            Some(PolicyEngine::new(Box::new(GhCliContextResolver { owner, repo })))
+        } else {
+            None
+        };
+        let interrupted = Arc::new(AtomicBool::new(false));
+        Self { config, adapter, policy_engine, interrupted }
     }
 
-    /// Constructor that accepts a custom adapter (useful for testing).
+    /// Constructor that accepts a custom adapter and optional policy engine (useful for testing).
+    #[allow(dead_code)]
     pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self {
-            config,
-            adapter,
-            interrupted,
-        }
+        Self { config, adapter, policy_engine: None, interrupted }
+    }
+
+    /// Constructor that accepts a custom adapter and policy engine (useful for testing).
+    #[allow(dead_code)]
+    pub fn with_adapter_and_policy(
+        config: LoopConfig,
+        adapter: Box<dyn ProviderAdapter>,
+        policy_engine: PolicyEngine,
+    ) -> Self {
+        let interrupted = Arc::new(AtomicBool::new(false));
+        Self { config, adapter, policy_engine: Some(policy_engine), interrupted }
     }
 
     /// Install a Ctrl+C handler that sets the interrupted flag.
@@ -156,13 +175,37 @@ impl LoopEngine {
 
             let iter_start = Instant::now();
 
-            info!(
-                iteration = i,
-                provider = self.adapter.name(),
-                "Iteration start"
-            );
+            // If orchestration is enabled, select a workflow branch and use its prompt.
+            let effective_prompt = if let Some(ref engine) = self.policy_engine {
+                match engine.select_branch() {
+                    Ok((branch, _ctx)) => {
+                        info!(
+                            iteration = i,
+                            provider = self.adapter.name(),
+                            workflow_branch = %branch,
+                            "Iteration start"
+                        );
+                        branch.default_prompt().to_string()
+                    }
+                    Err(e) => {
+                        error!(iteration = i, "Policy engine failed: {e}");
+                        summary.iterations_run += 1;
+                        summary.failures += 1;
+                        summary.termination_reason =
+                            Some(TerminationReason::ProviderError(e.to_string()));
+                        break;
+                    }
+                }
+            } else {
+                info!(
+                    iteration = i,
+                    provider = self.adapter.name(),
+                    "Iteration start"
+                );
+                prompt.clone()
+            };
 
-            match self.adapter.execute(&prompt) {
+            match self.adapter.execute(&effective_prompt) {
                 Ok(result) => {
                     let duration_ms = result.duration.as_millis();
                     summary.iterations_run += 1;
@@ -360,5 +403,71 @@ mod tests {
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
         assert_eq!(summary.successes, 1);
+    }
+
+    #[test]
+    fn orchestration_selects_branch_and_succeeds() {
+        use crate::config::OrchestrationConfig;
+        use crate::orchestration::tests::StubContextResolver;
+        use crate::orchestration::{PolicyEngine, RepoContext};
+
+        let config = LoopConfig {
+            iterations: 2,
+            provider: Provider::Claude,
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+            },
+            ..Default::default()
+        };
+        let resolver = StubContextResolver {
+            context: RepoContext { open_pr_count: 0, open_issue_count: 1 },
+        };
+        let policy_engine = PolicyEngine::new(Box::new(resolver));
+        let adapter = FakeAdapter::success("fake");
+        let engine = LoopEngine::with_adapter_and_policy(config, Box::new(adapter), policy_engine);
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 2);
+        assert_eq!(summary.successes, 2);
+        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+    }
+
+    #[test]
+    fn orchestration_policy_error_terminates_loop() {
+        use crate::config::OrchestrationConfig;
+        use crate::error::LooperError;
+        use crate::orchestration::{ContextResolver, PolicyEngine, RepoContext};
+
+        struct FailingResolver;
+        impl ContextResolver for FailingResolver {
+            fn resolve(&self) -> Result<RepoContext, LooperError> {
+                Err(LooperError::InvalidArgument("gh failed".to_string()))
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 3,
+            provider: Provider::Claude,
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_policy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            PolicyEngine::new(Box::new(FailingResolver)),
+        );
+        let summary = engine.run();
+        // Should abort on the first policy failure.
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert!(matches!(
+            summary.termination_reason,
+            Some(TerminationReason::ProviderError(_))
+        ));
     }
 }

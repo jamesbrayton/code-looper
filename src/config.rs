@@ -2,6 +2,19 @@ use crate::error::LooperError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Orchestration policy engine configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OrchestrationConfig {
+    /// Enable the policy engine; when true the engine selects a workflow branch
+    /// per iteration and generates the prompt automatically.
+    pub enabled: bool,
+    /// GitHub repository owner (user or org). Required when enabled.
+    pub repo_owner: Option<String>,
+    /// GitHub repository name. Required when enabled.
+    pub repo_name: Option<String>,
+}
+
+
 /// Supported agent CLI providers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
@@ -34,6 +47,9 @@ pub struct LoopConfig {
     pub prompt_file: Option<PathBuf>,
     /// Tracing log level (e.g. "info", "debug").
     pub log_level: String,
+    /// Orchestration policy engine settings.
+    #[serde(default)]
+    pub orchestration: OrchestrationConfig,
 }
 
 impl Default for LoopConfig {
@@ -44,6 +60,7 @@ impl Default for LoopConfig {
             prompt_inline: None,
             prompt_file: None,
             log_level: "info".to_string(),
+            orchestration: OrchestrationConfig::default(),
         }
     }
 }
@@ -67,6 +84,18 @@ impl LoopConfig {
             return Err(LooperError::InvalidArgument(
                 "--iterations must be a positive integer or -1 for infinite".to_string(),
             ));
+        }
+        if self.orchestration.enabled {
+            if self.orchestration.repo_owner.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration requires --repo-owner".to_string(),
+                ));
+            }
+            if self.orchestration.repo_name.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration requires --repo-name".to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -162,5 +191,72 @@ prompt_inline = "run the tests"
         assert_eq!(Provider::Claude.to_string(), "claude");
         assert_eq!(Provider::Copilot.to_string(), "copilot");
         assert_eq!(Provider::Codex.to_string(), "codex");
+    }
+
+    #[test]
+    fn orchestration_disabled_by_default() {
+        assert!(!LoopConfig::default().orchestration.enabled);
+    }
+
+    #[test]
+    fn orchestration_enabled_requires_owner_and_name() {
+        let config = LoopConfig {
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                repo_owner: None,
+                repo_name: None,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn orchestration_enabled_requires_repo_name() {
+        let config = LoopConfig {
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                repo_owner: Some("owner".to_string()),
+                repo_name: None,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn orchestration_enabled_with_both_fields_is_valid() {
+        let config = LoopConfig {
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_toml_with_orchestration() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[orchestration]
+enabled = true
+repo_owner = "acme"
+repo_name = "my-repo"
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert!(config.orchestration.enabled);
+        assert_eq!(config.orchestration.repo_owner.as_deref(), Some("acme"));
+        assert_eq!(config.orchestration.repo_name.as_deref(), Some("my-repo"));
     }
 }

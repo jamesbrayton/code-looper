@@ -29,6 +29,18 @@ pub struct Cli {
     /// Log level: trace, debug, info, warn, or error.
     #[arg(long)]
     pub log_level: Option<String>,
+
+    /// Enable orchestration policy engine (auto-selects workflow branch from repo context).
+    #[arg(long)]
+    pub orchestration: bool,
+
+    /// GitHub repository owner (required when --orchestration is set).
+    #[arg(long)]
+    pub repo_owner: Option<String>,
+
+    /// GitHub repository name (required when --orchestration is set).
+    #[arg(long)]
+    pub repo_name: Option<String>,
 }
 
 impl Cli {
@@ -54,6 +66,15 @@ impl Cli {
         if let Some(l) = self.log_level {
             base.log_level = l;
         }
+        if self.orchestration {
+            base.orchestration.enabled = true;
+        }
+        if let Some(owner) = self.repo_owner {
+            base.orchestration.repo_owner = Some(owner);
+        }
+        if let Some(name) = self.repo_name {
+            base.orchestration.repo_name = Some(name);
+        }
         base
     }
 }
@@ -67,30 +88,30 @@ mod tests {
         LoopConfig::default()
     }
 
-    #[test]
-    fn cli_overrides_provider() {
-        let cli = Cli {
-            provider: Some(Provider::Copilot),
+    fn blank_cli() -> Cli {
+        Cli {
+            provider: None,
             iterations: None,
             prompt_inline: None,
             prompt_file: None,
             config: None,
             log_level: None,
-        };
+            orchestration: false,
+            repo_owner: None,
+            repo_name: None,
+        }
+    }
+
+    #[test]
+    fn cli_overrides_provider() {
+        let cli = Cli { provider: Some(Provider::Copilot), ..blank_cli() };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.provider, Provider::Copilot);
     }
 
     #[test]
     fn cli_overrides_iterations() {
-        let cli = Cli {
-            provider: None,
-            iterations: Some(10),
-            prompt_inline: None,
-            prompt_file: None,
-            config: None,
-            log_level: None,
-        };
+        let cli = Cli { iterations: Some(10), ..blank_cli() };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.iterations, 10);
     }
@@ -100,14 +121,7 @@ mod tests {
         let mut base = default_config();
         base.prompt_file = Some("old.md".into());
 
-        let cli = Cli {
-            provider: None,
-            iterations: None,
-            prompt_inline: Some("new prompt".to_string()),
-            prompt_file: None,
-            config: None,
-            log_level: None,
-        };
+        let cli = Cli { prompt_inline: Some("new prompt".to_string()), ..blank_cli() };
         let config = cli.apply_overrides(base);
         assert_eq!(config.prompt_inline.as_deref(), Some("new prompt"));
         assert!(config.prompt_file.is_none());
@@ -119,16 +133,28 @@ mod tests {
         base.iterations = 7;
         base.log_level = "debug".to_string();
 
-        let cli = Cli {
-            provider: None,
-            iterations: None,
-            prompt_inline: None,
-            prompt_file: None,
-            config: None,
-            log_level: None,
-        };
-        let config = cli.apply_overrides(base);
+        let config = blank_cli().apply_overrides(base);
         assert_eq!(config.iterations, 7);
         assert_eq!(config.log_level, "debug");
+    }
+
+    #[test]
+    fn cli_orchestration_flag_enables_engine() {
+        let cli = Cli {
+            orchestration: true,
+            repo_owner: Some("acme".to_string()),
+            repo_name: Some("project".to_string()),
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.orchestration.enabled);
+        assert_eq!(config.orchestration.repo_owner.as_deref(), Some("acme"));
+        assert_eq!(config.orchestration.repo_name.as_deref(), Some("project"));
+    }
+
+    #[test]
+    fn cli_orchestration_false_leaves_config_disabled() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(!config.orchestration.enabled);
     }
 }
