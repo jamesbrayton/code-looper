@@ -1,0 +1,22 @@
+[package]
+name = "code-looper"
+version = "0.1.0"
+edition = "2021"
+description = "Pluggable loop engine for coding-agent CLIs"
+license = "MIT"
+
+[[bin]]
+name = "code-looper"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
