@@ -3,7 +3,9 @@ mod config;
 mod error;
 mod loop_engine;
 mod orchestration;
+mod policy_guard;
 mod provider;
+mod workspace;
 
 use anyhow::Context;
 use clap::Parser;
@@ -34,6 +36,36 @@ fn main() -> anyhow::Result<()> {
     // Validate resolved config.
     resolved.validate().context("invalid configuration")?;
 
+    // Run workspace prerequisite checks unless explicitly skipped.
+    if !resolved.skip_prereq_check {
+        let ws_dir =
+            workspace::resolve_workspace_dir(resolved.workspace_dir.as_deref());
+        let checker = workspace::PrerequisiteChecker::new(&ws_dir);
+        let check_result = checker.run();
+        if !check_result.is_ok() {
+            eprintln!("Workspace prerequisite checks failed:");
+            check_result.print_summary();
+            eprintln!(
+                "\nRun with --skip-prereq-check to bypass (not recommended), or \
+                 fix the issues above before running Code Looper."
+            );
+            std::process::exit(1);
+        }
+        info!(workspace = %ws_dir.display(), "Workspace prerequisite checks passed");
+    }
+
+    // Validate orchestration policy and build the guard.
+    let guard = policy_guard::PolicyGuard::new(policy_guard::UnsafeOverrides {
+        allow_direct_github: resolved.allow_direct_github,
+    });
+    let violations = guard.validate_orchestration(resolved.orchestration.enabled);
+    if !violations.is_empty() {
+        for v in &violations {
+            eprintln!("{v}");
+        }
+        anyhow::bail!("Policy guard validation failed");
+    }
+
     info!(
         provider = %resolved.provider,
         iterations = resolved.iterations,
@@ -41,7 +73,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // Build the loop engine, install signal handler, and run.
-    let engine = loop_engine::LoopEngine::new(resolved);
+    let engine = loop_engine::LoopEngine::new(resolved, guard);
     engine.install_signal_handler();
     engine.run();
 

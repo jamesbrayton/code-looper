@@ -41,6 +41,23 @@ pub struct Cli {
     /// GitHub repository name (required when --orchestration is set).
     #[arg(long)]
     pub repo_name: Option<String>,
+
+    /// Directory to treat as the workspace root for prerequisite checks.
+    /// Defaults to the current working directory.
+    #[arg(long)]
+    pub workspace_dir: Option<PathBuf>,
+
+    /// Skip workspace prerequisite checks (instruction file, MCP config).
+    /// Use only when you know the workspace is not a git repository or the
+    /// checks are not applicable.
+    #[arg(long)]
+    pub skip_prereq_check: bool,
+
+    /// [UNSAFE] Allow GitHub context resolution via direct `gh` CLI calls
+    /// instead of requiring a GitHub MCP server.  Disables the MCP-only
+    /// write-path enforcement preamble in provider prompts.
+    #[arg(long)]
+    pub allow_direct_github: bool,
 }
 
 impl Cli {
@@ -75,6 +92,15 @@ impl Cli {
         if let Some(name) = self.repo_name {
             base.orchestration.repo_name = Some(name);
         }
+        if let Some(dir) = self.workspace_dir {
+            base.workspace_dir = Some(dir);
+        }
+        if self.skip_prereq_check {
+            base.skip_prereq_check = true;
+        }
+        if self.allow_direct_github {
+            base.allow_direct_github = true;
+        }
         base
     }
 }
@@ -99,6 +125,9 @@ mod tests {
             orchestration: false,
             repo_owner: None,
             repo_name: None,
+            workspace_dir: None,
+            skip_prereq_check: false,
+            allow_direct_github: false,
         }
     }
 
@@ -156,5 +185,37 @@ mod tests {
     fn cli_orchestration_false_leaves_config_disabled() {
         let config = blank_cli().apply_overrides(default_config());
         assert!(!config.orchestration.enabled);
+    }
+
+    #[test]
+    fn cli_skip_prereq_check_sets_flag() {
+        let cli = Cli { skip_prereq_check: true, ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.skip_prereq_check);
+    }
+
+    #[test]
+    fn cli_allow_direct_github_sets_flag() {
+        let cli = Cli { allow_direct_github: true, ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.allow_direct_github);
+    }
+
+    #[test]
+    fn cli_workspace_dir_propagates() {
+        let cli = Cli {
+            workspace_dir: Some("/tmp/my-repo".into()),
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.workspace_dir, Some("/tmp/my-repo".into()));
+    }
+
+    #[test]
+    fn cli_defaults_leave_safe_flags_false() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(!config.skip_prereq_check);
+        assert!(!config.allow_direct_github);
+        assert!(config.workspace_dir.is_none());
     }
 }

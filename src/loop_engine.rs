@@ -1,5 +1,6 @@
 use crate::config::LoopConfig;
 use crate::orchestration::{GhCliContextResolver, PolicyEngine};
+use crate::policy_guard::PolicyGuard;
 use crate::provider::{build_adapter, ProviderAdapter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -63,12 +64,14 @@ pub struct LoopEngine {
     adapter: Box<dyn ProviderAdapter>,
     /// Optional orchestration policy engine (present when orchestration is enabled).
     policy_engine: Option<PolicyEngine>,
+    /// Policy guard used to augment prompts with MCP-use requirements.
+    guard: PolicyGuard,
     /// Shared flag set to `true` when SIGINT is received.
     interrupted: Arc<AtomicBool>,
 }
 
 impl LoopEngine {
-    pub fn new(config: LoopConfig) -> Self {
+    pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
         let adapter = build_adapter(&config.provider);
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
@@ -78,14 +81,15 @@ impl LoopEngine {
             None
         };
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine, interrupted }
+        Self { config, adapter, policy_engine, guard, interrupted }
     }
 
-    /// Constructor that accepts a custom adapter and optional policy engine (useful for testing).
+    /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
     #[allow(dead_code)]
     pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine: None, interrupted }
+        let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
+        Self { config, adapter, policy_engine: None, guard, interrupted }
     }
 
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
@@ -96,7 +100,8 @@ impl LoopEngine {
         policy_engine: PolicyEngine,
     ) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine: Some(policy_engine), interrupted }
+        let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
+        Self { config, adapter, policy_engine: Some(policy_engine), guard, interrupted }
     }
 
     /// Install a Ctrl+C handler that sets the interrupted flag.
@@ -176,7 +181,7 @@ impl LoopEngine {
             let iter_start = Instant::now();
 
             // If orchestration is enabled, select a workflow branch and use its prompt.
-            let effective_prompt = if let Some(ref engine) = self.policy_engine {
+            let raw_prompt = if let Some(ref engine) = self.policy_engine {
                 match engine.select_branch() {
                     Ok((branch, _ctx)) => {
                         info!(
@@ -204,6 +209,9 @@ impl LoopEngine {
                 );
                 prompt.clone()
             };
+
+            // Augment prompt with MCP-use preamble (no-op when allow_direct_github is set).
+            let effective_prompt = self.guard.augment_prompt(&raw_prompt);
 
             match self.adapter.execute(&effective_prompt) {
                 Ok(result) => {

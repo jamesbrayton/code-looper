@@ -50,6 +50,16 @@ pub struct LoopConfig {
     /// Orchestration policy engine settings.
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
+    /// Workspace directory for prerequisite checks (defaults to cwd).
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
+    /// Skip workspace prerequisite checks at startup.
+    #[serde(default)]
+    pub skip_prereq_check: bool,
+    /// [UNSAFE] Allow GitHub context resolution via direct gh CLI calls and
+    /// disable the MCP-only prompt preamble.
+    #[serde(default)]
+    pub allow_direct_github: bool,
 }
 
 impl Default for LoopConfig {
@@ -61,6 +71,9 @@ impl Default for LoopConfig {
             prompt_file: None,
             log_level: "info".to_string(),
             orchestration: OrchestrationConfig::default(),
+            workspace_dir: None,
+            skip_prereq_check: false,
+            allow_direct_github: false,
         }
     }
 }
