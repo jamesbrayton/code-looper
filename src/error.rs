@@ -10,4 +10,11 @@ pub enum LooperError {
 
     #[error("TOML parse error: {0}")]
     Toml(#[from] toml::de::Error),
+
+    #[error("failed to spawn provider binary '{binary}': {source}")]
+    ProviderSpawn {
+        binary: String,
+        #[source]
+        source: std::io::Error,
+    },
 }

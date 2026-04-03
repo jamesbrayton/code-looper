@@ -1,6 +1,8 @@
 mod cli;
 mod config;
 mod error;
+mod loop_engine;
+mod provider;
 
 use anyhow::Context;
 use clap::Parser;
@@ -29,9 +31,7 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     // Validate resolved config.
-    resolved
-        .validate()
-        .context("invalid configuration")?;
+    resolved.validate().context("invalid configuration")?;
 
     info!(
         provider = %resolved.provider,
@@ -39,16 +39,10 @@ fn main() -> anyhow::Result<()> {
         "Code Looper initialized"
     );
 
-    let iteration_label = if resolved.iterations == -1 {
-        "infinite".to_string()
-    } else {
-        resolved.iterations.to_string()
-    };
-
-    println!("Code Looper");
-    println!("  Provider:   {}", resolved.provider);
-    println!("  Iterations: {}", iteration_label);
-    println!("  Log level:  {}", resolved.log_level);
+    // Build the loop engine, install signal handler, and run.
+    let engine = loop_engine::LoopEngine::new(resolved);
+    engine.install_signal_handler();
+    engine.run();
 
     Ok(())
 }
