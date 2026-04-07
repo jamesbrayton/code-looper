@@ -135,6 +135,10 @@ pub struct RunManifest {
     pub provider: String,
     pub iterations_requested: i64,
     pub termination_reason: Option<String>,
+    /// Number of planned orchestration actions that were intentionally skipped
+    /// (e.g. PR blocked on human review, no actionable PR found).
+    #[serde(default)]
+    pub skipped_decisions: u64,
     pub iterations: Vec<IterationRecord>,
 }
 
@@ -302,7 +306,8 @@ fn build_summary_markdown(manifest: &RunManifest) -> String {
     md.push_str("|---|---|\n");
     md.push_str(&format!("| Successes | {} |\n", successes));
     md.push_str(&format!("| Failures | {} |\n", failures));
-    md.push_str(&format!("| Retries | {} |\n\n", total_retries));
+    md.push_str(&format!("| Retries | {} |\n", total_retries));
+    md.push_str(&format!("| Skipped decisions | {} |\n\n", manifest.skipped_decisions));
 
     // Per-iteration table
     if !manifest.iterations.is_empty() {
@@ -482,6 +487,7 @@ mod tests {
             provider: "claude".to_string(),
             iterations_requested: 2,
             termination_reason: Some("completed".to_string()),
+            skipped_decisions: 0,
             iterations: vec![],
         };
         art.write_manifest(&manifest);
@@ -516,6 +522,7 @@ mod tests {
             provider: "claude".to_string(),
             iterations_requested: 2,
             termination_reason: Some("completed".to_string()),
+            skipped_decisions: 2,
             iterations: vec![
                 IterationRecord {
                     iteration: 1,
@@ -537,5 +544,6 @@ mod tests {
         assert!(md.contains("completed"));
         assert!(md.contains("success"));
         assert!(md.contains("iteration-1.log"));
+        assert!(md.contains("Skipped decisions"));
     }
 }

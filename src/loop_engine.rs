@@ -48,6 +48,9 @@ pub struct SessionSummary {
     pub successes: u64,
     pub failures: u64,
     pub retries: u64,
+    /// Number of planned orchestration actions that were intentionally skipped
+    /// (e.g. PR blocked on human review, no actionable PR found).
+    pub skipped_decisions: u64,
     pub termination_reason: Option<TerminationReason>,
 }
 
@@ -58,17 +61,19 @@ impl SessionSummary {
             successes = self.successes,
             failures = self.failures,
             retries = self.retries,
+            skipped_decisions = self.skipped_decisions,
             termination_reason = %self.termination_reason.as_ref().map(|r| r.to_string()).unwrap_or_default(),
             "Session summary"
         );
         println!();
         println!("─── Session Summary ────────────────────────────");
-        println!("  Iterations run : {}", self.iterations_run);
-        println!("  Successes      : {}", self.successes);
-        println!("  Failures       : {}", self.failures);
-        println!("  Retries        : {}", self.retries);
+        println!("  Iterations run   : {}", self.iterations_run);
+        println!("  Successes        : {}", self.successes);
+        println!("  Failures         : {}", self.failures);
+        println!("  Retries          : {}", self.retries);
+        println!("  Skipped decisions: {}", self.skipped_decisions);
         if let Some(reason) = &self.termination_reason {
-            println!("  Termination    : {reason}");
+            println!("  Termination      : {reason}");
         }
         println!("────────────────────────────────────────────────");
     }
@@ -226,6 +231,29 @@ impl LoopEngine {
             config,
             adapter,
             policy_engine: Some(policy_engine),
+            guard,
+            tracker,
+            pr_strategy,
+            pr_manager: None,
+            branch_manager: None,
+            interrupted,
+        }
+    }
+
+    /// Constructor that accepts a custom adapter and PR strategy (useful for testing).
+    #[cfg(test)]
+    pub fn with_adapter_and_pr_strategy(
+        config: LoopConfig,
+        adapter: Box<dyn ProviderAdapter>,
+        pr_strategy: Box<dyn PrStrategy>,
+    ) -> Self {
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
+        let tracker = build_tracker(&config);
+        Self {
+            config,
+            adapter,
+            policy_engine: None,
             guard,
             tracker,
             pr_strategy,
@@ -486,6 +514,7 @@ impl LoopEngine {
                             pr = pr.number,
                             "multi-pr: PR ready but blocked on human review; falling through to issue work"
                         );
+                        summary.skipped_decisions += 1;
                         // Fall through — no prompt override set, so normal issue-work prompt is used.
                     }
                     _ => {}
@@ -730,6 +759,7 @@ impl LoopEngine {
                                 pr = pr.number,
                                 "single-pr: PR already open; blocked on human review"
                             );
+                            summary.skipped_decisions += 1;
                         }
                         Ok(crate::pr_manager::PrAction::NoSignal) => {}
                         Err(e) => {
@@ -918,6 +948,7 @@ impl LoopEngine {
                 .termination_reason
                 .as_ref()
                 .map(|r| r.to_string()),
+            skipped_decisions: summary.skipped_decisions,
             iterations: iteration_records,
         };
         artifacts.write_manifest(&manifest);
@@ -1711,5 +1742,53 @@ mod tests {
             engine.branch_manager.is_none(),
             "branch_manager must be None in no-pr mode"
         );
+    }
+
+    // ── skipped_decisions counter ────────────────────────────────────────────
+
+    #[test]
+    fn blocked_on_human_review_increments_skipped_decisions() {
+        use crate::config::{PrManagementConfig, PrMode};
+        use crate::pr_manager::{PrInfo, TriageAction};
+        use crate::pr_strategy::{IterationPlan, PrStrategy};
+
+        /// Fake strategy that always returns BlockedOnHumanReview.
+        struct BlockedStrategy;
+        impl PrStrategy for BlockedStrategy {
+            fn plan_iteration(&self, _iteration: u64) -> IterationPlan {
+                let pr = PrInfo {
+                    number: 42,
+                    title: "feat: something".to_string(),
+                    url: "https://github.com/owner/repo/pull/42".to_string(),
+                };
+                IterationPlan {
+                    description: "blocked on human review".to_string(),
+                    mode: PrMode::MultiPr,
+                    prompt_override: None,
+                    triage_action: Some(TriageAction::BlockedOnHumanReview { pr }),
+                }
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 2,
+            provider: Provider::Claude,
+            prompt_inline: Some("test prompt".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_pr_strategy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(BlockedStrategy),
+        );
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 2);
+        assert_eq!(summary.successes, 2);
+        assert_eq!(summary.skipped_decisions, 2,
+            "each BlockedOnHumanReview should increment skipped_decisions by 1");
     }
 }
