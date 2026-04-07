@@ -138,6 +138,10 @@ code-looper \
 
 ## Next steps
 
+- [docs/configuration.md](configuration.md) — Every config field, CLI flag, default, and precedence rule
+- [docs/providers.md](providers.md) — Provider adapter invocation, environment requirements, and known limitations
 - [docs/orchestration.md](orchestration.md) — Workflow branches, shippable signal, PR lifecycle, multi-PR triage
+- [docs/workspace-prerequisites.md](workspace-prerequisites.md) — What the prerequisite checker validates and how to fix each diagnostic
+- [docs/troubleshooting.md](troubleshooting.md) — Common failure modes and remediation steps
 - [docs/PRD.md](PRD.md) — Full product requirements and roadmap
 - [CLAUDE.md](../CLAUDE.md) — Contributor workflow and issue discipline

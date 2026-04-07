@@ -66,10 +66,12 @@ A fully configured dev container is provided (`.devcontainer/`). It is based on 
 | Document | Description |
 |----------|-------------|
 | [docs/getting-started.md](docs/getting-started.md) | Install, configure, and run your first loop |
+| [docs/configuration.md](docs/configuration.md) | Every config field, CLI flag, default, and precedence rule |
+| [docs/providers.md](docs/providers.md) | Provider adapter invocation, environment requirements, and limitations |
 | [docs/orchestration.md](docs/orchestration.md) | Workflow branch selection, shippable signal protocol, PR lifecycle |
+| [docs/workspace-prerequisites.md](docs/workspace-prerequisites.md) | What the prerequisite checker validates and how to fix each diagnostic |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failure modes and remediation steps |
 | [docs/PRD.md](docs/PRD.md) | Full product requirements and roadmap |
-
-Additional reference docs (configuration, providers, workspace prerequisites, troubleshooting) are tracked in [#9](https://github.com/jamesbrayton/code-looper/issues/9).
 
 ## Contributing
 
