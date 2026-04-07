@@ -93,6 +93,26 @@ pub struct Cli {
     /// Path to the local promise markdown file (when --issue-tracking-mode=local).
     #[arg(long)]
     pub local_promise_path: Option<PathBuf>,
+
+    /// Stream provider stdout/stderr to the terminal in real time (default: on).
+    /// Use --no-stream-output to disable.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    pub stream_output: Option<bool>,
+
+    /// Root directory for per-run artifact directories (transcripts, manifest,
+    /// summary).  Defaults to `.code-looper/runs`.
+    #[arg(long)]
+    pub artifacts_dir: Option<PathBuf>,
+
+    /// Number of most-recent run directories to retain.  Older runs are pruned
+    /// after each new run.  Default: 10.
+    #[arg(long)]
+    pub keep_runs: Option<usize>,
+
+    /// Suppress writing the markdown summary and the condensed terminal summary
+    /// at the end of each run.  Useful for scripted / CI use.
+    #[arg(long)]
+    pub no_summary: bool,
 }
 
 impl Cli {
@@ -160,6 +180,18 @@ impl Cli {
         if let Some(path) = self.local_promise_path {
             base.issue_tracking.local_promise_path = Some(path);
         }
+        if let Some(s) = self.stream_output {
+            base.telemetry.stream_output = s;
+        }
+        if let Some(dir) = self.artifacts_dir {
+            base.telemetry.artifacts_dir = dir;
+        }
+        if let Some(n) = self.keep_runs {
+            base.telemetry.keep_runs = n;
+        }
+        if self.no_summary {
+            base.telemetry.no_summary = true;
+        }
         base
     }
 }
@@ -195,6 +227,10 @@ mod tests {
             issue_tracking_owner: None,
             issue_tracking_repo: None,
             local_promise_path: None,
+            stream_output: None,
+            artifacts_dir: None,
+            keep_runs: None,
+            no_summary: false,
         }
     }
 
@@ -356,5 +392,41 @@ mod tests {
         assert_eq!(config.issue_tracking.mode, IssueTrackingMode::Local);
         assert!(config.issue_tracking.repo_owner.is_none());
         assert!(config.issue_tracking.repo_name.is_none());
+    }
+
+    #[test]
+    fn cli_stream_output_false_propagates() {
+        let cli = Cli { stream_output: Some(false), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(!config.telemetry.stream_output);
+    }
+
+    #[test]
+    fn cli_artifacts_dir_propagates() {
+        let cli = Cli { artifacts_dir: Some("/tmp/runs".into()), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.telemetry.artifacts_dir, std::path::PathBuf::from("/tmp/runs"));
+    }
+
+    #[test]
+    fn cli_keep_runs_propagates() {
+        let cli = Cli { keep_runs: Some(5), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.telemetry.keep_runs, 5);
+    }
+
+    #[test]
+    fn cli_no_summary_propagates() {
+        let cli = Cli { no_summary: true, ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.telemetry.no_summary);
+    }
+
+    #[test]
+    fn cli_telemetry_defaults() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(config.telemetry.stream_output);
+        assert_eq!(config.telemetry.keep_runs, 10);
+        assert!(!config.telemetry.no_summary);
     }
 }

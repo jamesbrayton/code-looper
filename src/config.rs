@@ -59,6 +59,48 @@ impl Default for IssueTrackingConfig {
 
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
+// ── Telemetry ─────────────────────────────────────────────────────────────────
+
+/// Telemetry / artifact collection configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Stream provider stdout/stderr to the terminal in real time (tagged).
+    /// Default: `true`.
+    #[serde(default = "default_stream_output")]
+    pub stream_output: bool,
+    /// Root directory for per-run artifact directories.
+    /// Default: `.code-looper/runs`.
+    #[serde(default = "default_artifacts_dir")]
+    pub artifacts_dir: std::path::PathBuf,
+    /// Number of most-recent run directories to retain.
+    /// Older runs are pruned after each new run completes.
+    /// Default: 10.
+    #[serde(default = "default_keep_runs")]
+    pub keep_runs: usize,
+    /// When `true`, skip writing the markdown summary and printing the
+    /// condensed terminal summary.  Useful for scripted/CI use.
+    /// Default: `false`.
+    #[serde(default)]
+    pub no_summary: bool,
+}
+
+fn default_stream_output() -> bool { true }
+fn default_artifacts_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(".code-looper/runs")
+}
+fn default_keep_runs() -> usize { 10 }
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            stream_output: default_stream_output(),
+            artifacts_dir: default_artifacts_dir(),
+            keep_runs: default_keep_runs(),
+            no_summary: false,
+        }
+    }
+}
+
 /// Orchestration policy engine configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrchestrationConfig {
@@ -135,6 +177,9 @@ pub struct LoopConfig {
     /// Issue tracking configuration.
     #[serde(default)]
     pub issue_tracking: IssueTrackingConfig,
+    /// Telemetry / artifact collection configuration.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 fn default_retry_backoff_ms() -> u64 {
@@ -158,6 +203,7 @@ impl Default for LoopConfig {
             retry_backoff_ms: default_retry_backoff_ms(),
             on_complete: None,
             issue_tracking: IssueTrackingConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }

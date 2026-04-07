@@ -1,6 +1,7 @@
 use crate::config::Provider as ProviderKind;
 use crate::error::LooperError;
 use std::time::Duration;
+use tracing::trace;
 
 /// Outcome of a single provider execution.
 #[derive(Debug, Clone)]
@@ -38,17 +39,22 @@ pub trait ProviderAdapter: Send + Sync {
 // ── Adapter constructors ──────────────────────────────────────────────────────
 
 /// Build the concrete adapter for the given `ProviderKind`.
-pub fn build_adapter(kind: &ProviderKind) -> Box<dyn ProviderAdapter> {
+///
+/// When `stream_output` is `true`, each adapter will print tagged stdout/stderr
+/// lines to the terminal in real time as the provider runs.
+pub fn build_adapter(kind: &ProviderKind, stream_output: bool) -> Box<dyn ProviderAdapter> {
     match kind {
-        ProviderKind::Claude => Box::new(ClaudeAdapter),
-        ProviderKind::Copilot => Box::new(CopilotAdapter),
-        ProviderKind::Codex => Box::new(CodexAdapter),
+        ProviderKind::Claude => Box::new(ClaudeAdapter { stream_output }),
+        ProviderKind::Copilot => Box::new(CopilotAdapter { stream_output }),
+        ProviderKind::Codex => Box::new(CodexAdapter { stream_output }),
     }
 }
 
 // ── Claude Code CLI adapter ───────────────────────────────────────────────────
 
-pub struct ClaudeAdapter;
+pub struct ClaudeAdapter {
+    pub stream_output: bool,
+}
 
 impl ProviderAdapter for ClaudeAdapter {
     fn name(&self) -> &str {
@@ -56,13 +62,19 @@ impl ProviderAdapter for ClaudeAdapter {
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        run_provider_process("claude", &["-p", "--dangerously-skip-permissions", prompt])
+        run_provider_process(
+            "claude",
+            &["-p", "--dangerously-skip-permissions", prompt],
+            self.stream_output,
+        )
     }
 }
 
 // ── GitHub Copilot CLI adapter ────────────────────────────────────────────────
 
-pub struct CopilotAdapter;
+pub struct CopilotAdapter {
+    pub stream_output: bool,
+}
 
 impl ProviderAdapter for CopilotAdapter {
     fn name(&self) -> &str {
@@ -70,13 +82,19 @@ impl ProviderAdapter for CopilotAdapter {
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        run_provider_process("gh", &["copilot", "suggest", "-t", "shell", prompt])
+        run_provider_process(
+            "gh",
+            &["copilot", "suggest", "-t", "shell", prompt],
+            self.stream_output,
+        )
     }
 }
 
 // ── Codex CLI adapter ─────────────────────────────────────────────────────────
 
-pub struct CodexAdapter;
+pub struct CodexAdapter {
+    pub stream_output: bool,
+}
 
 impl ProviderAdapter for CodexAdapter {
     fn name(&self) -> &str {
@@ -84,33 +102,91 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        run_provider_process("codex", &[prompt])
+        run_provider_process("codex", &[prompt], self.stream_output)
     }
 }
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
 
-fn run_provider_process(binary: &str, args: &[&str]) -> Result<ExecutionResult, LooperError> {
-    use std::process::Command;
+/// Run a provider process, optionally streaming stdout/stderr to the terminal
+/// as tagged lines (`[stdout]` / `[stderr]`).
+fn run_provider_process(
+    binary: &str,
+    args: &[&str],
+    stream: bool,
+) -> Result<ExecutionResult, LooperError> {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
     use std::time::Instant;
 
     let start = Instant::now();
-    let output =
-        Command::new(binary)
+
+    if stream {
+        let mut child = Command::new(binary)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: e,
+            })?;
+
+        let stdout_pipe = child.stdout.take().expect("stdout piped");
+        let stderr_pipe = child.stderr.take().expect("stderr piped");
+
+        // Read stdout on a background thread so we don't deadlock on stderr.
+        let stdout_handle = std::thread::spawn(move || {
+            let reader = BufReader::new(stdout_pipe);
+            let mut captured = String::new();
+            for line in reader.lines().flatten() {
+                println!("[stdout] {}", line);
+                trace!(stream = "stdout", "{}", line);
+                captured.push_str(&line);
+                captured.push('\n');
+            }
+            captured
+        });
+
+        let mut stderr_captured = String::new();
+        let stderr_reader = BufReader::new(stderr_pipe);
+        for line in stderr_reader.lines().flatten() {
+            eprintln!("[stderr] {}", line);
+            trace!(stream = "stderr", "{}", line);
+            stderr_captured.push_str(&line);
+            stderr_captured.push('\n');
+        }
+
+        let stdout_captured = stdout_handle.join().unwrap_or_default();
+        let status = child.wait().map_err(|e| LooperError::ProviderSpawn {
+            binary: binary.to_string(),
+            source: e,
+        })?;
+        let duration = start.elapsed();
+
+        Ok(ExecutionResult {
+            exit_code: status.code(),
+            stdout: stdout_captured,
+            stderr: stderr_captured,
+            duration,
+        })
+    } else {
+        let output = Command::new(binary)
             .args(args)
             .output()
             .map_err(|e| LooperError::ProviderSpawn {
                 binary: binary.to_string(),
                 source: e,
             })?;
-    let duration = start.elapsed();
+        let duration = start.elapsed();
 
-    Ok(ExecutionResult {
-        exit_code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        duration,
-    })
+        Ok(ExecutionResult {
+            exit_code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            duration,
+        })
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -204,8 +280,8 @@ pub mod tests {
 
     #[test]
     fn build_adapter_returns_correct_names() {
-        assert_eq!(build_adapter(&ProviderKind::Claude).name(), "claude");
-        assert_eq!(build_adapter(&ProviderKind::Copilot).name(), "copilot");
-        assert_eq!(build_adapter(&ProviderKind::Codex).name(), "codex");
+        assert_eq!(build_adapter(&ProviderKind::Claude, false).name(), "claude");
+        assert_eq!(build_adapter(&ProviderKind::Copilot, false).name(), "copilot");
+        assert_eq!(build_adapter(&ProviderKind::Codex, false).name(), "codex");
     }
 }

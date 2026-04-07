@@ -3,6 +3,9 @@ use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker
 use crate::orchestration::{GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
 use crate::provider::{build_adapter, ProviderAdapter};
+use crate::telemetry::{
+    IterationOutcome, IterationRecord, RunArtifacts, RunManifest, unix_now,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -112,7 +115,7 @@ pub struct LoopEngine {
 
 impl LoopEngine {
     pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
-        let adapter = build_adapter(&config.provider);
+        let adapter = build_adapter(&config.provider, config.telemetry.stream_output);
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
             let repo = config.orchestration.repo_name.clone().unwrap_or_default();
@@ -195,8 +198,26 @@ impl LoopEngine {
             self.config.iterations as u64
         };
 
+        let prompt_source = if self.config.prompt_file.is_some() {
+            "file"
+        } else if self.config.prompt_inline.is_some() {
+            "inline"
+        } else {
+            "none"
+        };
+
         let mut summary = SessionSummary::default();
+        let run_started_at = unix_now();
         let session_start = Instant::now();
+
+        // Set up run artifact directory.
+        let artifacts = RunArtifacts::create(
+            &self.config.telemetry.artifacts_dir,
+            // Only persist artifacts when not in no_summary mode.  The
+            // directory is always created when telemetry is on by default.
+            !self.config.telemetry.no_summary,
+        );
+        let mut iteration_records: Vec<IterationRecord> = Vec::new();
 
         // Log issue tracking mode; warn loudly when running in local/dev mode.
         match self.config.issue_tracking.mode {
@@ -232,18 +253,13 @@ impl LoopEngine {
 
         info!(
             provider = self.adapter.name(),
+            run_id = %artifacts.run_id,
             iterations = if infinite {
                 "infinite".to_string()
             } else {
                 max.to_string()
             },
-            prompt_source = if self.config.prompt_file.is_some() {
-                "file"
-            } else if self.config.prompt_inline.is_some() {
-                "inline"
-            } else {
-                "none"
-            },
+            prompt_source,
             "Loop starting"
         );
 
@@ -253,22 +269,40 @@ impl LoopEngine {
                 break;
             }
 
+            let iter_started_at = unix_now();
             let iter_start = Instant::now();
 
             // If orchestration is enabled, select a workflow branch and use its prompt.
-            let raw_prompt = if let Some(ref engine) = self.policy_engine {
+            let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {
                 match engine.select_branch() {
                     Ok((branch, _ctx)) => {
+                        let branch_name = branch.to_string();
                         info!(
                             iteration = i,
                             provider = self.adapter.name(),
-                            workflow_branch = %branch,
+                            workflow_branch = %branch_name,
                             "Iteration start"
                         );
-                        branch.default_prompt().to_string()
+                        let p = branch.default_prompt().to_string();
+                        (p, Some(branch_name))
                     }
                     Err(e) => {
                         error!(iteration = i, "Policy engine failed: {e}");
+                        let outcome = IterationOutcome::PolicyGuardBlock {
+                            message: e.to_string(),
+                        };
+                        iteration_records.push(IterationRecord {
+                            iteration: i,
+                            provider: self.adapter.name().to_string(),
+                            prompt_source: prompt_source.to_string(),
+                            workflow_branch: None,
+                            outcome: outcome.clone(),
+                            duration_ms: iter_start.elapsed().as_millis(),
+                            retries: 0,
+                            stderr_excerpt: Some(e.to_string()),
+                            transcript_path: None,
+                            started_at: iter_started_at,
+                        });
                         summary.iterations_run += 1;
                         summary.failures += 1;
                         summary.termination_reason =
@@ -282,7 +316,7 @@ impl LoopEngine {
                     provider = self.adapter.name(),
                     "Iteration start"
                 );
-                prompt.clone()
+                (prompt.clone(), None)
             };
 
             // Augment prompt with MCP-use preamble (no-op when allow_direct_github is set).
@@ -290,15 +324,23 @@ impl LoopEngine {
 
             // Execute with retry/backoff.
             let mut attempt = 0u32;
-            let mut iteration_succeeded = false;
+            #[allow(unused_assignments)]
+            let mut final_outcome = IterationOutcome::Unknown;
+            let mut final_stdout = String::new();
+            let mut final_stderr = String::new();
+            let mut final_duration_ms = 0u128;
             let mut abort_loop = false;
 
             loop {
                 match self.adapter.execute(&effective_prompt) {
                     Ok(result) => {
                         let duration_ms = result.duration.as_millis();
+                        final_duration_ms = duration_ms;
+                        final_stdout = result.stdout.clone();
+                        final_stderr = result.stderr.clone();
 
                         if result.succeeded() {
+                            final_outcome = IterationOutcome::Success;
                             if attempt > 0 {
                                 info!(
                                     iteration = i,
@@ -318,7 +360,6 @@ impl LoopEngine {
                                     "Iteration succeeded"
                                 );
                             }
-                            iteration_succeeded = true;
                             break;
                         } else if attempt < self.config.max_retries {
                             summary.retries += 1;
@@ -336,6 +377,9 @@ impl LoopEngine {
                             ));
                             attempt += 1;
                         } else {
+                            final_outcome = IterationOutcome::from_exit_code(result.exit_code);
+                            let first_err =
+                                IterationRecord::stderr_first_line(&result.stderr);
                             warn!(
                                 iteration = i,
                                 provider = self.adapter.name(),
@@ -344,25 +388,56 @@ impl LoopEngine {
                                 stderr = %result.stderr.trim(),
                                 "Iteration failed (non-zero exit)"
                             );
+                            if let Some(ref excerpt) = first_err {
+                                warn!(iteration = i, stderr_first_line = %excerpt, "");
+                            }
                             break;
                         }
                     }
                     Err(crate::error::LooperError::ProviderSpawn { binary, source }) => {
                         let msg = format!("failed to spawn '{binary}': {source}");
                         error!(iteration = i, provider = self.adapter.name(), "{msg}");
+                        final_outcome =
+                            IterationOutcome::SpawnFailure { message: msg.clone() };
                         summary.termination_reason = Some(TerminationReason::ProviderError(msg));
                         abort_loop = true;
                         break;
                     }
                     Err(e) => {
                         error!(iteration = i, provider = self.adapter.name(), error = %e, "Iteration error");
+                        final_outcome = IterationOutcome::Unknown;
                         break;
                     }
                 }
             }
 
+            // Persist iteration transcript and build the record.
+            let transcript_path = artifacts.write_transcript(i, &final_stdout, &final_stderr);
+            let stderr_excerpt = IterationRecord::stderr_first_line(&final_stderr);
+
+            info!(
+                iteration = i,
+                outcome = final_outcome.label(),
+                duration_ms = final_duration_ms,
+                retries = attempt,
+                "Iteration complete"
+            );
+
+            iteration_records.push(IterationRecord {
+                iteration: i,
+                provider: self.adapter.name().to_string(),
+                prompt_source: prompt_source.to_string(),
+                workflow_branch: workflow_branch.clone(),
+                outcome: final_outcome.clone(),
+                duration_ms: final_duration_ms,
+                retries: attempt,
+                stderr_excerpt,
+                transcript_path,
+                started_at: iter_started_at,
+            });
+
             summary.iterations_run += 1;
-            if iteration_succeeded {
+            if final_outcome.is_success() {
                 summary.successes += 1;
             } else {
                 summary.failures += 1;
@@ -372,13 +447,11 @@ impl LoopEngine {
                 break;
             }
 
-            if !iteration_succeeded && self.config.stop_on_failure {
+            if !final_outcome.is_success() && self.config.stop_on_failure {
                 info!(iteration = i, "stop_on_failure is set; halting loop after failed iteration");
                 summary.termination_reason = Some(TerminationReason::StoppedOnFailure);
                 break;
             }
-
-            let _ = iter_start; // elapsed captured inside result.duration
         }
 
         if summary.termination_reason.is_none() {
@@ -390,6 +463,8 @@ impl LoopEngine {
         }
 
         let total_ms = session_start.elapsed().as_millis();
+        let run_ended_at = unix_now();
+
         info!(
             total_duration_ms = total_ms,
             termination_reason = %summary.termination_reason.as_ref().unwrap(),
@@ -397,6 +472,32 @@ impl LoopEngine {
         );
 
         summary.print();
+
+        // Write run manifest and summary.
+        let manifest = RunManifest {
+            run_id: artifacts.run_id.clone(),
+            started_at: run_started_at,
+            ended_at: Some(run_ended_at),
+            provider: self.adapter.name().to_string(),
+            iterations_requested: self.config.iterations,
+            termination_reason: summary
+                .termination_reason
+                .as_ref()
+                .map(|r| r.to_string()),
+            iterations: iteration_records,
+        };
+        artifacts.write_manifest(&manifest);
+        if let Some(summary_path) =
+            artifacts.write_summary(&manifest, self.config.telemetry.no_summary)
+        {
+            info!(path = %summary_path.display(), "Run summary written");
+        }
+
+        // Prune old run directories.
+        RunArtifacts::prune_old_runs(
+            &self.config.telemetry.artifacts_dir,
+            self.config.telemetry.keep_runs,
+        );
 
         // Run completion hook if configured.
         if let Some(cmd) = &self.config.on_complete {

@@ -6,6 +6,7 @@ mod loop_engine;
 mod orchestration;
 mod policy_guard;
 mod provider;
+mod telemetry;
 mod workspace;
 
 use anyhow::Context;
