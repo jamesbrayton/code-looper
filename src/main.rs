@@ -1,3 +1,4 @@
+mod branch;
 mod cli;
 mod config;
 mod error;

@@ -151,6 +151,10 @@ pub struct PrManagementConfig {
     /// gate.  Default: `true`.
     #[serde(default = "default_require_human_review")]
     pub require_human_review: bool,
+    /// When `true` the loop is allowed to force-push feature branches using
+    /// `--force-with-lease`.  Default: `false` (safe default).
+    #[serde(default)]
+    pub allow_force_push: bool,
 }
 
 impl Default for PrManagementConfig {
@@ -160,6 +164,7 @@ impl Default for PrManagementConfig {
             base_branch: default_base_branch(),
             branch_prefix: default_branch_prefix(),
             require_human_review: default_require_human_review(),
+            allow_force_push: false,
         }
     }
 }
