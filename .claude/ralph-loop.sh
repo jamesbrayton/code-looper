@@ -13,7 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ITERATIONS="${1:-5}"
-MODEL="${2:-opus}"
+MODEL="${2:-sonnet}"
 PRD_PATH="${REPO_ROOT}/docs/PRD.md"
 LOG_DIR="${REPO_ROOT}/.claude/ralph-loop-logs"
 

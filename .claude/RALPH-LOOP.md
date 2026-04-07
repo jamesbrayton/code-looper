@@ -14,7 +14,7 @@ Each iteration is an independent Claude session that examines the current repo s
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `iterations` | `5` | Number of loop iterations to run |
-| `model` | `opus` | Claude model to use (`opus`, `sonnet`, `haiku`, or a full model ID) |
+| `model` | `sonnet` | Claude model to use (`opus`, `sonnet`, `haiku`, or a full model ID) |
 
 ### Examples
 
