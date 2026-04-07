@@ -87,6 +87,13 @@ pub trait IssueTracker: Send + Sync {
     /// cross-reference comment on the issue.
     fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32)
         -> Result<(), IssueTrackerError>;
+    /// Ensure that the given labels exist on the repository, creating any that
+    /// are absent.  This is a no-op for backends that do not support label
+    /// management (e.g. `LocalPromiseTracker`).
+    fn ensure_labels(&self, labels: &[String]) -> Result<(), IssueTrackerError> {
+        let _ = labels;
+        Ok(())
+    }
 }
 
 // ── GitHub CLI implementation ─────────────────────────────────────────────────
@@ -359,6 +366,27 @@ impl IssueTracker for GitHubIssueTracker {
         let body = format!("Linked to pull request #{pr_number}.");
         self.add_comment(issue_number, &body)
     }
+
+    fn ensure_labels(&self, labels: &[String]) -> Result<(), IssueTrackerError> {
+        let slug = self.repo_slug();
+        for label in labels {
+            // `gh label create --force` is idempotent — it creates the label
+            // if absent and updates it if present (no error on conflict).
+            let args = vec![
+                "label".to_string(),
+                "create".to_string(),
+                label.clone(),
+                "--repo".to_string(),
+                slug.clone(),
+                "--force".to_string(),
+            ];
+            let output = self.run_gh(&args)?;
+            // Label create may exit non-zero on an already-existing label with
+            // some older gh versions; treat that as success.
+            let _ = output;
+        }
+        Ok(())
+    }
 }
 
 // ── LocalPromiseTracker ───────────────────────────────────────────────────────
@@ -553,6 +581,7 @@ pub enum MockCall {
     CloseIssue(u32),
     ReopenIssue(u32),
     LinkIssueToPr { issue_number: u32, pr_number: u32 },
+    EnsureLabels(Vec<String>),
 }
 
 impl MockIssueTracker {
@@ -697,6 +726,17 @@ impl IssueTracker for MockIssueTracker {
         }
         Ok(())
     }
+
+    fn ensure_labels(&self, labels: &[String]) -> Result<(), IssueTrackerError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MockCall::EnsureLabels(labels.to_vec()));
+        if let Some(e) = self.check_force_error() {
+            return Err(e);
+        }
+        Ok(())
+    }
 }
 
 // ── SharedMockIssueTracker ────────────────────────────────────────────────────
@@ -734,6 +774,9 @@ impl IssueTracker for SharedMockIssueTracker {
     }
     fn link_issue_to_pr(&self, issue: u32, pr: u32) -> Result<(), IssueTrackerError> {
         self.0.link_issue_to_pr(issue, pr)
+    }
+    fn ensure_labels(&self, labels: &[String]) -> Result<(), IssueTrackerError> {
+        self.0.ensure_labels(labels)
     }
 }
 
@@ -1080,5 +1123,37 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "fix login bug");
+    }
+
+    // ── ensure_labels tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn mock_records_ensure_labels_call() {
+        let tracker = MockIssueTracker::new();
+        let labels =
+            vec!["bug".to_string(), "discovered-during-loop".to_string()];
+        tracker.ensure_labels(&labels).unwrap();
+        let calls = tracker.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(&calls[0], MockCall::EnsureLabels(l) if l == &labels));
+    }
+
+    #[test]
+    fn local_tracker_ensure_labels_is_noop() {
+        // LocalPromiseTracker uses the default no-op implementation.
+        let tracker = temp_tracker();
+        let labels = vec!["bug".to_string(), "tech-debt".to_string()];
+        // Should succeed without doing anything.
+        tracker.ensure_labels(&labels).unwrap();
+    }
+
+    #[test]
+    fn mock_ensure_labels_propagates_force_error() {
+        let mut tracker = MockIssueTracker::new();
+        tracker.force_error =
+            Some(IssueTrackerError::Transport("network error".to_string()));
+        let labels = vec!["bug".to_string()];
+        let err = tracker.ensure_labels(&labels).unwrap_err();
+        assert!(matches!(err, IssueTrackerError::Transport(_)));
     }
 }

@@ -281,6 +281,15 @@ impl LoopEngine {
                     repo = %format!("{owner}/{repo}"),
                     "Issue tracking active"
                 );
+                // Ensure standard labels exist on the repository.
+                let labels = self.config.issue_tracking.standard_labels.clone();
+                if !labels.is_empty() {
+                    if let Err(e) = self.tracker.ensure_labels(&labels) {
+                        warn!(error = %e, "Failed to ensure standard labels on repository");
+                    } else {
+                        info!(labels = ?labels, "Standard labels ensured on repository");
+                    }
+                }
             }
         }
 
@@ -588,6 +597,57 @@ impl LoopEngine {
         );
 
         summary.print();
+
+        // End-of-run owned-issue lifecycle verification.
+        // When a linked issue is configured and we're in GitHub mode, check
+        // whether the issue is still open.  If the run succeeded and all work
+        // appears done, warn (or close, when auto_close_owned_issues=true).
+        if self.config.issue_tracking.mode == IssueTrackingMode::Github {
+            if let Some(issue_number) = self.config.issue_tracking.comment_issue_number {
+                match self.tracker.get_issue(issue_number) {
+                    Ok(issue) if issue.state == crate::issue_tracker::IssueState::Open => {
+                        if self.config.issue_tracking.auto_close_owned_issues {
+                            info!(
+                                issue = issue_number,
+                                "auto_close_owned_issues: closing issue at end of run"
+                            );
+                            let close_comment = format!(
+                                "Loop run `{run_id}` completed — closing issue automatically \
+                                 (`auto_close_owned_issues=true`).",
+                                run_id = artifacts.run_id
+                            );
+                            let _ = self.tracker.add_comment(issue_number, &close_comment);
+                            if let Err(e) = self.tracker.close_issue(
+                                issue_number,
+                                crate::issue_tracker::CloseReason::Completed,
+                            ) {
+                                warn!(
+                                    issue = issue_number,
+                                    error = %e,
+                                    "auto_close_owned_issues: failed to close issue"
+                                );
+                            }
+                        } else {
+                            warn!(
+                                issue = issue_number,
+                                "Owned issue is still open at end of run. \
+                                 Set auto_close_owned_issues=true to close automatically."
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        info!(issue = issue_number, "Owned issue is closed — lifecycle complete");
+                    }
+                    Err(e) => {
+                        warn!(
+                            issue = issue_number,
+                            error = %e,
+                            "Could not verify owned issue state at end of run"
+                        );
+                    }
+                }
+            }
+        }
 
         // Post run-end comment.
         if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
@@ -1021,7 +1081,7 @@ mod tests {
                 repo_name: Some("repo".to_string()),
                 comment_issue_number: Some(issue),
                 comment_cadence: cadence,
-                local_promise_path: None,
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -1148,6 +1208,142 @@ mod tests {
         );
     }
 
+    // ── Label-ensure and ownership verification tests ────────────────────────
+
+    #[test]
+    fn github_mode_calls_ensure_labels_at_startup() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("o".to_string()),
+                repo_name: Some("r".to_string()),
+                comment_issue_number: None,
+                comment_cadence: CommentCadence::OffEngine,
+                standard_labels: vec!["bug".to_string(), "tech-debt".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        assert!(
+            calls.iter().any(|c| matches!(c, MockCall::EnsureLabels(l) if l.contains(&"bug".to_string()))),
+            "expected EnsureLabels call; got: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn local_mode_does_not_call_ensure_labels() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Local,
+                comment_cadence: CommentCadence::OffEngine,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        assert!(
+            !calls.iter().any(|c| matches!(c, MockCall::EnsureLabels(_))),
+            "local mode should not call ensure_labels; got: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn auto_close_owned_issues_closes_open_issue_at_end_of_run() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        // Default mock returns an open issue for get_issue.
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("o".to_string()),
+                repo_name: Some("r".to_string()),
+                comment_issue_number: Some(42),
+                comment_cadence: CommentCadence::OffEngine,
+                auto_close_owned_issues: true,
+                standard_labels: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        assert!(
+            calls.iter().any(|c| matches!(c, MockCall::CloseIssue(42))),
+            "auto_close_owned_issues should close issue 42; calls: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn owned_issue_already_closed_does_not_close_again() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        // Override next_issue to return a closed issue.
+        *tracker.next_issue.lock().unwrap() = Some(crate::issue_tracker::Issue {
+            id: 1,
+            number: 42,
+            title: "already done".to_string(),
+            body: "".to_string(),
+            state: crate::issue_tracker::IssueState::Closed,
+            labels: vec![],
+            assignees: vec![],
+            url: "https://example.com/42".to_string(),
+        });
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("o".to_string()),
+                repo_name: Some("r".to_string()),
+                comment_issue_number: Some(42),
+                comment_cadence: CommentCadence::OffEngine,
+                auto_close_owned_issues: true,
+                standard_labels: vec![],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        assert!(
+            !calls.iter().any(|c| matches!(c, MockCall::CloseIssue(_))),
+            "already-closed issue should not be closed again; calls: {calls:?}"
+        );
+    }
+
     #[test]
     fn stop_on_failure_posts_blocker_comment() {
         let tracker = Arc::new(MockIssueTracker::new());
@@ -1162,7 +1358,7 @@ mod tests {
                 repo_name: Some("r".to_string()),
                 comment_issue_number: Some(3),
                 comment_cadence: CommentCadence::Milestones,
-                local_promise_path: None,
+                ..Default::default()
             },
             ..Default::default()
         };

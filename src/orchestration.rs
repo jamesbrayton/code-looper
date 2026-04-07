@@ -41,13 +41,23 @@ impl WorkflowBranch {
             WorkflowBranch::IssueExecution => {
                 "Work on open GitHub issues in this repository. Pick the highest-priority \
                  unassigned issue, understand the requirements, implement the changes, \
-                 and update the issue via MCP GitHub tools when done."
+                 and update the issue via MCP GitHub tools when done. \
+                 \n\n**Issue lifecycle rules:**\
+                 \n- Comment at meaningful milestones (plan finalised, first pass done, \
+                 tests added, blocker found).\
+                 \n- If you discover work that is out of scope for the current issue, create \
+                 a new GitHub issue (via MCP) with a clear title, body, and one of the \
+                 standard labels: `bug`, `enhancement`, `tech-debt`, or \
+                 `discovered-during-loop`. Post a cross-reference comment on both issues.\
+                 \n- When the issue checklist is fully checked and changes are committed, \
+                 close the issue with a short summary comment explaining what was done."
             }
             WorkflowBranch::BacklogDiscovery => {
                 "Explore the repository codebase and identify areas for improvement: \
                  missing tests, documentation gaps, refactoring opportunities, or potential \
                  new features. Create GitHub issues for the most impactful opportunities \
-                 using the MCP GitHub tools."
+                 using the MCP GitHub tools. Use one of the standard labels for each new \
+                 issue: `bug`, `enhancement`, `tech-debt`, or `discovered-during-loop`."
             }
         }
     }

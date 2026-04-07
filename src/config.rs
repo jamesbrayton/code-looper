@@ -74,10 +74,29 @@ pub struct IssueTrackingConfig {
     /// How often the engine posts comments to the linked issue.
     #[serde(default)]
     pub comment_cadence: CommentCadence,
+    /// When `true` the engine closes the owned issue at end-of-run if the
+    /// agent left it open after completing all checklist items.  When `false`
+    /// (default) the engine only logs a warning.
+    #[serde(default)]
+    pub auto_close_owned_issues: bool,
+    /// Labels the engine ensures exist on the GitHub repository before the
+    /// first iteration.  Only applied when `mode = "github"`.
+    /// Default: `["bug", "enhancement", "tech-debt", "discovered-during-loop"]`.
+    #[serde(default = "default_standard_labels")]
+    pub standard_labels: Vec<String>,
 }
 
 fn default_issue_tracking_mode() -> IssueTrackingMode {
     IssueTrackingMode::Local
+}
+
+fn default_standard_labels() -> Vec<String> {
+    vec![
+        "bug".to_string(),
+        "enhancement".to_string(),
+        "tech-debt".to_string(),
+        "discovered-during-loop".to_string(),
+    ]
 }
 
 impl Default for IssueTrackingConfig {
@@ -89,6 +108,8 @@ impl Default for IssueTrackingConfig {
             local_promise_path: None,
             comment_issue_number: None,
             comment_cadence: CommentCadence::default(),
+            auto_close_owned_issues: false,
+            standard_labels: default_standard_labels(),
         }
     }
 }
@@ -806,6 +827,44 @@ local_promise_path = ".code-looper/dev.md"
             };
             assert!(config.validate().is_ok());
         }
+    }
+
+    #[test]
+    fn issue_tracking_defaults_include_standard_labels() {
+        let config = LoopConfig::default();
+        assert!(!config.issue_tracking.standard_labels.is_empty());
+        assert!(config.issue_tracking.standard_labels.contains(&"bug".to_string()));
+        assert!(
+            config.issue_tracking.standard_labels.contains(&"discovered-during-loop".to_string())
+        );
+        assert!(!config.issue_tracking.auto_close_owned_issues);
+    }
+
+    #[test]
+    fn parse_toml_with_auto_close_and_custom_labels() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[issue_tracking]
+mode = "github"
+repo_owner = "acme"
+repo_name = "my-repo"
+auto_close_owned_issues = true
+standard_labels = ["bug", "wip", "my-team"]
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert!(config.issue_tracking.auto_close_owned_issues);
+        assert_eq!(
+            config.issue_tracking.standard_labels,
+            vec!["bug".to_string(), "wip".to_string(), "my-team".to_string()]
+        );
     }
 
     #[test]
