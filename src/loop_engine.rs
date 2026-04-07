@@ -148,6 +148,7 @@ impl LoopEngine {
             config.telemetry.stream_output,
             config.workspace_dir.clone(),
             config.iteration_timeout_secs,
+            config.provider_extra_args.clone(),
         );
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();

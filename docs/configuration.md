@@ -54,6 +54,7 @@ log_level: info
 | `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
 | `retry_backoff_multiplier` | `--retry-backoff-multiplier` | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
 | `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`) |
+| `provider_extra_args` | `--provider-extra-arg` (repeatable) | list of strings | `[]` | Extra arguments appended to the provider CLI invocation, after the adapter's hardcoded flags and before the prompt. Each element is a separate arg (no shell expansion). |
 
 ### Prompt validation
 
@@ -261,6 +262,7 @@ max_retries = 2
 retry_backoff_ms = 500
 retry_backoff_multiplier = 2.0
 on_complete = "echo 'Loop finished' | tee -a loop.log"
+provider_extra_args = ["--model", "claude-opus-4-5"]
 
 [orchestration]
 enabled = true

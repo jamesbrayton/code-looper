@@ -215,6 +215,15 @@ pub struct Cli {
     /// Pass `--no-require-human-review` to allow automated merges.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub require_human_review: Option<bool>,
+
+    /// Extra argument to append to the provider CLI invocation.
+    /// Can be repeated to supply multiple arguments.
+    /// Arguments are inserted after the adapter's hardcoded flags but before
+    /// the prompt, so they are treated as option flags by the provider CLI.
+    ///
+    /// Example: `--provider-extra-arg --model --provider-extra-arg claude-opus-4-5`
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub provider_extra_arg: Vec<String>,
 }
 
 impl Cli {
@@ -323,6 +332,9 @@ impl Cli {
         if let Some(review) = self.require_human_review {
             base.pr_management.require_human_review = review;
         }
+        if !self.provider_extra_arg.is_empty() {
+            base.provider_extra_args = self.provider_extra_arg;
+        }
         base
     }
 }
@@ -372,6 +384,7 @@ mod tests {
             base_branch: None,
             branch_prefix: None,
             require_human_review: None,
+            provider_extra_arg: vec![],
         }
     }
 
@@ -717,5 +730,32 @@ mod tests {
     fn cli_auto_close_owned_issues_default_false() {
         let config = blank_cli().apply_overrides(default_config());
         assert!(!config.issue_tracking.auto_close_owned_issues);
+    }
+
+    // ── provider_extra_arg ────────────────────────────────────────────────────
+
+    #[test]
+    fn cli_provider_extra_arg_propagates() {
+        let cli = Cli {
+            provider_extra_arg: vec!["--model".to_string(), "claude-opus-4-5".to_string()],
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.provider_extra_args, ["--model", "claude-opus-4-5"]);
+    }
+
+    #[test]
+    fn cli_provider_extra_arg_empty_does_not_override_base() {
+        let mut base = default_config();
+        base.provider_extra_args = vec!["--from-config".to_string()];
+        let config = blank_cli().apply_overrides(base);
+        // Empty CLI vec should NOT overwrite config-file-provided args.
+        assert_eq!(config.provider_extra_args, ["--from-config"]);
+    }
+
+    #[test]
+    fn cli_provider_extra_arg_default_empty() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(config.provider_extra_args.is_empty());
     }
 }

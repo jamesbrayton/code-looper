@@ -219,6 +219,7 @@ impl ServiceMode {
                     false,
                     self.config.workspace_dir.clone(),
                     self.config.iteration_timeout_secs,
+                    self.config.provider_extra_args.clone(),
                 );
                 state.run_count += 1;
 

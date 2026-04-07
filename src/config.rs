@@ -506,6 +506,18 @@ pub struct LoopConfig {
     /// supply a `prompt_override` to use a different prompt for that repo.
     #[serde(default)]
     pub multi_repo: Vec<RepoTarget>,
+    /// Extra CLI arguments appended to the provider invocation, after the
+    /// adapter's hardcoded flags but before the prompt.
+    ///
+    /// Example (TOML):
+    /// ```toml
+    /// provider_extra_args = ["--model", "claude-opus-4-5"]
+    /// ```
+    ///
+    /// Each element becomes a separate argument (`Command::arg`), so shell
+    /// metacharacters are not interpreted.
+    #[serde(default)]
+    pub provider_extra_args: Vec<String>,
 }
 
 fn default_retry_backoff_ms() -> u64 {
@@ -538,6 +550,7 @@ impl Default for LoopConfig {
             pr_management: PrManagementConfig::default(),
             telemetry: TelemetryConfig::default(),
             multi_repo: Vec::new(),
+            provider_extra_args: Vec::new(),
         }
     }
 }
@@ -1509,5 +1522,43 @@ prompt_override = "Run linting only"
         assert!(config.orchestration.enabled);
         assert_eq!(config.orchestration.repo_owner.as_deref(), Some("acme"));
         assert_eq!(config.orchestration.repo_name.as_deref(), Some("my-repo"));
+    }
+
+    // ── provider_extra_args ───────────────────────────────────────────────────
+
+    #[test]
+    fn default_provider_extra_args_is_empty() {
+        let config = LoopConfig::default();
+        assert!(config.provider_extra_args.is_empty());
+    }
+
+    #[test]
+    fn parse_toml_provider_extra_args() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+provider_extra_args = ["--model", "claude-opus-4-5"]
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.provider_extra_args, ["--model", "claude-opus-4-5"]);
+    }
+
+    #[test]
+    fn parse_yaml_provider_extra_args() {
+        let file = write_temp_file(
+            ".yaml",
+            "provider: codex\niterations: 1\nlog_level: info\nprovider_extra_args:\n  - --approval-mode\n  - full-auto\n",
+        );
+        let config = LoopConfig::from_yaml_file(file.path()).unwrap();
+        assert_eq!(
+            config.provider_extra_args,
+            ["--approval-mode", "full-auto"]
+        );
     }
 }
