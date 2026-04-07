@@ -154,7 +154,7 @@ Controls feature branch and pull-request lifecycle.
 | `pr_management.require_human_review` | `--require-human-review` / `--no-require-human-review` | bool | `true` | When true, the loop never merges a PR itself |
 | `pr_management.allow_force_push` | — | bool | `false` | Allow force-push with `--force-with-lease` on feature branches |
 | `pr_management.ready_marker` | — | string | — | Sentinel string in agent output that triggers PR creation |
-| `pr_management.triage_priority` | — | `oldest`\|`newest`\|`least-conflicts` | `oldest` | PR ordering for `multi-pr` triage |
+| `pr_management.triage_priority` | — | `oldest`\|`newest`\|`least-conflicts` | `oldest` | PR ordering for `multi-pr` triage; `least-conflicts` prioritises MERGEABLE PRs |
 | `pr_management.skip_labels` | — | string array | `["do-not-loop","wip"]` | Labels that cause a PR to be skipped during `multi-pr` triage |
 
 ### PR mode values

@@ -563,6 +563,9 @@ pub struct PrWithState {
     pub state: PrTriageState,
     /// ISO-8601 creation timestamp (used for `oldest`/`newest` ordering).
     pub created_at: String,
+    /// GitHub merge-ability state: `"MERGEABLE"`, `"CONFLICTING"`, or `"UNKNOWN"`.
+    /// `None` when the field was not returned by the API (older `gh` versions).
+    pub mergeable: Option<String>,
 }
 
 /// Outcome of a `PrTriage::select_action` call.
@@ -660,7 +663,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
                 "view",
                 &pr_ref,
                 "--json",
-                "number,url,title,headRefName,labels,statusCheckRollup,reviewDecision,createdAt",
+                "number,url,title,headRefName,labels,statusCheckRollup,reviewDecision,createdAt,mergeable",
             ])
             .output()
             .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
@@ -679,6 +682,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
         let title = v["title"].as_str().unwrap_or("").to_string();
         let head_ref = v["headRefName"].as_str().unwrap_or("").to_string();
         let created_at = v["createdAt"].as_str().unwrap_or("").to_string();
+        let mergeable = v["mergeable"].as_str().map(|s| s.to_string());
 
         let pr = PrInfo {
             number,
@@ -698,6 +702,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
                                 reason: name.to_string(),
                             },
                             created_at,
+                            mergeable: mergeable.clone(),
                         });
                     }
                 }
@@ -722,6 +727,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
                 pr,
                 state: PrTriageState::ChecksFailing,
                 created_at,
+                mergeable,
             });
         }
 
@@ -738,6 +744,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
             pr,
             state,
             created_at,
+            mergeable,
         })
     }
 }
@@ -770,10 +777,19 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
             }
         };
 
-        // Apply triage priority ordering.
+        // Apply triage priority ordering for Oldest/Newest (list already comes
+        // from gh in ascending creation order).
         match self.config.triage_priority {
             TriagePriority::Newest => prs.reverse(),
-            TriagePriority::Oldest | TriagePriority::LeastConflicts => {}
+            TriagePriority::Oldest => {}
+            // LeastConflicts requires state for all PRs; handled below.
+            TriagePriority::LeastConflicts => {}
+        }
+
+        // For LeastConflicts mode, fetch all states upfront so we can sort by
+        // merge-ability before iterating.
+        if self.config.triage_priority == TriagePriority::LeastConflicts {
+            return self.select_action_least_conflicts(prs);
         }
 
         for pr_info in prs {
@@ -792,52 +808,102 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
                 }
             };
 
-            match with_state.state {
-                PrTriageState::Skipped { ref reason } => {
-                    tracing::debug!(pr = pr_info.number, %reason, "PrTriage: skipping PR");
-                    continue;
-                }
-                PrTriageState::ChecksFailing => {
-                    let prompt = format!(
-                        "The CI checks on PR #{} («{}») are failing. Check out the branch, \
-                         diagnose the root cause, fix it, commit, and push. Do not merge — \
-                         the loop engine will handle the merge when checks pass.",
-                        with_state.pr.number, with_state.pr.title
-                    );
-                    return TriageAction::FixChecks {
-                        pr: with_state.pr,
-                        prompt,
-                    };
-                }
-                PrTriageState::ChangesRequested => {
-                    let prompt = format!(
-                        "PR #{} («{}») has review comments requesting changes. Read each \
-                         review comment, address the feedback, commit the fixes, and push. \
-                         After pushing, reply to each resolved comment thread.",
-                        with_state.pr.number, with_state.pr.title
-                    );
-                    return TriageAction::AddressReviewFeedback {
-                        pr: with_state.pr,
-                        prompt,
-                    };
-                }
-                PrTriageState::ReadyToMerge => {
-                    if self.config.require_human_review {
-                        tracing::info!(
-                            pr = with_state.pr.number,
-                            "PrTriage: PR ready to merge but require_human_review=true"
-                        );
-                        return TriageAction::BlockedOnHumanReview { pr: with_state.pr };
-                    }
-                    return TriageAction::Merge { pr: with_state.pr };
-                }
-                PrTriageState::NeedsReview => {
-                    tracing::debug!(
+            if let Some(action) = self.evaluate_pr_state(with_state) {
+                return action;
+            }
+        }
+
+        TriageAction::NoActionablePr
+    }
+
+    /// Evaluate a single `PrWithState` and return the triage action, or `None`
+    /// to continue to the next PR.
+    fn evaluate_pr_state(&self, with_state: PrWithState) -> Option<TriageAction> {
+        match with_state.state {
+            PrTriageState::Skipped { ref reason } => {
+                tracing::debug!(pr = with_state.pr.number, %reason, "PrTriage: skipping PR");
+                None
+            }
+            PrTriageState::ChecksFailing => {
+                let prompt = format!(
+                    "The CI checks on PR #{} («{}») are failing. Check out the branch, \
+                     diagnose the root cause, fix it, commit, and push. Do not merge — \
+                     the loop engine will handle the merge when checks pass.",
+                    with_state.pr.number, with_state.pr.title
+                );
+                Some(TriageAction::FixChecks {
+                    pr: with_state.pr,
+                    prompt,
+                })
+            }
+            PrTriageState::ChangesRequested => {
+                let prompt = format!(
+                    "PR #{} («{}») has review comments requesting changes. Read each \
+                     review comment, address the feedback, commit the fixes, and push. \
+                     After pushing, reply to each resolved comment thread.",
+                    with_state.pr.number, with_state.pr.title
+                );
+                Some(TriageAction::AddressReviewFeedback {
+                    pr: with_state.pr,
+                    prompt,
+                })
+            }
+            PrTriageState::ReadyToMerge => {
+                if self.config.require_human_review {
+                    tracing::info!(
                         pr = with_state.pr.number,
-                        "PrTriage: PR awaiting initial review; skipping"
+                        "PrTriage: PR ready to merge but require_human_review=true"
                     );
-                    continue;
+                    Some(TriageAction::BlockedOnHumanReview { pr: with_state.pr })
+                } else {
+                    Some(TriageAction::Merge { pr: with_state.pr })
                 }
+            }
+            PrTriageState::NeedsReview => {
+                tracing::debug!(
+                    pr = with_state.pr.number,
+                    "PrTriage: PR awaiting initial review; skipping"
+                );
+                None
+            }
+        }
+    }
+
+    /// `LeastConflicts` variant: fetch all PR states, sort by merge-ability
+    /// (MERGEABLE first, UNKNOWN second, CONFLICTING last), then evaluate.
+    fn select_action_least_conflicts(&self, prs: Vec<PrInfo>) -> TriageAction {
+        let mut states: Vec<PrWithState> = prs
+            .into_iter()
+            .filter_map(|pr_info| {
+                match self
+                    .lifecycle
+                    .get_pr_state(pr_info.number, &self.config.skip_labels)
+                {
+                    Ok(ws) => Some(ws),
+                    Err(e) => {
+                        tracing::warn!(
+                            pr = pr_info.number,
+                            error = %e,
+                            "PrTriage(least-conflicts): failed to get state; skipping"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        // Sort: MERGEABLE (0) < UNKNOWN (1) < CONFLICTING (2) < missing (3).
+        states.sort_by_key(|ws| mergeable_sort_key(ws.mergeable.as_deref()));
+
+        tracing::debug!(
+            count = states.len(),
+            "PrTriage(least-conflicts): sorted {} PRs by merge-ability",
+            states.len()
+        );
+
+        for with_state in states {
+            if let Some(action) = self.evaluate_pr_state(with_state) {
+                return action;
             }
         }
 
@@ -848,6 +914,23 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
 /// Build a production [`PrTriage`] backed by the `gh` CLI.
 pub fn build_pr_triage(config: PrManagementConfig) -> PrTriage<GhPrLifecycle> {
     PrTriage::new(config, GhPrLifecycle::new())
+}
+
+/// Numeric sort key for the `LeastConflicts` priority.
+///
+/// | GitHub value   | key |
+/// |----------------|-----|
+/// | `"MERGEABLE"`  | 0   |
+/// | `"UNKNOWN"`    | 1   |
+/// | `"CONFLICTING"`| 2   |
+/// | `None`         | 3   |
+fn mergeable_sort_key(mergeable: Option<&str>) -> u8 {
+    match mergeable {
+        Some("MERGEABLE") => 0,
+        Some("UNKNOWN") => 1,
+        Some("CONFLICTING") => 2,
+        _ => 3,
+    }
 }
 
 // ── MockPrLifecycleTriage (test double) ───────────────────────────────────────
@@ -1168,6 +1251,20 @@ mod tests {
             pr,
             state,
             created_at: "2026-01-01T00:00:00Z".into(),
+            mergeable: Some("MERGEABLE".into()),
+        }
+    }
+
+    fn make_state_with_mergeable(
+        pr: PrInfo,
+        state: PrTriageState,
+        mergeable: Option<&str>,
+    ) -> PrWithState {
+        PrWithState {
+            pr,
+            state,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            mergeable: mergeable.map(|s| s.to_string()),
         }
     }
 
@@ -1368,5 +1465,147 @@ mod tests {
         } else {
             panic!("expected TriageAction::Merge");
         }
+    }
+
+    // ── least-conflicts triage priority ──────────────────────────────────────
+
+    #[test]
+    fn least_conflicts_prefers_mergeable_over_conflicting() {
+        // PR 1 is CONFLICTING, PR 2 is MERGEABLE — expect PR 2 to be selected.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(1), make_pr(2)];
+        mock.states.insert(
+            1,
+            make_state_with_mergeable(
+                make_pr(1),
+                PrTriageState::ChecksFailing,
+                Some("CONFLICTING"),
+            ),
+        );
+        mock.states.insert(
+            2,
+            make_state_with_mergeable(make_pr(2), PrTriageState::ChecksFailing, Some("MERGEABLE")),
+        );
+
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(pr.number, 2, "MERGEABLE PR should be selected first");
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
+    fn least_conflicts_unknown_before_conflicting() {
+        // PR 1 is CONFLICTING, PR 2 is UNKNOWN — expect PR 2 (UNKNOWN) first.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(1), make_pr(2)];
+        mock.states.insert(
+            1,
+            make_state_with_mergeable(
+                make_pr(1),
+                PrTriageState::ChangesRequested,
+                Some("CONFLICTING"),
+            ),
+        );
+        mock.states.insert(
+            2,
+            make_state_with_mergeable(make_pr(2), PrTriageState::ChangesRequested, Some("UNKNOWN")),
+        );
+
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::AddressReviewFeedback { pr, .. } = triage.select_action() {
+            assert_eq!(
+                pr.number, 2,
+                "UNKNOWN PR should be selected before CONFLICTING"
+            );
+        } else {
+            panic!("expected AddressReviewFeedback action");
+        }
+    }
+
+    #[test]
+    fn least_conflicts_all_mergeable_first_pr_wins() {
+        // All PRs are MERGEABLE — standard first-in-list ordering applies.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(10), make_pr(20)];
+        mock.states.insert(
+            10,
+            make_state_with_mergeable(make_pr(10), PrTriageState::ChecksFailing, Some("MERGEABLE")),
+        );
+        mock.states.insert(
+            20,
+            make_state_with_mergeable(make_pr(20), PrTriageState::ChecksFailing, Some("MERGEABLE")),
+        );
+
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(pr.number, 10, "When equal, first listed PR wins");
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
+    fn least_conflicts_no_prs_returns_no_actionable() {
+        let mock = MockPrLifecycleTriage::new();
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+        assert!(matches!(
+            triage.select_action(),
+            TriageAction::NoActionablePr
+        ));
+    }
+
+    #[test]
+    fn least_conflicts_none_mergeable_field_treated_as_last() {
+        // PR 1 has no mergeable field (None), PR 2 is CONFLICTING.
+        // None (key 3) sorts after CONFLICTING (key 2) — PR 2 is selected first.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(1), make_pr(2)];
+        mock.states.insert(
+            1,
+            make_state_with_mergeable(make_pr(1), PrTriageState::ChecksFailing, None),
+        );
+        mock.states.insert(
+            2,
+            make_state_with_mergeable(
+                make_pr(2),
+                PrTriageState::ChecksFailing,
+                Some("CONFLICTING"),
+            ),
+        );
+
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(
+                pr.number, 2,
+                "CONFLICTING (key 2) should be selected before None (key 3)"
+            );
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
+    fn mergeable_sort_key_values() {
+        assert_eq!(mergeable_sort_key(Some("MERGEABLE")), 0);
+        assert_eq!(mergeable_sort_key(Some("UNKNOWN")), 1);
+        assert_eq!(mergeable_sort_key(Some("CONFLICTING")), 2);
+        assert_eq!(mergeable_sort_key(None), 3);
+        assert_eq!(mergeable_sort_key(Some("something-else")), 3);
     }
 }

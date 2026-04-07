@@ -165,7 +165,7 @@ actionable PRs exist:
 |-------|-----------|
 | `oldest` *(default)* | Oldest PR first (ascending creation order) |
 | `newest` | Newest PR first |
-| `least-conflicts` | Same ordering as `oldest` (conflict detection not yet implemented) |
+| `least-conflicts` | PRs with `MERGEABLE` GitHub state first; `UNKNOWN` second; `CONFLICTING` last. Fetches all PR states upfront to sort before selecting an action. |
 
 ### Fall-through
 

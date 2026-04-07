@@ -307,6 +307,7 @@ mod tests {
                 pr,
                 state: PrTriageState::ChecksFailing,
                 created_at: "2026-01-01T00:00:00Z".into(),
+                mergeable: None,
             },
         );
         let triage = PrTriage::new(cfg.clone(), mock);
@@ -336,6 +337,7 @@ mod tests {
                 pr,
                 state: PrTriageState::ChangesRequested,
                 created_at: "2026-01-01T00:00:00Z".into(),
+                mergeable: None,
             },
         );
         let triage = PrTriage::new(cfg.clone(), mock);
@@ -366,6 +368,7 @@ mod tests {
                 pr,
                 state: PrTriageState::ReadyToMerge,
                 created_at: "2026-01-01T00:00:00Z".into(),
+                mergeable: None,
             },
         );
         let triage = PrTriage::new(cfg.clone(), mock);
@@ -398,6 +401,7 @@ mod tests {
                     reason: "wip".into(),
                 },
                 created_at: "2026-01-01T00:00:00Z".into(),
+                mergeable: None,
             },
         );
         let triage = PrTriage::new(cfg.clone(), mock);
