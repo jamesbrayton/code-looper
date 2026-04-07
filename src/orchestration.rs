@@ -84,6 +84,7 @@ pub trait ContextResolver: Send + Sync {
 
 /// Result of the policy engine's branch selection.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BranchSelection {
     /// The workflow branch to execute.
     pub branch: WorkflowBranch,
@@ -105,6 +106,7 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     /// Create a policy engine with the default three-rule chain.
+    #[allow(dead_code)]
     pub fn new(resolver: Box<dyn ContextResolver>) -> Self {
         Self { resolver, rules: default_policy_rules() }
     }

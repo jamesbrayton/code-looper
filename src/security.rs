@@ -1,22 +1,22 @@
-/// Secret and token redaction for captured provider output.
-///
-/// Provider stdout/stderr is stored in run artifacts and structured logs.
-/// Any recognised credential pattern is replaced with `[REDACTED]` before
-/// the output leaves the capture boundary, so raw tokens never reach disk or
-/// tracing output.
-///
-/// # Patterns covered
-///
-/// | Pattern | Description |
-/// |---------|-------------|
-/// | `ghp_<36+chars>` | GitHub personal access token (new format) |
-/// | `gho_<36+chars>` | GitHub OAuth token |
-/// | `ghs_<36+chars>` | GitHub App installation token |
-/// | `ghr_<36+chars>` | GitHub refresh token |
-/// | `Authorization: Bearer <token>` | HTTP Authorization header (Bearer) |
-/// | `Authorization: token <token>` | HTTP Authorization header (token) |
-/// | `GITHUB_TOKEN=<value>` | Environment variable assignment |
-/// | `GH_TOKEN=<value>` | Alternative env var used by the `gh` CLI |
+//! Secret and token redaction for captured provider output.
+//!
+//! Provider stdout/stderr is stored in run artifacts and structured logs.
+//! Any recognised credential pattern is replaced with `[REDACTED]` before
+//! the output leaves the capture boundary, so raw tokens never reach disk or
+//! tracing output.
+//!
+//! # Patterns covered
+//!
+//! | Pattern | Description |
+//! |---------|-------------|
+//! | `ghp_<36+chars>` | GitHub personal access token (new format) |
+//! | `gho_<36+chars>` | GitHub OAuth token |
+//! | `ghs_<36+chars>` | GitHub App installation token |
+//! | `ghr_<36+chars>` | GitHub refresh token |
+//! | `Authorization: Bearer <token>` | HTTP Authorization header (Bearer) |
+//! | `Authorization: token <token>` | HTTP Authorization header (token) |
+//! | `GITHUB_TOKEN=<value>` | Environment variable assignment |
+//! | `GH_TOKEN=<value>` | Alternative env var used by the `gh` CLI |
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -97,7 +97,7 @@ fn redact_header_value(s: &str, scheme: &str) -> String {
     // Pattern: "Authorization:" (optional whitespace) scheme (whitespace) <value>
     // We scan case-insensitively by lower-casing a working copy for position
     // finding, then apply redaction to the original.
-    let needle = format!("authorization:");
+    let needle = "authorization:".to_string();
     let lower = s.to_lowercase();
     let scheme_lower = scheme.to_lowercase();
 

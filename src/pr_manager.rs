@@ -129,6 +129,7 @@ pub enum PrError {
     ParseError(String),
 
     #[error("PR already exists for branch '{0}'")]
+    #[allow(dead_code)]
     AlreadyExists(String),
 }
 
@@ -276,6 +277,7 @@ impl PrLifecycle for GhPrLifecycle {
 // ── MockPrLifecycle (test double) ─────────────────────────────────────────────
 
 /// Recorded call to the mock lifecycle.
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum PrCall {
     FindOpenPr { branch: String },
@@ -287,6 +289,7 @@ pub enum PrCall {
 ///
 /// Callers configure the scripted responses before injecting the mock, then
 /// assert on `calls` after exercising the code under test.
+#[cfg(test)]
 pub struct MockPrLifecycle {
     /// Pre-configured response for `find_open_pr`.  `None` means "no open PR".
     pub existing_pr: std::sync::Mutex<Option<PrInfo>>,
@@ -296,6 +299,7 @@ pub struct MockPrLifecycle {
     pub calls: std::sync::Mutex<Vec<PrCall>>,
 }
 
+#[cfg(test)]
 impl MockPrLifecycle {
     /// Create a mock with no pre-existing PR.  `open_pr` returns a dummy PR
     /// at number `42`.
@@ -318,12 +322,14 @@ impl MockPrLifecycle {
     }
 }
 
+#[cfg(test)]
 impl Default for MockPrLifecycle {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl PrLifecycle for MockPrLifecycle {
     fn find_open_pr(&self, branch: &str) -> Result<Option<PrInfo>, PrError> {
         self.calls
@@ -353,6 +359,7 @@ impl PrLifecycle for MockPrLifecycle {
 
 /// Result of handling a shippable milestone.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum PrAction {
     /// A new PR was opened.
     Opened(PrInfo),
@@ -503,6 +510,7 @@ pub enum PrTriageState {
 
 /// An open PR with its resolved triage state.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PrWithState {
     pub pr: PrInfo,
     pub state: PrTriageState,
@@ -779,6 +787,7 @@ pub fn build_pr_triage(config: PrManagementConfig) -> PrTriage<GhPrLifecycle> {
 // ── MockPrLifecycleTriage (test double) ───────────────────────────────────────
 
 /// Pre-scripted responses for [`PrLifecycleTriage`] in tests.
+#[cfg(test)]
 pub struct MockPrLifecycleTriage {
     /// PRs returned by `list_open_prs_with_label`.
     pub open_prs: Vec<PrInfo>,
@@ -788,12 +797,14 @@ pub struct MockPrLifecycleTriage {
     pub calls: std::sync::Mutex<Vec<TriageCall>>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum TriageCall {
     ListOpenPrsWithLabel { label: String },
     GetPrState { pr_number: u32 },
 }
 
+#[cfg(test)]
 impl MockPrLifecycleTriage {
     pub fn new() -> Self {
         Self {
@@ -804,12 +815,14 @@ impl MockPrLifecycleTriage {
     }
 }
 
+#[cfg(test)]
 impl Default for MockPrLifecycleTriage {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl PrLifecycleTriage for MockPrLifecycleTriage {
     fn list_open_prs_with_label(&self, label: &str) -> Result<Vec<PrInfo>, PrError> {
         self.calls

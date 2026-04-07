@@ -14,6 +14,7 @@ pub enum IssueState {
 
 /// A GitHub issue returned by the tracker.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Issue {
     pub id: u64,
     pub number: u32,
@@ -27,6 +28,7 @@ pub struct Issue {
 
 /// Payload for creating a new issue.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct IssueDraft {
     pub title: String,
     pub body: String,
@@ -36,6 +38,7 @@ pub struct IssueDraft {
 
 /// Filter criteria for listing issues.
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct IssueFilter {
     pub state: Option<IssueState>,
     pub labels: Vec<String>,
@@ -45,6 +48,7 @@ pub struct IssueFilter {
 
 /// Reason an issue is being closed.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum CloseReason {
     Completed,
     NotPlanned,
@@ -65,6 +69,7 @@ pub enum IssueTrackerError {
     #[error("transport error: {0}")]
     Transport(String),
     #[error("validation error: {0}")]
+    #[allow(dead_code)]
     Validation(String),
 }
 
@@ -75,6 +80,7 @@ pub enum IssueTrackerError {
 /// All mutation operations must go through MCP-compliant paths in production
 /// use.  Implementations are responsible for honouring whatever auth and
 /// policy constraints apply to their backend.
+#[allow(dead_code)]
 pub trait IssueTracker: Send + Sync {
     fn list_open_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>, IssueTrackerError>;
     fn get_issue(&self, number: u32) -> Result<Issue, IssueTrackerError>;
@@ -399,6 +405,7 @@ impl IssueTracker for GitHubIssueTracker {
 ///
 /// The file is created (including parent directories) on first write if it
 /// does not already exist.
+#[allow(dead_code)]
 pub struct LocalPromiseTracker {
     pub path: std::path::PathBuf,
     inner: Mutex<LocalStore>,
@@ -408,6 +415,7 @@ struct LocalStore {
     /// In-memory issues indexed by number.
     issues: std::collections::HashMap<u32, Issue>,
     /// Monotonically increasing counter for new issue numbers.
+    #[allow(dead_code)]
     next_number: u32,
 }
 
@@ -462,13 +470,13 @@ impl IssueTracker for LocalPromiseTracker {
                 filter
                     .assignee
                     .as_deref()
-                    .map_or(true, |a| i.assignees.contains(&a.to_string()))
+                    .is_none_or(|a| i.assignees.contains(&a.to_string()))
             })
             .filter(|i| {
                 filter
                     .search
                     .as_deref()
-                    .map_or(true, |q| i.title.contains(q) || i.body.contains(q))
+                    .is_none_or(|q| i.title.contains(q) || i.body.contains(q))
             })
             .cloned()
             .collect();
@@ -562,6 +570,7 @@ impl IssueTracker for LocalPromiseTracker {
 /// By default, read methods return empty collections and write methods
 /// succeed.  Override `next_issue` to control what `get_issue` and
 /// `create_issue` return.
+#[cfg(test)]
 pub struct MockIssueTracker {
     /// Calls recorded in order: (method_name, args…).
     pub calls: Mutex<Vec<MockCall>>,
@@ -571,6 +580,7 @@ pub struct MockIssueTracker {
     pub force_error: Option<IssueTrackerError>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub enum MockCall {
     ListOpenIssues,
@@ -584,6 +594,7 @@ pub enum MockCall {
     EnsureLabels(Vec<String>),
 }
 
+#[cfg(test)]
 impl MockIssueTracker {
     pub fn new() -> Self {
         Self {
@@ -629,12 +640,14 @@ impl MockIssueTracker {
     }
 }
 
+#[cfg(test)]
 impl Default for MockIssueTracker {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl IssueTracker for MockIssueTracker {
     fn list_open_issues(&self, _filter: &IssueFilter) -> Result<Vec<Issue>, IssueTrackerError> {
         self.calls.lock().unwrap().push(MockCall::ListOpenIssues);

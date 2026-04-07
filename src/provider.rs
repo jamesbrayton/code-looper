@@ -158,7 +158,7 @@ fn run_provider_process(
         let stdout_handle = std::thread::spawn(move || {
             let reader = BufReader::new(stdout_pipe);
             let mut captured = String::new();
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 let line = redact_secrets(&line);
                 println!("[stdout] {}", line);
                 trace!(stream = "stdout", "{}", line);
@@ -170,7 +170,7 @@ fn run_provider_process(
 
         let mut stderr_captured = String::new();
         let stderr_reader = BufReader::new(stderr_pipe);
-        for line in stderr_reader.lines().flatten() {
+        for line in stderr_reader.lines().map_while(Result::ok) {
             let line = redact_secrets(&line);
             eprintln!("[stderr] {}", line);
             trace!(stream = "stderr", "{}", line);

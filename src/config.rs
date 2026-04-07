@@ -24,21 +24,16 @@ impl std::fmt::Display for IssueTrackingMode {
 }
 
 /// Controls how often the loop engine posts comments to the active issue.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommentCadence {
     /// Comment at run start, run end, blockers, and failed iterations (default).
+    #[default]
     Milestones,
     /// Comment after every iteration regardless of outcome.
     EveryIteration,
     /// Engine never posts comments; the agent is still prompted to do so.
     OffEngine,
-}
-
-impl Default for CommentCadence {
-    fn default() -> Self {
-        Self::Milestones
-    }
 }
 
 impl std::fmt::Display for CommentCadence {
@@ -117,6 +112,7 @@ impl Default for IssueTrackingConfig {
 // ── PR management ────────────────────────────────────────────────────────────
 
 /// PR iteration mode.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum PrMode {

@@ -1,13 +1,16 @@
-/// Feature branch lifecycle management.
-///
-/// Centralises branch naming, creation, push, and cleanup so that all three
-/// PR strategies (`no-pr`, `single-pr`, `multi-pr`) use a single, tested
-/// surface instead of open-coding git commands.
-///
-/// # Safety invariants
-/// * Never operates on `base_branch` — any attempt returns an error.
-/// * Never force-pushes unless `allow_force_push` is explicitly `true`.
-/// * Never deletes a branch that has unmerged commits or uncommitted changes.
+//! Feature branch lifecycle management.
+//!
+//! Centralises branch naming, creation, push, and cleanup so that all three
+//! PR strategies (`no-pr`, `single-pr`, `multi-pr`) use a single, tested
+//! surface instead of open-coding git commands.
+//!
+//! # Safety invariants
+//! * Never operates on `base_branch` — any attempt returns an error.
+//! * Never force-pushes unless `allow_force_push` is explicitly `true`.
+//! * Never deletes a branch that has unmerged commits or uncommitted changes.
+// Planned API surface for PR strategies; items are tested but not yet called
+// from the main execution path.
+#![allow(dead_code)]
 use std::process::Command;
 
 use crate::config::PrManagementConfig;

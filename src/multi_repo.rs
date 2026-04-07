@@ -4,6 +4,7 @@ use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
 use tracing::info;
 
 /// Result for a single repo target in a multi-repo run.
+#[allow(dead_code)]
 pub struct RepoRunResult {
     /// Display name of the repository (from `RepoTarget::display_name`).
     pub name: String,

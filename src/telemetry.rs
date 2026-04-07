@@ -32,6 +32,7 @@ impl IterationOutcome {
     }
 
     /// Returns `true` when the loop should abort immediately (spawn failure).
+    #[allow(dead_code)]
     pub fn is_fatal(&self) -> bool {
         matches!(self, IterationOutcome::SpawnFailure { .. })
     }
