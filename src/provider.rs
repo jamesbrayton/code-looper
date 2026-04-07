@@ -1,6 +1,7 @@
 use crate::config::Provider as ProviderKind;
 use crate::error::LooperError;
 use crate::security::redact_secrets;
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::trace;
 
@@ -43,11 +44,18 @@ pub trait ProviderAdapter: Send + Sync {
 ///
 /// When `stream_output` is `true`, each adapter will print tagged stdout/stderr
 /// lines to the terminal in real time as the provider runs.
-pub fn build_adapter(kind: &ProviderKind, stream_output: bool) -> Box<dyn ProviderAdapter> {
+///
+/// `working_dir` overrides the subprocess working directory.  When `None` the
+/// subprocess inherits the current working directory of the code-looper process.
+pub fn build_adapter(
+    kind: &ProviderKind,
+    stream_output: bool,
+    working_dir: Option<PathBuf>,
+) -> Box<dyn ProviderAdapter> {
     match kind {
-        ProviderKind::Claude => Box::new(ClaudeAdapter { stream_output }),
-        ProviderKind::Copilot => Box::new(CopilotAdapter { stream_output }),
-        ProviderKind::Codex => Box::new(CodexAdapter { stream_output }),
+        ProviderKind::Claude => Box::new(ClaudeAdapter { stream_output, working_dir }),
+        ProviderKind::Copilot => Box::new(CopilotAdapter { stream_output, working_dir }),
+        ProviderKind::Codex => Box::new(CodexAdapter { stream_output, working_dir }),
     }
 }
 
@@ -55,6 +63,7 @@ pub fn build_adapter(kind: &ProviderKind, stream_output: bool) -> Box<dyn Provid
 
 pub struct ClaudeAdapter {
     pub stream_output: bool,
+    pub working_dir: Option<PathBuf>,
 }
 
 impl ProviderAdapter for ClaudeAdapter {
@@ -67,6 +76,7 @@ impl ProviderAdapter for ClaudeAdapter {
             "claude",
             &["-p", "--dangerously-skip-permissions", prompt],
             self.stream_output,
+            self.working_dir.as_deref(),
         )
     }
 }
@@ -75,6 +85,7 @@ impl ProviderAdapter for ClaudeAdapter {
 
 pub struct CopilotAdapter {
     pub stream_output: bool,
+    pub working_dir: Option<PathBuf>,
 }
 
 impl ProviderAdapter for CopilotAdapter {
@@ -87,6 +98,7 @@ impl ProviderAdapter for CopilotAdapter {
             "gh",
             &["copilot", "suggest", "-t", "shell", prompt],
             self.stream_output,
+            self.working_dir.as_deref(),
         )
     }
 }
@@ -95,6 +107,7 @@ impl ProviderAdapter for CopilotAdapter {
 
 pub struct CodexAdapter {
     pub stream_output: bool,
+    pub working_dir: Option<PathBuf>,
 }
 
 impl ProviderAdapter for CodexAdapter {
@@ -103,7 +116,7 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        run_provider_process("codex", &[prompt], self.stream_output)
+        run_provider_process("codex", &[prompt], self.stream_output, self.working_dir.as_deref())
     }
 }
 
@@ -111,10 +124,14 @@ impl ProviderAdapter for CodexAdapter {
 
 /// Run a provider process, optionally streaming stdout/stderr to the terminal
 /// as tagged lines (`[stdout]` / `[stderr]`).
+///
+/// `working_dir` sets the subprocess working directory.  `None` inherits the
+/// current working directory of the code-looper process.
 fn run_provider_process(
     binary: &str,
     args: &[&str],
     stream: bool,
+    working_dir: Option<&std::path::Path>,
 ) -> Result<ExecutionResult, LooperError> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
@@ -123,11 +140,12 @@ fn run_provider_process(
     let start = Instant::now();
 
     if stream {
-        let mut child = Command::new(binary)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+        let mut cmd = Command::new(binary);
+        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
+        let mut child = cmd.spawn()
             .map_err(|e| LooperError::ProviderSpawn {
                 binary: binary.to_string(),
                 source: e,
@@ -174,10 +192,12 @@ fn run_provider_process(
             duration,
         })
     } else {
-        let output = Command::new(binary)
-            .args(args)
-            .output()
-            .map_err(|e| LooperError::ProviderSpawn {
+        let mut cmd = Command::new(binary);
+        cmd.args(args);
+        if let Some(dir) = working_dir {
+            cmd.current_dir(dir);
+        }
+        let output = cmd.output().map_err(|e| LooperError::ProviderSpawn {
                 binary: binary.to_string(),
                 source: e,
             })?;
@@ -283,8 +303,8 @@ pub mod tests {
 
     #[test]
     fn build_adapter_returns_correct_names() {
-        assert_eq!(build_adapter(&ProviderKind::Claude, false).name(), "claude");
-        assert_eq!(build_adapter(&ProviderKind::Copilot, false).name(), "copilot");
-        assert_eq!(build_adapter(&ProviderKind::Codex, false).name(), "codex");
+        assert_eq!(build_adapter(&ProviderKind::Claude, false, None).name(), "claude");
+        assert_eq!(build_adapter(&ProviderKind::Copilot, false, None).name(), "copilot");
+        assert_eq!(build_adapter(&ProviderKind::Codex, false, None).name(), "codex");
     }
 }

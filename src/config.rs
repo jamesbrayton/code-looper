@@ -411,6 +411,32 @@ impl std::fmt::Display for Provider {
     }
 }
 
+/// A single repository target for multi-repo orchestration.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RepoTarget {
+    /// Filesystem path to the repository root.
+    /// Relative paths are resolved from the working directory at startup.
+    pub path: PathBuf,
+    /// Optional human-readable label used in run logs and summaries.
+    /// Defaults to the final path component when omitted.
+    pub name: Option<String>,
+    /// Optional per-repo prompt that overrides the top-level `prompt_inline`
+    /// or `prompt_file` setting for this specific target.
+    pub prompt_override: Option<String>,
+}
+
+impl RepoTarget {
+    /// Return the display name: explicit `name` or the last path component.
+    pub fn display_name(&self) -> String {
+        self.name.clone().unwrap_or_else(|| {
+            self.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| self.path.display().to_string())
+        })
+    }
+}
+
 /// Resolved runtime configuration for a single loop run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopConfig {
@@ -469,6 +495,13 @@ pub struct LoopConfig {
     /// Telemetry / artifact collection configuration.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Additional repository targets for multi-repo orchestration.
+    ///
+    /// When non-empty, code-looper runs the configured loop for each entry in
+    /// sequence instead of the default single-repo mode.  Each entry may
+    /// supply a `prompt_override` to use a different prompt for that repo.
+    #[serde(default)]
+    pub multi_repo: Vec<RepoTarget>,
 }
 
 fn default_retry_backoff_ms() -> u64 {
@@ -499,6 +532,7 @@ impl Default for LoopConfig {
             issue_tracking: IssueTrackingConfig::default(),
             pr_management: PrManagementConfig::default(),
             telemetry: TelemetryConfig::default(),
+            multi_repo: Vec::new(),
         }
     }
 }
@@ -1159,5 +1193,90 @@ require_human_review = false
         assert_eq!(config.pr_management.base_branch, "develop");
         assert_eq!(config.pr_management.branch_prefix, "feat/");
         assert!(!config.pr_management.require_human_review);
+    }
+
+    // ── Multi-repo config tests ───────────────────────────────────────────────
+
+    #[test]
+    fn multi_repo_is_empty_by_default() {
+        assert!(LoopConfig::default().multi_repo.is_empty());
+    }
+
+    #[test]
+    fn parse_toml_with_multi_repo_entries() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[[multi_repo]]
+path = "/repos/project-a"
+name = "project-a"
+
+[[multi_repo]]
+path = "/repos/project-b"
+prompt_override = "Run linting only"
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.multi_repo.len(), 2);
+
+        let a = &config.multi_repo[0];
+        assert_eq!(a.path, std::path::PathBuf::from("/repos/project-a"));
+        assert_eq!(a.name.as_deref(), Some("project-a"));
+        assert!(a.prompt_override.is_none());
+
+        let b = &config.multi_repo[1];
+        assert_eq!(b.path, std::path::PathBuf::from("/repos/project-b"));
+        assert!(b.name.is_none());
+        assert_eq!(b.prompt_override.as_deref(), Some("Run linting only"));
+    }
+
+    #[test]
+    fn repo_target_display_name_uses_explicit_name() {
+        let t = RepoTarget {
+            path: "/repos/my-project".into(),
+            name: Some("custom".to_string()),
+            prompt_override: None,
+        };
+        assert_eq!(t.display_name(), "custom");
+    }
+
+    #[test]
+    fn repo_target_display_name_falls_back_to_dir() {
+        let t = RepoTarget {
+            path: "/repos/my-project".into(),
+            name: None,
+            prompt_override: None,
+        };
+        assert_eq!(t.display_name(), "my-project");
+    }
+
+    #[test]
+    fn multi_repo_serde_round_trip() {
+        let config = LoopConfig {
+            multi_repo: vec![
+                RepoTarget {
+                    path: "/tmp/repo-a".into(),
+                    name: Some("repo-a".to_string()),
+                    prompt_override: None,
+                },
+                RepoTarget {
+                    path: "/tmp/repo-b".into(),
+                    name: None,
+                    prompt_override: Some("custom task".to_string()),
+                },
+            ],
+            ..LoopConfig::default()
+        };
+        let serialized = toml::to_string(&config).unwrap();
+        let deserialized: LoopConfig = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.multi_repo.len(), 2);
+        assert_eq!(deserialized.multi_repo[0], config.multi_repo[0]);
+        assert_eq!(deserialized.multi_repo[1], config.multi_repo[1]);
     }
 }

@@ -136,7 +136,7 @@ pub struct LoopEngine {
 
 impl LoopEngine {
     pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
-        let adapter = build_adapter(&config.provider, config.telemetry.stream_output);
+        let adapter = build_adapter(&config.provider, config.telemetry.stream_output, config.workspace_dir.clone());
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
             let repo = config.orchestration.repo_name.clone().unwrap_or_default();

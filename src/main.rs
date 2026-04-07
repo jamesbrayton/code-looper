@@ -6,6 +6,7 @@ mod error;
 mod security;
 mod issue_tracker;
 mod loop_engine;
+mod multi_repo;
 mod orchestration;
 mod policy_guard;
 mod pr_manager;
@@ -99,6 +100,21 @@ fn main() -> anyhow::Result<()> {
             eprintln!("{v}");
         }
         anyhow::bail!("Policy guard validation failed");
+    }
+
+    // ── Multi-repo mode ──────────────────────────────────────────────────────
+    // When `multi_repo` entries are present, run the loop for each target in
+    // sequence and print a combined summary.  The single-repo path is skipped.
+    if !resolved.multi_repo.is_empty() {
+        info!(
+            provider = %resolved.provider,
+            repos = resolved.multi_repo.len(),
+            "Code Looper initializing in multi-repo mode"
+        );
+        let targets = resolved.multi_repo.clone();
+        let results = multi_repo::run_multi_repo(&resolved, &targets);
+        multi_repo::print_multi_repo_summary(&results);
+        return Ok(());
     }
 
     info!(
