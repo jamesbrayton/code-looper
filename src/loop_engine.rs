@@ -6,7 +6,9 @@ use crate::policy_guard::PolicyGuard;
 use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrManager, TriageAction};
 use crate::pr_strategy::{build_strategy, PrStrategy};
 use crate::provider::{build_adapter, ProviderAdapter};
-use crate::telemetry::{unix_now, IterationOutcome, IterationRecord, RunArtifacts, RunManifest};
+use crate::telemetry::{
+    resolve_operator, unix_now, IterationOutcome, IterationRecord, RunArtifacts, RunManifest,
+};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -1007,6 +1009,12 @@ impl LoopEngine {
             iterations_requested: self.config.iterations,
             termination_reason: summary.termination_reason.as_ref().map(|r| r.to_string()),
             skipped_decisions: summary.skipped_decisions,
+            run_by: resolve_operator(),
+            workspace_dir: self
+                .config
+                .workspace_dir
+                .as_ref()
+                .map(|p| p.display().to_string()),
             iterations: iteration_records,
         };
         artifacts.write_manifest(&manifest);

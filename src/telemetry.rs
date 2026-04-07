@@ -145,6 +145,16 @@ pub struct RunManifest {
     /// (e.g. PR blocked on human review, no actionable PR found).
     #[serde(default)]
     pub skipped_decisions: u64,
+    /// Operator identity: value of `$USER` (or `$USERNAME` on Windows) at run
+    /// start.  `None` when neither environment variable is set.
+    ///
+    /// Satisfies the PRD audit-provenance requirement: "who/when/provider/policy".
+    #[serde(default)]
+    pub run_by: Option<String>,
+    /// Filesystem path of the workspace directory in which the run executed.
+    /// `None` when the workspace dir was not resolved or not stored.
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
     pub iterations: Vec<IterationRecord>,
 }
 
@@ -261,6 +271,17 @@ fn run_id_now() -> String {
     format!("{secs:020}")
 }
 
+/// Resolve the operator identity from the environment.
+///
+/// Checks `$USER` first (Unix convention), then `$USERNAME` (Windows
+/// convention).  Returns `None` when neither variable is set.
+pub fn resolve_operator() -> Option<String> {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok()
+        .filter(|s| !s.is_empty())
+}
+
 /// Current Unix timestamp in seconds.
 pub fn unix_now() -> u64 {
     SystemTime::now()
@@ -293,6 +314,12 @@ fn build_summary_markdown(manifest: &RunManifest) -> String {
     md.push_str("|---|---|\n");
     md.push_str(&format!("| Run ID | `{}` |\n", manifest.run_id));
     md.push_str(&format!("| Provider | {} |\n", manifest.provider));
+    if let Some(ref who) = manifest.run_by {
+        md.push_str(&format!("| Run by | {} |\n", who));
+    }
+    if let Some(ref ws) = manifest.workspace_dir {
+        md.push_str(&format!("| Workspace | {} |\n", ws));
+    }
     md.push_str(&format!("| Started | {} |\n", started));
     md.push_str(&format!("| Ended | {} |\n", ended));
     md.push_str(&format!("| Duration | {}s |\n", total_secs));
@@ -515,6 +542,8 @@ mod tests {
             iterations_requested: 2,
             termination_reason: Some("completed".to_string()),
             skipped_decisions: 0,
+            run_by: None,
+            workspace_dir: None,
             iterations: vec![],
         };
         art.write_manifest(&manifest);
@@ -550,6 +579,8 @@ mod tests {
             iterations_requested: 2,
             termination_reason: Some("completed".to_string()),
             skipped_decisions: 2,
+            run_by: None,
+            workspace_dir: None,
             iterations: vec![IterationRecord {
                 iteration: 1,
                 provider: "claude".to_string(),
@@ -570,5 +601,100 @@ mod tests {
         assert!(md.contains("success"));
         assert!(md.contains("iteration-1.log"));
         assert!(md.contains("Skipped decisions"));
+    }
+
+    #[test]
+    fn summary_includes_run_by_when_set() {
+        let manifest = RunManifest {
+            run_id: "r1".to_string(),
+            started_at: 0,
+            ended_at: None,
+            provider: "claude".to_string(),
+            iterations_requested: 1,
+            termination_reason: None,
+            skipped_decisions: 0,
+            run_by: Some("alice".to_string()),
+            workspace_dir: None,
+            iterations: vec![],
+        };
+        let md = build_summary_markdown(&manifest);
+        assert!(md.contains("alice"));
+        assert!(md.contains("Run by"));
+    }
+
+    #[test]
+    fn summary_includes_workspace_dir_when_set() {
+        let manifest = RunManifest {
+            run_id: "r2".to_string(),
+            started_at: 0,
+            ended_at: None,
+            provider: "claude".to_string(),
+            iterations_requested: 1,
+            termination_reason: None,
+            skipped_decisions: 0,
+            run_by: None,
+            workspace_dir: Some("/home/alice/my-repo".to_string()),
+            iterations: vec![],
+        };
+        let md = build_summary_markdown(&manifest);
+        assert!(md.contains("/home/alice/my-repo"));
+        assert!(md.contains("Workspace"));
+    }
+
+    #[test]
+    fn summary_omits_run_by_when_none() {
+        let manifest = RunManifest {
+            run_id: "r3".to_string(),
+            started_at: 0,
+            ended_at: None,
+            provider: "claude".to_string(),
+            iterations_requested: 1,
+            termination_reason: None,
+            skipped_decisions: 0,
+            run_by: None,
+            workspace_dir: None,
+            iterations: vec![],
+        };
+        let md = build_summary_markdown(&manifest);
+        assert!(!md.contains("Run by"));
+        assert!(!md.contains("Workspace"));
+    }
+
+    #[test]
+    fn manifest_run_by_round_trips_through_json() {
+        let manifest = RunManifest {
+            run_id: "r4".to_string(),
+            started_at: 42,
+            ended_at: None,
+            provider: "codex".to_string(),
+            iterations_requested: 3,
+            termination_reason: None,
+            skipped_decisions: 0,
+            run_by: Some("bob".to_string()),
+            workspace_dir: Some("/tmp/proj".to_string()),
+            iterations: vec![],
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let restored: RunManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.run_by.as_deref(), Some("bob"));
+        assert_eq!(restored.workspace_dir.as_deref(), Some("/tmp/proj"));
+    }
+
+    #[test]
+    fn manifest_missing_run_by_deserializes_to_none() {
+        // Simulates reading an old manifest.json that pre-dates the run_by field.
+        let json = r#"{
+            "run_id": "old",
+            "started_at": 0,
+            "ended_at": null,
+            "provider": "claude",
+            "iterations_requested": 1,
+            "termination_reason": null,
+            "skipped_decisions": 0,
+            "iterations": []
+        }"#;
+        let manifest: RunManifest = serde_json::from_str(json).unwrap();
+        assert!(manifest.run_by.is_none());
+        assert!(manifest.workspace_dir.is_none());
     }
 }
