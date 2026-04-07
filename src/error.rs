@@ -17,4 +17,7 @@ pub enum LooperError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("provider '{binary}' timed out after {timeout_secs}s")]
+    ProviderTimeout { binary: String, timeout_secs: u64 },
 }

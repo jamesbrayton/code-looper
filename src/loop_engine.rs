@@ -145,7 +145,7 @@ pub struct LoopEngine {
 
 impl LoopEngine {
     pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
-        let adapter = build_adapter(&config.provider, config.telemetry.stream_output, config.workspace_dir.clone());
+        let adapter = build_adapter(&config.provider, config.telemetry.stream_output, config.workspace_dir.clone(), config.iteration_timeout_secs);
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
             let repo = config.orchestration.repo_name.clone().unwrap_or_default();
@@ -655,6 +655,37 @@ impl LoopEngine {
                                 }
                                 break;
                             }
+                        }
+                    }
+                    Err(crate::error::LooperError::ProviderTimeout { binary: _, timeout_secs }) => {
+                        let outcome = IterationOutcome::Timeout;
+                        if attempt < self.config.max_retries {
+                            summary.retries += 1;
+                            let delay_ms = compute_backoff_ms(
+                                self.config.retry_backoff_ms,
+                                self.config.retry_backoff_multiplier,
+                                attempt,
+                            );
+                            warn!(
+                                iteration = i,
+                                attempt = attempt + 1,
+                                max_retries = self.config.max_retries,
+                                provider = self.adapter.name(),
+                                timeout_secs,
+                                backoff_ms = delay_ms,
+                                "Iteration timed out (retryable), retrying"
+                            );
+                            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                            attempt += 1;
+                        } else {
+                            warn!(
+                                iteration = i,
+                                provider = self.adapter.name(),
+                                timeout_secs,
+                                "Iteration timed out"
+                            );
+                            final_outcome = outcome;
+                            break;
                         }
                     }
                     Err(crate::error::LooperError::ProviderSpawn { binary, source }) => {
@@ -1790,5 +1821,61 @@ mod tests {
         assert_eq!(summary.successes, 2);
         assert_eq!(summary.skipped_decisions, 2,
             "each BlockedOnHumanReview should increment skipped_decisions by 1");
+    }
+
+    // ── Timeout handling ──────────────────────────────────────────────────────
+
+    #[test]
+    fn timeout_iteration_is_counted_as_failure() {
+        use crate::provider::tests::TimeoutAdapter;
+
+        let config = LoopConfig {
+            iterations: 3,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 3);
+        assert_eq!(summary.failures, 3, "timed-out iterations should count as failures");
+        assert_eq!(summary.successes, 0);
+        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+    }
+
+    #[test]
+    fn timeout_is_retried_when_max_retries_set() {
+        use crate::provider::tests::TimeoutAdapter;
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 2,
+            retry_backoff_ms: 0,
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.retries, 2, "should retry twice on timeout");
+        assert_eq!(summary.failures, 1);
+    }
+
+    #[test]
+    fn stop_on_failure_halts_on_timeout() {
+        use crate::provider::tests::TimeoutAdapter;
+
+        let config = LoopConfig {
+            iterations: 5,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            stop_on_failure: true,
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1, "should stop after first timeout");
+        assert_eq!(summary.termination_reason, Some(TerminationReason::StoppedOnFailure));
     }
 }

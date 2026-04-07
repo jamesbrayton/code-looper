@@ -482,6 +482,11 @@ pub struct LoopConfig {
     /// The command is run via the system shell (`sh -c` on Unix).
     #[serde(default)]
     pub on_complete: Option<String>,
+    /// Maximum seconds a single provider invocation may run before it is killed
+    /// and the iteration is classified as `IterationOutcome::Timeout`.
+    /// `None` (default) means no timeout — the provider runs until it exits.
+    #[serde(default)]
+    pub iteration_timeout_secs: Option<u64>,
     /// Issue tracking configuration.
     #[serde(default)]
     pub issue_tracking: IssueTrackingConfig,
@@ -525,6 +530,7 @@ impl Default for LoopConfig {
             retry_backoff_ms: default_retry_backoff_ms(),
             retry_backoff_multiplier: default_retry_backoff_multiplier(),
             on_complete: None,
+            iteration_timeout_secs: None,
             issue_tracking: IssueTrackingConfig::default(),
             pr_management: PrManagementConfig::default(),
             telemetry: TelemetryConfig::default(),
@@ -799,6 +805,24 @@ on_complete = "echo done"
         assert_eq!(config.max_retries, 2);
         assert_eq!(config.retry_backoff_ms, 250);
         assert_eq!(config.on_complete.as_deref(), Some("echo done"));
+        assert!(config.iteration_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn parse_toml_iteration_timeout_secs() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+iteration_timeout_secs = 120
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.iteration_timeout_secs, Some(120));
     }
 
     #[test]

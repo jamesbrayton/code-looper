@@ -195,7 +195,7 @@ impl ServiceMode {
             ServiceRequest::Run { prompt, provider } => {
                 let provider_kind = provider.as_ref().unwrap_or(&self.config.provider);
                 let adapter =
-                    build_adapter(provider_kind, false, self.config.workspace_dir.clone());
+                    build_adapter(provider_kind, false, self.config.workspace_dir.clone(), self.config.iteration_timeout_secs);
                 state.run_count += 1;
 
                 match adapter.execute(&prompt) {

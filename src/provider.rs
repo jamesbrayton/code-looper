@@ -2,6 +2,8 @@ use crate::config::Provider as ProviderKind;
 use crate::error::LooperError;
 use crate::security::redact_secrets;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::trace;
 
@@ -47,15 +49,20 @@ pub trait ProviderAdapter: Send + Sync {
 ///
 /// `working_dir` overrides the subprocess working directory.  When `None` the
 /// subprocess inherits the current working directory of the code-looper process.
+///
+/// `timeout_secs` sets a per-invocation wall-clock deadline.  When the provider
+/// does not exit within `timeout_secs` seconds, the process is killed and
+/// `LooperError::ProviderTimeout` is returned.  `None` means no timeout.
 pub fn build_adapter(
     kind: &ProviderKind,
     stream_output: bool,
     working_dir: Option<PathBuf>,
+    timeout_secs: Option<u64>,
 ) -> Box<dyn ProviderAdapter> {
     match kind {
-        ProviderKind::Claude => Box::new(ClaudeAdapter { stream_output, working_dir }),
-        ProviderKind::Copilot => Box::new(CopilotAdapter { stream_output, working_dir }),
-        ProviderKind::Codex => Box::new(CodexAdapter { stream_output, working_dir }),
+        ProviderKind::Claude => Box::new(ClaudeAdapter { stream_output, working_dir, timeout_secs }),
+        ProviderKind::Copilot => Box::new(CopilotAdapter { stream_output, working_dir, timeout_secs }),
+        ProviderKind::Codex => Box::new(CodexAdapter { stream_output, working_dir, timeout_secs }),
     }
 }
 
@@ -64,6 +71,7 @@ pub fn build_adapter(
 pub struct ClaudeAdapter {
     pub stream_output: bool,
     pub working_dir: Option<PathBuf>,
+    pub timeout_secs: Option<u64>,
 }
 
 impl ProviderAdapter for ClaudeAdapter {
@@ -77,6 +85,7 @@ impl ProviderAdapter for ClaudeAdapter {
             &["-p", "--dangerously-skip-permissions", prompt],
             self.stream_output,
             self.working_dir.as_deref(),
+            self.timeout_secs,
         )
     }
 }
@@ -86,6 +95,7 @@ impl ProviderAdapter for ClaudeAdapter {
 pub struct CopilotAdapter {
     pub stream_output: bool,
     pub working_dir: Option<PathBuf>,
+    pub timeout_secs: Option<u64>,
 }
 
 impl ProviderAdapter for CopilotAdapter {
@@ -99,6 +109,7 @@ impl ProviderAdapter for CopilotAdapter {
             &["copilot", "suggest", "-t", "shell", prompt],
             self.stream_output,
             self.working_dir.as_deref(),
+            self.timeout_secs,
         )
     }
 }
@@ -108,6 +119,7 @@ impl ProviderAdapter for CopilotAdapter {
 pub struct CodexAdapter {
     pub stream_output: bool,
     pub working_dir: Option<PathBuf>,
+    pub timeout_secs: Option<u64>,
 }
 
 impl ProviderAdapter for CodexAdapter {
@@ -116,7 +128,7 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        run_provider_process("codex", &[prompt], self.stream_output, self.working_dir.as_deref())
+        run_provider_process("codex", &[prompt], self.stream_output, self.working_dir.as_deref(), self.timeout_secs)
     }
 }
 
@@ -127,11 +139,16 @@ impl ProviderAdapter for CodexAdapter {
 ///
 /// `working_dir` sets the subprocess working directory.  `None` inherits the
 /// current working directory of the code-looper process.
+///
+/// `timeout_secs` sets a maximum wall-clock duration for the provider.  When
+/// the timeout fires the process is killed and `LooperError::ProviderTimeout`
+/// is returned.  `None` means no timeout.
 fn run_provider_process(
     binary: &str,
     args: &[&str],
     stream: bool,
     working_dir: Option<&std::path::Path>,
+    timeout_secs: Option<u64>,
 ) -> Result<ExecutionResult, LooperError> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
@@ -145,14 +162,33 @@ fn run_provider_process(
         if let Some(dir) = working_dir {
             cmd.current_dir(dir);
         }
-        let mut child = cmd.spawn()
-            .map_err(|e| LooperError::ProviderSpawn {
-                binary: binary.to_string(),
-                source: e,
-            })?;
+        let mut child = cmd.spawn().map_err(|e| LooperError::ProviderSpawn {
+            binary: binary.to_string(),
+            source: e,
+        })?;
 
         let stdout_pipe = child.stdout.take().expect("stdout piped");
         let stderr_pipe = child.stderr.take().expect("stderr piped");
+
+        // Wrap child in Arc<Mutex> so the optional watchdog thread can kill it.
+        let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+        let timeout_fired = Arc::new(AtomicBool::new(false));
+
+        if let Some(secs) = timeout_secs {
+            let child_clone = Arc::clone(&child);
+            let fired = Arc::clone(&timeout_fired);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(secs));
+                if let Ok(mut c) = child_clone.lock() {
+                    // Only mark as timed-out when kill() succeeds.  If the child
+                    // already exited and was reaped, kill() returns an error and we
+                    // leave `fired` false, avoiding a false-positive timeout report.
+                    if c.kill().is_ok() {
+                        fired.store(true, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
 
         // Read stdout on a background thread so we don't deadlock on stderr.
         let stdout_handle = std::thread::spawn(move || {
@@ -179,11 +215,18 @@ fn run_provider_process(
         }
 
         let stdout_captured = stdout_handle.join().unwrap_or_default();
-        let status = child.wait().map_err(|e| LooperError::ProviderSpawn {
+        let status = child.lock().unwrap().wait().map_err(|e| LooperError::ProviderSpawn {
             binary: binary.to_string(),
             source: e,
         })?;
         let duration = start.elapsed();
+
+        if timeout_fired.load(Ordering::Relaxed) {
+            return Err(LooperError::ProviderTimeout {
+                binary: binary.to_string(),
+                timeout_secs: timeout_secs.unwrap_or(0),
+            });
+        }
 
         Ok(ExecutionResult {
             exit_code: status.code(),
@@ -193,20 +236,66 @@ fn run_provider_process(
         })
     } else {
         let mut cmd = Command::new(binary);
-        cmd.args(args);
+        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(dir) = working_dir {
             cmd.current_dir(dir);
         }
-        let output = cmd.output().map_err(|e| LooperError::ProviderSpawn {
-                binary: binary.to_string(),
-                source: e,
-            })?;
+        let mut child = cmd.spawn().map_err(|e| LooperError::ProviderSpawn {
+            binary: binary.to_string(),
+            source: e,
+        })?;
+
+        let stdout_pipe = child.stdout.take().expect("stdout piped");
+        let stderr_pipe = child.stderr.take().expect("stderr piped");
+
+        // Wrap child so the optional watchdog can kill it.
+        let child = Arc::new(std::sync::Mutex::new(child));
+        let timeout_fired = Arc::new(AtomicBool::new(false));
+
+        if let Some(secs) = timeout_secs {
+            let child_clone = Arc::clone(&child);
+            let fired = Arc::clone(&timeout_fired);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(secs));
+                if let Ok(mut c) = child_clone.lock() {
+                    let _ = c.kill();
+                }
+                fired.store(true, Ordering::Relaxed);
+            });
+        }
+
+        // Drain both pipes on background threads to prevent deadlock when the
+        // child fills its pipe buffers.  The drain threads block until EOF,
+        // which happens when the child exits or is killed by the watchdog.
+        let stdout_handle = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = { stdout_pipe }.read_to_end(&mut buf);
+            buf
+        });
+        let stderr_handle = std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = { stderr_pipe }.read_to_end(&mut buf);
+            buf
+        });
+
+        let stdout_bytes = stdout_handle.join().unwrap_or_default();
+        let stderr_bytes = stderr_handle.join().unwrap_or_default();
+        let exit_code = child.lock().unwrap().wait().ok().and_then(|s| s.code());
         let duration = start.elapsed();
 
+        if timeout_fired.load(Ordering::Relaxed) {
+            return Err(LooperError::ProviderTimeout {
+                binary: binary.to_string(),
+                timeout_secs: timeout_secs.unwrap_or(0),
+            });
+        }
+
         Ok(ExecutionResult {
-            exit_code: output.status.code(),
-            stdout: redact_secrets(&String::from_utf8_lossy(&output.stdout)),
-            stderr: redact_secrets(&String::from_utf8_lossy(&output.stderr)),
+            exit_code,
+            stdout: redact_secrets(&String::from_utf8_lossy(&stdout_bytes)),
+            stderr: redact_secrets(&String::from_utf8_lossy(&stderr_bytes)),
             duration,
         })
     }
@@ -303,8 +392,68 @@ pub mod tests {
 
     #[test]
     fn build_adapter_returns_correct_names() {
-        assert_eq!(build_adapter(&ProviderKind::Claude, false, None).name(), "claude");
-        assert_eq!(build_adapter(&ProviderKind::Copilot, false, None).name(), "copilot");
-        assert_eq!(build_adapter(&ProviderKind::Codex, false, None).name(), "codex");
+        assert_eq!(build_adapter(&ProviderKind::Claude, false, None, None).name(), "claude");
+        assert_eq!(build_adapter(&ProviderKind::Copilot, false, None, None).name(), "copilot");
+        assert_eq!(build_adapter(&ProviderKind::Codex, false, None, None).name(), "codex");
+    }
+
+    // ── Timeout adapter ───────────────────────────────────────────────────────
+
+    /// Adapter that always returns ProviderTimeout (simulates a timed-out call).
+    pub struct TimeoutAdapter;
+
+    impl ProviderAdapter for TimeoutAdapter {
+        fn name(&self) -> &str {
+            "timeout-fake"
+        }
+
+        fn execute(&self, _prompt: &str) -> Result<ExecutionResult, LooperError> {
+            Err(LooperError::ProviderTimeout {
+                binary: "fake".to_string(),
+                timeout_secs: 1,
+            })
+        }
+    }
+
+    // ── run_provider_process timeout (real subprocess) ────────────────────────
+
+    /// Verify that a process that runs longer than the timeout is killed and
+    /// `ProviderTimeout` is returned (non-streaming path).
+    ///
+    /// Uses `sleep` as a long-running process; skipped on platforms without it.
+    #[test]
+    #[cfg(unix)]
+    fn non_streaming_process_is_killed_on_timeout() {
+        // sleep for 60s, but timeout after 1s
+        let result = super::run_provider_process(
+            "sleep",
+            &["60"],
+            false,
+            None,
+            Some(1),
+        );
+        match result {
+            Err(LooperError::ProviderTimeout { timeout_secs, .. }) => {
+                assert_eq!(timeout_secs, 1);
+            }
+            other => panic!("expected ProviderTimeout, got: {:?}", other),
+        }
+    }
+
+    /// Verify that a fast process completes normally without triggering timeout.
+    #[test]
+    #[cfg(unix)]
+    fn non_streaming_fast_process_is_not_timed_out() {
+        let result = super::run_provider_process(
+            "echo",
+            &["hello"],
+            false,
+            None,
+            Some(5),
+        );
+        match result {
+            Ok(r) => assert!(r.succeeded(), "expected success, got: {:?}", r.exit_code),
+            Err(e) => panic!("expected Ok, got: {e}"),
+        }
     }
 }

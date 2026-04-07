@@ -130,6 +130,12 @@ pub struct Cli {
     #[arg(long)]
     pub on_complete: Option<String>,
 
+    /// Maximum seconds a single provider invocation may run before being killed.
+    /// When the timeout fires the iteration is recorded as `timeout` and may be
+    /// retried if `--max-retries` is set.  Omit or set to 0 to disable.
+    #[arg(long)]
+    pub iteration_timeout_secs: Option<u64>,
+
     /// Issue tracking mode: `github` (production) or `local` (dev/debug).
     #[arg(long)]
     pub issue_tracking_mode: Option<IssueTrackingMode>,
@@ -249,6 +255,11 @@ impl Cli {
         if let Some(cmd) = self.on_complete {
             base.on_complete = Some(cmd);
         }
+        if let Some(secs) = self.iteration_timeout_secs {
+            if secs > 0 {
+                base.iteration_timeout_secs = Some(secs);
+            }
+        }
         if let Some(mode) = self.issue_tracking_mode {
             base.issue_tracking.mode = mode;
         }
@@ -323,6 +334,7 @@ mod tests {
             max_retries: None,
             retry_backoff_ms: None,
             on_complete: None,
+            iteration_timeout_secs: None,
             issue_tracking_mode: None,
             issue_tracking_owner: None,
             issue_tracking_repo: None,
@@ -463,6 +475,22 @@ mod tests {
         assert_eq!(config.max_retries, 0);
         assert_eq!(config.retry_backoff_ms, 500);
         assert!(config.on_complete.is_none());
+        assert!(config.iteration_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn cli_iteration_timeout_secs_propagates() {
+        let cli = Cli { iteration_timeout_secs: Some(30), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.iteration_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn cli_iteration_timeout_secs_zero_is_ignored() {
+        // 0 means "no timeout" — treated the same as omitting the flag.
+        let cli = Cli { iteration_timeout_secs: Some(0), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.iteration_timeout_secs.is_none());
     }
 
     #[test]
