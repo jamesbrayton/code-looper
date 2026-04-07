@@ -619,6 +619,14 @@ impl LoopConfig {
                 ));
             }
         }
+        if let Some(path) = &self.prompt_file {
+            if !path.exists() {
+                return Err(LooperError::InvalidArgument(format!(
+                    "--prompt-file '{}' does not exist",
+                    path.display()
+                )));
+            }
+        }
         if let Some(cmd) = &self.on_complete {
             if cmd.trim().is_empty() {
                 return Err(LooperError::InvalidArgument(
@@ -685,6 +693,30 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn prompt_file_pointing_to_missing_path_is_invalid() {
+        let config = LoopConfig {
+            prompt_file: Some("/nonexistent/path/to/prompt.md".into()),
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "expected 'does not exist' in error: {err}"
+        );
+    }
+
+    #[test]
+    fn prompt_file_pointing_to_existing_file_is_valid() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "prompt content").unwrap();
+        let config = LoopConfig {
+            prompt_file: Some(f.path().to_path_buf()),
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
     }
 
     #[test]

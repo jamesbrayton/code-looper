@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
 // ── Request / response types ──────────────────────────────────────────────────
 
@@ -224,22 +224,44 @@ impl ServiceMode {
 
                 match adapter.execute(&prompt) {
                     Ok(result) => {
-                        if result.succeeded() {
+                        let ok = result.succeeded();
+                        let duration_ms = result.duration.as_millis();
+                        if ok {
                             state.success_count += 1;
+                            info!(
+                                provider = adapter.name(),
+                                duration_ms,
+                                exit_code = result.exit_code,
+                                ok = true,
+                                "Service run completed"
+                            );
                         } else {
                             state.failure_count += 1;
+                            warn!(
+                                provider = adapter.name(),
+                                duration_ms,
+                                exit_code = result.exit_code,
+                                ok = false,
+                                "Service run failed"
+                            );
                         }
                         let data = serde_json::json!({
-                            "ok": result.succeeded(),
+                            "ok": ok,
                             "exit_code": result.exit_code,
                             "stdout": result.stdout,
                             "stderr": result.stderr,
-                            "duration_ms": result.duration.as_millis(),
+                            "duration_ms": duration_ms,
                         });
                         (ServiceResponse::success(data), false)
                     }
                     Err(e) => {
                         state.failure_count += 1;
+                        error!(
+                            provider = adapter.name(),
+                            error = %e,
+                            ok = false,
+                            "Service run error"
+                        );
                         (ServiceResponse::failure(e.to_string()), false)
                     }
                 }
