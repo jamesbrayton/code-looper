@@ -37,7 +37,11 @@ pub fn derive_branch_name(
     title: &str,
     max_slug_length: usize,
 ) -> String {
-    let max_slug = if max_slug_length == 0 { DEFAULT_MAX_SLUG_LEN } else { max_slug_length };
+    let max_slug = if max_slug_length == 0 {
+        DEFAULT_MAX_SLUG_LEN
+    } else {
+        max_slug_length
+    };
 
     // Lower-case and replace non-alnum with '-'
     let raw: String = title
@@ -119,7 +123,12 @@ pub fn current_branch() -> Result<String, BranchError> {
 /// Return `true` if a local branch with `name` exists.
 fn local_branch_exists(name: &str) -> bool {
     Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{name}")])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{name}"),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -128,7 +137,12 @@ fn local_branch_exists(name: &str) -> bool {
 /// Return `true` if a remote-tracking branch `origin/{name}` exists.
 fn remote_branch_exists(name: &str) -> bool {
     Command::new("git")
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{name}")])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/remotes/origin/{name}"),
+        ])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -195,7 +209,12 @@ impl BranchManager {
 
     /// Derive the feature branch name for this issue.
     pub fn branch_name(&self, issue_number: u64, title: &str) -> String {
-        derive_branch_name(&self.config.branch_prefix, issue_number, title, self.max_slug_length)
+        derive_branch_name(
+            &self.config.branch_prefix,
+            issue_number,
+            title,
+            self.max_slug_length,
+        )
     }
 
     /// Ensure a feature branch exists for `issue_number`/`title` and check it
@@ -213,11 +232,17 @@ impl BranchManager {
 
         if local_branch_exists(&branch) {
             // Already exists locally — just switch to it
-            tracing::debug!(branch, "feature branch already exists locally; checking out");
+            tracing::debug!(
+                branch,
+                "feature branch already exists locally; checking out"
+            );
             git(&["checkout", &branch])?;
         } else if remote_branch_exists(&branch) {
             // Exists on remote but not locally — create tracking branch
-            tracing::debug!(branch, "feature branch exists on remote; creating local tracking branch");
+            tracing::debug!(
+                branch,
+                "feature branch exists on remote; creating local tracking branch"
+            );
             git(&["checkout", "-b", &branch, &format!("origin/{branch}")])?;
         } else {
             // New branch — create from latest base_branch
@@ -226,7 +251,12 @@ impl BranchManager {
             let _ = Command::new("git")
                 .args(["fetch", "origin", self.base()])
                 .status();
-            git(&["checkout", "-b", &branch, &format!("origin/{}", self.base())])?;
+            git(&[
+                "checkout",
+                "-b",
+                &branch,
+                &format!("origin/{}", self.base()),
+            ])?;
         }
 
         Ok(branch)
@@ -257,7 +287,11 @@ impl BranchManager {
             // in our local branch we let git reject it (correct behaviour).
         }
 
-        tracing::info!(branch, force = self.config.allow_force_push, "pushing feature branch");
+        tracing::info!(
+            branch,
+            force = self.config.allow_force_push,
+            "pushing feature branch"
+        );
         git(&args).map(|_| ())
     }
 
@@ -318,14 +352,20 @@ mod tests {
     }
 
     fn config_with_prefix(prefix: &str) -> PrManagementConfig {
-        PrManagementConfig { branch_prefix: prefix.to_string(), ..config() }
+        PrManagementConfig {
+            branch_prefix: prefix.to_string(),
+            ..config()
+        }
     }
 
     // ── derive_branch_name ────────────────────────────────────────────────────
 
     #[test]
     fn basic_name_derivation() {
-        assert_eq!(derive_branch_name("loop/", 42, "Fix auth bug", 40), "loop/42-fix-auth-bug");
+        assert_eq!(
+            derive_branch_name("loop/", 42, "Fix auth bug", 40),
+            "loop/42-fix-auth-bug"
+        );
     }
 
     #[test]
@@ -370,7 +410,10 @@ mod tests {
         // "aaa-bbb-ccc..." — truncation at 7 → "aaa-bbb" is fine, but "aaa-bbb-" → "aaa-bbb"
         let title = "aaa bbb ccc ddd"; // slug: "aaa-bbb-ccc-ddd", truncate at 8 → "aaa-bbb-" → "aaa-bbb"
         let name = derive_branch_name("loop/", 1, title, 8);
-        assert!(!name.ends_with('-'), "branch name must not end with dash: {name}");
+        assert!(
+            !name.ends_with('-'),
+            "branch name must not end with dash: {name}"
+        );
     }
 
     #[test]
@@ -390,7 +433,10 @@ mod tests {
 
     #[test]
     fn custom_prefix_propagated() {
-        assert_eq!(derive_branch_name("feat/", 1, "hello world", 40), "feat/1-hello-world");
+        assert_eq!(
+            derive_branch_name("feat/", 1, "hello world", 40),
+            "feat/1-hello-world"
+        );
     }
 
     #[test]
@@ -405,7 +451,10 @@ mod tests {
     #[test]
     fn branch_name_uses_config_prefix() {
         let manager = BranchManager::new(config_with_prefix("feat/"));
-        assert_eq!(manager.branch_name(1, "do something"), "feat/1-do-something");
+        assert_eq!(
+            manager.branch_name(1, "do something"),
+            "feat/1-do-something"
+        );
     }
 
     #[test]
@@ -437,7 +486,10 @@ mod tests {
 
     #[test]
     fn no_pr_push_false_skips_push() {
-        let cfg = PrManagementConfig { mode: PrMode::NoPr, ..config() };
+        let cfg = PrManagementConfig {
+            mode: PrMode::NoPr,
+            ..config()
+        };
         let mut mgr = BranchManager::new(cfg);
         mgr.no_pr_push = false;
         // Should return Ok without calling git (since no_pr_push=false in no-pr mode)

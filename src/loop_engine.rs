@@ -3,14 +3,10 @@ use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
-use crate::pr_manager::{
-    GhPrLifecycle, PrManager, TriageAction, build_pr_manager,
-};
-use crate::pr_strategy::{PrStrategy, build_strategy};
+use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrManager, TriageAction};
+use crate::pr_strategy::{build_strategy, PrStrategy};
 use crate::provider::{build_adapter, ProviderAdapter};
-use crate::telemetry::{
-    IterationOutcome, IterationRecord, RunArtifacts, RunManifest, unix_now,
-};
+use crate::telemetry::{unix_now, IterationOutcome, IterationRecord, RunArtifacts, RunManifest};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -145,7 +141,12 @@ pub struct LoopEngine {
 
 impl LoopEngine {
     pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
-        let adapter = build_adapter(&config.provider, config.telemetry.stream_output, config.workspace_dir.clone(), config.iteration_timeout_secs);
+        let adapter = build_adapter(
+            &config.provider,
+            config.telemetry.stream_output,
+            config.workspace_dir.clone(),
+            config.iteration_timeout_secs,
+        );
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
             let repo = config.orchestration.repo_name.clone().unwrap_or_default();
@@ -170,7 +171,17 @@ impl LoopEngine {
             None
         };
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine, guard, tracker, pr_strategy, pr_manager, branch_manager, interrupted }
+        Self {
+            config,
+            adapter,
+            policy_engine,
+            guard,
+            tracker,
+            pr_strategy,
+            pr_manager,
+            branch_manager,
+            interrupted,
+        }
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
@@ -524,7 +535,11 @@ impl LoopEngine {
             // If orchestration is enabled, select a workflow branch and use its prompt.
             let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {
                 match engine.select_branch() {
-                    Ok(BranchSelection { branch, prompt_override, .. }) => {
+                    Ok(BranchSelection {
+                        branch,
+                        prompt_override,
+                        ..
+                    }) => {
                         let branch_name = branch.to_string();
                         info!(
                             iteration = i,
@@ -532,8 +547,8 @@ impl LoopEngine {
                             workflow_branch = %branch_name,
                             "Iteration start"
                         );
-                        let p = prompt_override
-                            .unwrap_or_else(|| branch.default_prompt().to_string());
+                        let p =
+                            prompt_override.unwrap_or_else(|| branch.default_prompt().to_string());
                         (p, Some(branch_name))
                     }
                     Err(e) => {
@@ -640,8 +655,7 @@ impl LoopEngine {
                                 attempt += 1;
                             } else {
                                 final_outcome = outcome;
-                                let first_err =
-                                    IterationRecord::stderr_first_line(&result.stderr);
+                                let first_err = IterationRecord::stderr_first_line(&result.stderr);
                                 warn!(
                                     iteration = i,
                                     provider = self.adapter.name(),
@@ -657,7 +671,10 @@ impl LoopEngine {
                             }
                         }
                     }
-                    Err(crate::error::LooperError::ProviderTimeout { binary: _, timeout_secs }) => {
+                    Err(crate::error::LooperError::ProviderTimeout {
+                        binary: _,
+                        timeout_secs,
+                    }) => {
                         let outcome = IterationOutcome::Timeout;
                         if attempt < self.config.max_retries {
                             summary.retries += 1;
@@ -691,8 +708,9 @@ impl LoopEngine {
                     Err(crate::error::LooperError::ProviderSpawn { binary, source }) => {
                         let msg = format!("failed to spawn '{binary}': {source}");
                         error!(iteration = i, provider = self.adapter.name(), "{msg}");
-                        final_outcome =
-                            IterationOutcome::SpawnFailure { message: msg.clone() };
+                        final_outcome = IterationOutcome::SpawnFailure {
+                            message: msg.clone(),
+                        };
                         if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
                             self.post_comment(&format!(
                                 "**Blocker** — iteration {i} aborted: provider spawn failure. \
@@ -782,7 +800,11 @@ impl LoopEngine {
                             }
                         }
                         Ok(crate::pr_manager::PrAction::Updated { pr, .. }) => {
-                            info!(iteration = i, pr = pr.number, "single-pr: commented on existing PR");
+                            info!(
+                                iteration = i,
+                                pr = pr.number,
+                                "single-pr: commented on existing PR"
+                            );
                         }
                         Ok(crate::pr_manager::PrAction::BlockedOnHumanReview(pr)) => {
                             info!(
@@ -814,11 +836,12 @@ impl LoopEngine {
                 } else {
                     String::new()
                 };
-                let err_note = if let Some(ref exc) = IterationRecord::stderr_first_line(&final_stderr) {
-                    format!("\n> `{exc}`")
-                } else {
-                    String::new()
-                };
+                let err_note =
+                    if let Some(ref exc) = IterationRecord::stderr_first_line(&final_stderr) {
+                        format!("\n> `{exc}`")
+                    } else {
+                        String::new()
+                    };
                 let comment_body = format!(
                     "**Iteration {i}** — outcome: `{outcome}`, duration: {ms}ms{retry}{err}",
                     outcome = final_outcome.label(),
@@ -841,7 +864,8 @@ impl LoopEngine {
             }
 
             // Post blocker comment when aborting due to stop_on_failure.
-            let stop_on_fail = !final_outcome.is_success() && self.config.stop_on_failure && !abort_loop;
+            let stop_on_fail =
+                !final_outcome.is_success() && self.config.stop_on_failure && !abort_loop;
             if stop_on_fail && cadence != &CommentCadence::OffEngine {
                 self.post_comment(&format!(
                     "**Blocker** — iteration {i} failed and `stop_on_failure` is set; \
@@ -875,7 +899,10 @@ impl LoopEngine {
             }
 
             if !final_outcome.is_success() && self.config.stop_on_failure {
-                info!(iteration = i, "stop_on_failure is set; halting loop after failed iteration");
+                info!(
+                    iteration = i,
+                    "stop_on_failure is set; halting loop after failed iteration"
+                );
                 summary.termination_reason = Some(TerminationReason::StoppedOnFailure);
                 break;
             }
@@ -938,7 +965,10 @@ impl LoopEngine {
                         }
                     }
                     Ok(_) => {
-                        info!(issue = issue_number, "Owned issue is closed — lifecycle complete");
+                        info!(
+                            issue = issue_number,
+                            "Owned issue is closed — lifecycle complete"
+                        );
                     }
                     Err(e) => {
                         warn!(
@@ -975,10 +1005,7 @@ impl LoopEngine {
             ended_at: Some(run_ended_at),
             provider: self.adapter.name().to_string(),
             iterations_requested: self.config.iterations,
-            termination_reason: summary
-                .termination_reason
-                .as_ref()
-                .map(|r| r.to_string()),
+            termination_reason: summary.termination_reason.as_ref().map(|r| r.to_string()),
             skipped_decisions: summary.skipped_decisions,
             iterations: iteration_records,
         };
@@ -1143,7 +1170,10 @@ mod tests {
             TerminationReason::ProviderError("bad".to_string()).to_string(),
             "provider error: bad"
         );
-        assert_eq!(TerminationReason::StoppedOnFailure.to_string(), "stopped on failure");
+        assert_eq!(
+            TerminationReason::StoppedOnFailure.to_string(),
+            "stopped on failure"
+        );
     }
 
     #[test]
@@ -1160,7 +1190,10 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 1);
-        assert_eq!(summary.termination_reason, Some(TerminationReason::StoppedOnFailure));
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::StoppedOnFailure)
+        );
     }
 
     #[test]
@@ -1177,7 +1210,10 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 3);
         assert_eq!(summary.failures, 3);
-        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Completed)
+        );
     }
 
     #[test]
@@ -1189,7 +1225,9 @@ mod tests {
         // Adapter that always returns exit code 1.
         struct AlwaysFailAdapter;
         impl ProviderAdapter for AlwaysFailAdapter {
-            fn name(&self) -> &str { "always-fail" }
+            fn name(&self) -> &str {
+                "always-fail"
+            }
             fn execute(&self, _prompt: &str) -> Result<ExecutionResult, LooperError> {
                 Ok(ExecutionResult {
                     exit_code: Some(1),
@@ -1228,7 +1266,9 @@ mod tests {
             calls: Arc<AtomicU32>,
         }
         impl ProviderAdapter for FlipFlopAdapter {
-            fn name(&self) -> &str { "flip-flop" }
+            fn name(&self) -> &str {
+                "flip-flop"
+            }
             fn execute(&self, _prompt: &str) -> Result<ExecutionResult, LooperError> {
                 let n = self.calls.fetch_add(1, AtomOrd::SeqCst);
                 Ok(ExecutionResult {
@@ -1272,7 +1312,10 @@ mod tests {
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
         // The hook runs after run() returns the summary — just confirm loop completed.
-        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Completed)
+        );
     }
 
     #[test]
@@ -1343,7 +1386,10 @@ mod tests {
             ..Default::default()
         };
         let resolver = StubContextResolver {
-            context: RepoContext { open_pr_count: 0, open_issue_count: 1 },
+            context: RepoContext {
+                open_pr_count: 0,
+                open_issue_count: 1,
+            },
         };
         let policy_engine = PolicyEngine::new(Box::new(resolver));
         let adapter = FakeAdapter::success("fake");
@@ -1351,7 +1397,10 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 2);
         assert_eq!(summary.successes, 2);
-        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Completed)
+        );
     }
 
     #[test]
@@ -1423,7 +1472,9 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
@@ -1432,14 +1483,24 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, MockCall::AddComment { .. }))
             .collect();
-        assert_eq!(add_comment_calls.len(), 2, "expected start + end comments, got {add_comment_calls:?}");
+        assert_eq!(
+            add_comment_calls.len(),
+            2,
+            "expected start + end comments, got {add_comment_calls:?}"
+        );
         if let MockCall::AddComment { number, body } = &add_comment_calls[0] {
             assert_eq!(*number, 42);
-            assert!(body.contains("Loop run started"), "start comment body: {body}");
+            assert!(
+                body.contains("Loop run started"),
+                "start comment body: {body}"
+            );
         }
         if let MockCall::AddComment { number, body } = &add_comment_calls[1] {
             assert_eq!(*number, 42);
-            assert!(body.contains("Loop run finished"), "end comment body: {body}");
+            assert!(
+                body.contains("Loop run finished"),
+                "end comment body: {body}"
+            );
         }
     }
 
@@ -1450,23 +1511,33 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::failure("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
         let comment_bodies: Vec<_> = calls
             .iter()
             .filter_map(|c| {
-                if let MockCall::AddComment { body, .. } = c { Some(body.as_str()) } else { None }
+                if let MockCall::AddComment { body, .. } = c {
+                    Some(body.as_str())
+                } else {
+                    None
+                }
             })
             .collect();
         // start + 2 failure iteration comments (deduplicated if identical) + end
         assert!(
-            comment_bodies.iter().any(|b| b.contains("Loop run started")),
+            comment_bodies
+                .iter()
+                .any(|b| b.contains("Loop run started")),
             "missing start comment; got: {comment_bodies:?}"
         );
         assert!(
-            comment_bodies.iter().any(|b| b.contains("Loop run finished")),
+            comment_bodies
+                .iter()
+                .any(|b| b.contains("Loop run finished")),
             "missing end comment"
         );
         assert!(
@@ -1482,7 +1553,9 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
@@ -1491,7 +1564,10 @@ mod tests {
             .filter(|c| matches!(c, MockCall::AddComment { .. }))
             .count();
         // 1 start + 2 iteration comments + 1 end = 4
-        assert_eq!(add_comment_count, 4, "expected 4 comments for 2 iterations, got {add_comment_count}");
+        assert_eq!(
+            add_comment_count, 4,
+            "expected 4 comments for 2 iterations, got {add_comment_count}"
+        );
     }
 
     #[test]
@@ -1501,11 +1577,15 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
-        let has_comment = calls.iter().any(|c| matches!(c, MockCall::AddComment { .. }));
+        let has_comment = calls
+            .iter()
+            .any(|c| matches!(c, MockCall::AddComment { .. }));
         assert!(!has_comment, "off-engine cadence should post no comments");
     }
 
@@ -1527,12 +1607,16 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
         assert!(
-            !calls.iter().any(|c| matches!(c, MockCall::AddComment { .. })),
+            !calls
+                .iter()
+                .any(|c| matches!(c, MockCall::AddComment { .. })),
             "local mode should never post comments"
         );
     }
@@ -1560,12 +1644,16 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
         assert!(
-            calls.iter().any(|c| matches!(c, MockCall::EnsureLabels(l) if l.contains(&"bug".to_string()))),
+            calls
+                .iter()
+                .any(|c| matches!(c, MockCall::EnsureLabels(l) if l.contains(&"bug".to_string()))),
             "expected EnsureLabels call; got: {calls:?}"
         );
     }
@@ -1587,7 +1675,9 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
@@ -1620,7 +1710,9 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
@@ -1663,7 +1755,9 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
@@ -1694,14 +1788,20 @@ mod tests {
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::failure("fake")),
-            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(
+                &tracker,
+            ))),
         );
         engine.run();
         let calls = tracker.recorded_calls();
         let comment_bodies: Vec<_> = calls
             .iter()
             .filter_map(|c| {
-                if let MockCall::AddComment { body, .. } = c { Some(body.as_str()) } else { None }
+                if let MockCall::AddComment { body, .. } = c {
+                    Some(body.as_str())
+                } else {
+                    None
+                }
             })
             .collect();
         assert!(
@@ -1732,9 +1832,8 @@ mod tests {
         // Build a production engine; we check the branch_manager field directly.
         // We can't run the loop (it would spawn 'claude'), so we just verify
         // construction succeeds and branch_manager is present.
-        let guard = crate::policy_guard::PolicyGuard::new(
-            crate::policy_guard::UnsafeOverrides::default(),
-        );
+        let guard =
+            crate::policy_guard::PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let engine = LoopEngine::new(config, guard);
         assert!(
             engine.branch_manager.is_some(),
@@ -1747,7 +1846,10 @@ mod tests {
             name.starts_with("loop/0"),
             "branch name '{name}' must start with 'loop/0', not the bare prefix"
         );
-        assert_ne!(name, "loop", "branch name must not be the bare trimmed prefix");
+        assert_ne!(
+            name, "loop",
+            "branch name must not be the bare trimmed prefix"
+        );
     }
 
     /// Verify that in no-pr mode, `branch_manager` is None (we don't manage
@@ -1765,9 +1867,8 @@ mod tests {
             },
             ..Default::default()
         };
-        let guard = crate::policy_guard::PolicyGuard::new(
-            crate::policy_guard::UnsafeOverrides::default(),
-        );
+        let guard =
+            crate::policy_guard::PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let engine = LoopEngine::new(config, guard);
         assert!(
             engine.branch_manager.is_none(),
@@ -1819,8 +1920,10 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 2);
         assert_eq!(summary.successes, 2);
-        assert_eq!(summary.skipped_decisions, 2,
-            "each BlockedOnHumanReview should increment skipped_decisions by 1");
+        assert_eq!(
+            summary.skipped_decisions, 2,
+            "each BlockedOnHumanReview should increment skipped_decisions by 1"
+        );
     }
 
     // ── Timeout handling ──────────────────────────────────────────────────────
@@ -1838,9 +1941,15 @@ mod tests {
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 3);
-        assert_eq!(summary.failures, 3, "timed-out iterations should count as failures");
+        assert_eq!(
+            summary.failures, 3,
+            "timed-out iterations should count as failures"
+        );
         assert_eq!(summary.successes, 0);
-        assert_eq!(summary.termination_reason, Some(TerminationReason::Completed));
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Completed)
+        );
     }
 
     #[test]
@@ -1876,6 +1985,9 @@ mod tests {
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1, "should stop after first timeout");
-        assert_eq!(summary.termination_reason, Some(TerminationReason::StoppedOnFailure));
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::StoppedOnFailure)
+        );
     }
 }

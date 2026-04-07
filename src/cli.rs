@@ -354,14 +354,20 @@ mod tests {
 
     #[test]
     fn cli_overrides_provider() {
-        let cli = Cli { provider: Some(Provider::Copilot), ..blank_cli() };
+        let cli = Cli {
+            provider: Some(Provider::Copilot),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.provider, Provider::Copilot);
     }
 
     #[test]
     fn cli_overrides_iterations() {
-        let cli = Cli { iterations: Some(10), ..blank_cli() };
+        let cli = Cli {
+            iterations: Some(10),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.iterations, 10);
     }
@@ -371,7 +377,10 @@ mod tests {
         let mut base = default_config();
         base.prompt_file = Some("old.md".into());
 
-        let cli = Cli { prompt_inline: Some("new prompt".to_string()), ..blank_cli() };
+        let cli = Cli {
+            prompt_inline: Some("new prompt".to_string()),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(base);
         assert_eq!(config.prompt_inline.as_deref(), Some("new prompt"));
         assert!(config.prompt_file.is_none());
@@ -410,14 +419,20 @@ mod tests {
 
     #[test]
     fn cli_skip_prereq_check_sets_flag() {
-        let cli = Cli { skip_prereq_check: true, ..blank_cli() };
+        let cli = Cli {
+            skip_prereq_check: true,
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(config.skip_prereq_check);
     }
 
     #[test]
     fn cli_allow_direct_github_sets_flag() {
-        let cli = Cli { allow_direct_github: true, ..blank_cli() };
+        let cli = Cli {
+            allow_direct_github: true,
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(config.allow_direct_github);
     }
@@ -442,28 +457,40 @@ mod tests {
 
     #[test]
     fn cli_stop_on_failure_sets_flag() {
-        let cli = Cli { stop_on_failure: true, ..blank_cli() };
+        let cli = Cli {
+            stop_on_failure: true,
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(config.stop_on_failure);
     }
 
     #[test]
     fn cli_max_retries_propagates() {
-        let cli = Cli { max_retries: Some(3), ..blank_cli() };
+        let cli = Cli {
+            max_retries: Some(3),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.max_retries, 3);
     }
 
     #[test]
     fn cli_retry_backoff_ms_propagates() {
-        let cli = Cli { retry_backoff_ms: Some(1000), ..blank_cli() };
+        let cli = Cli {
+            retry_backoff_ms: Some(1000),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.retry_backoff_ms, 1000);
     }
 
     #[test]
     fn cli_on_complete_propagates() {
-        let cli = Cli { on_complete: Some("echo done".to_string()), ..blank_cli() };
+        let cli = Cli {
+            on_complete: Some("echo done".to_string()),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.on_complete.as_deref(), Some("echo done"));
     }
@@ -480,7 +507,10 @@ mod tests {
 
     #[test]
     fn cli_iteration_timeout_secs_propagates() {
-        let cli = Cli { iteration_timeout_secs: Some(30), ..blank_cli() };
+        let cli = Cli {
+            iteration_timeout_secs: Some(30),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.iteration_timeout_secs, Some(30));
     }
@@ -488,7 +518,10 @@ mod tests {
     #[test]
     fn cli_iteration_timeout_secs_zero_is_ignored() {
         // 0 means "no timeout" — treated the same as omitting the flag.
-        let cli = Cli { iteration_timeout_secs: Some(0), ..blank_cli() };
+        let cli = Cli {
+            iteration_timeout_secs: Some(0),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(config.iteration_timeout_secs.is_none());
     }
@@ -530,28 +563,43 @@ mod tests {
 
     #[test]
     fn cli_stream_output_false_propagates() {
-        let cli = Cli { stream_output: Some(false), ..blank_cli() };
+        let cli = Cli {
+            stream_output: Some(false),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(!config.telemetry.stream_output);
     }
 
     #[test]
     fn cli_artifacts_dir_propagates() {
-        let cli = Cli { artifacts_dir: Some("/tmp/runs".into()), ..blank_cli() };
+        let cli = Cli {
+            artifacts_dir: Some("/tmp/runs".into()),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
-        assert_eq!(config.telemetry.artifacts_dir, std::path::PathBuf::from("/tmp/runs"));
+        assert_eq!(
+            config.telemetry.artifacts_dir,
+            std::path::PathBuf::from("/tmp/runs")
+        );
     }
 
     #[test]
     fn cli_keep_runs_propagates() {
-        let cli = Cli { keep_runs: Some(5), ..blank_cli() };
+        let cli = Cli {
+            keep_runs: Some(5),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.telemetry.keep_runs, 5);
     }
 
     #[test]
     fn cli_no_summary_propagates() {
-        let cli = Cli { no_summary: true, ..blank_cli() };
+        let cli = Cli {
+            no_summary: true,
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(config.telemetry.no_summary);
     }
@@ -567,28 +615,40 @@ mod tests {
     #[test]
     fn cli_pr_mode_propagates() {
         use crate::config::PrMode;
-        let cli = Cli { pr_mode: Some(PrMode::SinglePr), ..blank_cli() };
+        let cli = Cli {
+            pr_mode: Some(PrMode::SinglePr),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.pr_management.mode, PrMode::SinglePr);
     }
 
     #[test]
     fn cli_base_branch_propagates() {
-        let cli = Cli { base_branch: Some("develop".to_string()), ..blank_cli() };
+        let cli = Cli {
+            base_branch: Some("develop".to_string()),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.pr_management.base_branch, "develop");
     }
 
     #[test]
     fn cli_branch_prefix_propagates() {
-        let cli = Cli { branch_prefix: Some("feat/".to_string()), ..blank_cli() };
+        let cli = Cli {
+            branch_prefix: Some("feat/".to_string()),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert_eq!(config.pr_management.branch_prefix, "feat/");
     }
 
     #[test]
     fn cli_require_human_review_false_propagates() {
-        let cli = Cli { require_human_review: Some(false), ..blank_cli() };
+        let cli = Cli {
+            require_human_review: Some(false),
+            ..blank_cli()
+        };
         let config = cli.apply_overrides(default_config());
         assert!(!config.pr_management.require_human_review);
     }

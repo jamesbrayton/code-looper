@@ -60,9 +60,21 @@ pub fn build_adapter(
     timeout_secs: Option<u64>,
 ) -> Box<dyn ProviderAdapter> {
     match kind {
-        ProviderKind::Claude => Box::new(ClaudeAdapter { stream_output, working_dir, timeout_secs }),
-        ProviderKind::Copilot => Box::new(CopilotAdapter { stream_output, working_dir, timeout_secs }),
-        ProviderKind::Codex => Box::new(CodexAdapter { stream_output, working_dir, timeout_secs }),
+        ProviderKind::Claude => Box::new(ClaudeAdapter {
+            stream_output,
+            working_dir,
+            timeout_secs,
+        }),
+        ProviderKind::Copilot => Box::new(CopilotAdapter {
+            stream_output,
+            working_dir,
+            timeout_secs,
+        }),
+        ProviderKind::Codex => Box::new(CodexAdapter {
+            stream_output,
+            working_dir,
+            timeout_secs,
+        }),
     }
 }
 
@@ -128,7 +140,13 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        run_provider_process("codex", &[prompt], self.stream_output, self.working_dir.as_deref(), self.timeout_secs)
+        run_provider_process(
+            "codex",
+            &[prompt],
+            self.stream_output,
+            self.working_dir.as_deref(),
+            self.timeout_secs,
+        )
     }
 }
 
@@ -215,10 +233,14 @@ fn run_provider_process(
         }
 
         let stdout_captured = stdout_handle.join().unwrap_or_default();
-        let status = child.lock().unwrap().wait().map_err(|e| LooperError::ProviderSpawn {
-            binary: binary.to_string(),
-            source: e,
-        })?;
+        let status = child
+            .lock()
+            .unwrap()
+            .wait()
+            .map_err(|e| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: e,
+            })?;
         let duration = start.elapsed();
 
         if timeout_fired.load(Ordering::Relaxed) {
@@ -392,9 +414,18 @@ pub mod tests {
 
     #[test]
     fn build_adapter_returns_correct_names() {
-        assert_eq!(build_adapter(&ProviderKind::Claude, false, None, None).name(), "claude");
-        assert_eq!(build_adapter(&ProviderKind::Copilot, false, None, None).name(), "copilot");
-        assert_eq!(build_adapter(&ProviderKind::Codex, false, None, None).name(), "codex");
+        assert_eq!(
+            build_adapter(&ProviderKind::Claude, false, None, None).name(),
+            "claude"
+        );
+        assert_eq!(
+            build_adapter(&ProviderKind::Copilot, false, None, None).name(),
+            "copilot"
+        );
+        assert_eq!(
+            build_adapter(&ProviderKind::Codex, false, None, None).name(),
+            "codex"
+        );
     }
 
     // ── Timeout adapter ───────────────────────────────────────────────────────
@@ -425,13 +456,7 @@ pub mod tests {
     #[cfg(unix)]
     fn non_streaming_process_is_killed_on_timeout() {
         // sleep for 60s, but timeout after 1s
-        let result = super::run_provider_process(
-            "sleep",
-            &["60"],
-            false,
-            None,
-            Some(1),
-        );
+        let result = super::run_provider_process("sleep", &["60"], false, None, Some(1));
         match result {
             Err(LooperError::ProviderTimeout { timeout_secs, .. }) => {
                 assert_eq!(timeout_secs, 1);
@@ -444,13 +469,7 @@ pub mod tests {
     #[test]
     #[cfg(unix)]
     fn non_streaming_fast_process_is_not_timed_out() {
-        let result = super::run_provider_process(
-            "echo",
-            &["hello"],
-            false,
-            None,
-            Some(5),
-        );
+        let result = super::run_provider_process("echo", &["hello"], false, None, Some(5));
         match result {
             Ok(r) => assert!(r.succeeded(), "expected success, got: {:?}", r.exit_code),
             Err(e) => panic!("expected Ok, got: {e}"),

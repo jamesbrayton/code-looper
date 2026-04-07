@@ -61,7 +61,9 @@ pub struct PrerequisiteChecker {
 
 impl PrerequisiteChecker {
     pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
-        Self { workspace_dir: workspace_dir.into() }
+        Self {
+            workspace_dir: workspace_dir.into(),
+        }
     }
 
     /// Run all prerequisite checks and return the aggregate result.
@@ -80,11 +82,7 @@ impl PrerequisiteChecker {
     /// Check that an instruction file exists and return its path when found.
     fn check_instruction_file(&self, result: &mut CheckResult) -> Option<PathBuf> {
         const CHECK: &str = "instruction-file";
-        let candidates = [
-            "CLAUDE.md",
-            "AGENTS.md",
-            ".github/copilot-instructions.md",
-        ];
+        let candidates = ["CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"];
 
         let found_path = candidates
             .iter()
@@ -152,10 +150,7 @@ impl PrerequisiteChecker {
         if !mcp_path.is_file() {
             result.failed.push(DiagnosticError {
                 check: CHECK.to_string(),
-                message: format!(
-                    "No .mcp.json found in '{}'",
-                    self.workspace_dir.display()
-                ),
+                message: format!("No .mcp.json found in '{}'", self.workspace_dir.display()),
                 remediation: "Create a .mcp.json that includes a \"github\" MCP server entry. \
                               See https://docs.anthropic.com/en/docs/claude-code/mcp for details."
                     .to_string(),
@@ -273,7 +268,11 @@ mod tests {
     #[test]
     fn passes_when_copilot_instructions_exist() {
         let dir = setup_dir();
-        write_file(&dir, ".github/copilot-instructions.md", &valid_instruction_content());
+        write_file(
+            &dir,
+            ".github/copilot-instructions.md",
+            &valid_instruction_content(),
+        );
         write_file(&dir, ".mcp.json", valid_mcp_json());
 
         let result = PrerequisiteChecker::new(dir.path()).run();
@@ -289,7 +288,10 @@ mod tests {
         assert!(!result.is_ok());
         assert!(result.failed.iter().any(|d| d.check == "instruction-file"));
         // instruction-section is skipped when no file is found
-        assert!(!result.failed.iter().any(|d| d.check == "instruction-section"));
+        assert!(!result
+            .failed
+            .iter()
+            .any(|d| d.check == "instruction-section"));
     }
 
     // ── instruction-section checks ────────────────────────────────────────────
@@ -312,7 +314,11 @@ mod tests {
 
         let result = PrerequisiteChecker::new(dir.path()).run();
         assert!(!result.is_ok());
-        let diag = result.failed.iter().find(|d| d.check == "instruction-section").unwrap();
+        let diag = result
+            .failed
+            .iter()
+            .find(|d| d.check == "instruction-section")
+            .unwrap();
         assert!(diag.remediation.contains("bootstrap"));
     }
 
@@ -323,8 +329,13 @@ mod tests {
         write_file(&dir, ".mcp.json", valid_mcp_json());
 
         let result = PrerequisiteChecker::new(dir.path()).run();
-        assert!(!result.failed.iter().any(|d| d.check == "instruction-section"),
-            "instruction-section should be skipped when no instruction file exists");
+        assert!(
+            !result
+                .failed
+                .iter()
+                .any(|d| d.check == "instruction-section"),
+            "instruction-section should be skipped when no instruction file exists"
+        );
     }
 
     // ── mcp-github-server checks ──────────────────────────────────────────────
@@ -358,7 +369,11 @@ mod tests {
 
         let result = PrerequisiteChecker::new(dir.path()).run();
         assert!(!result.is_ok());
-        let diag = result.failed.iter().find(|d| d.check == "mcp-github-server").unwrap();
+        let diag = result
+            .failed
+            .iter()
+            .find(|d| d.check == "mcp-github-server")
+            .unwrap();
         assert!(!diag.remediation.is_empty());
     }
 
@@ -371,7 +386,12 @@ mod tests {
         // No instruction file → instruction-file fails, instruction-section skipped.
         // No .mcp.json → mcp-github-server fails.
         let result = PrerequisiteChecker::new(dir.path()).run();
-        assert_eq!(result.failed.len(), 2, "expected 2 failures, got: {:?}", result.failed);
+        assert_eq!(
+            result.failed.len(),
+            2,
+            "expected 2 failures, got: {:?}",
+            result.failed
+        );
         assert_eq!(result.passed.len(), 0);
     }
 
@@ -382,9 +402,16 @@ mod tests {
         write_file(&dir, "CLAUDE.md", "# instructions");
 
         let result = PrerequisiteChecker::new(dir.path()).run();
-        assert_eq!(result.failed.len(), 2,
-            "expected instruction-section + mcp-github-server failures, got: {:?}", result.failed);
-        assert!(result.failed.iter().any(|d| d.check == "instruction-section"));
+        assert_eq!(
+            result.failed.len(),
+            2,
+            "expected instruction-section + mcp-github-server failures, got: {:?}",
+            result.failed
+        );
+        assert!(result
+            .failed
+            .iter()
+            .any(|d| d.check == "instruction-section"));
         assert!(result.failed.iter().any(|d| d.check == "mcp-github-server"));
     }
 
@@ -422,6 +449,6 @@ mod tests {
     #[test]
     fn resolve_workspace_dir_falls_back_to_cwd_when_none() {
         let resolved = resolve_workspace_dir(None);
-        assert!(resolved.is_absolute() || resolved == PathBuf::from("."));
+        assert!(resolved.is_absolute() || resolved == std::path::Path::new("."));
     }
 }

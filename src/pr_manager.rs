@@ -73,7 +73,10 @@ pub fn detect_signal(output: &str, ready_marker: &str) -> Option<ReadySignal> {
     // Try sentinel form first (cheap scan).
     for line in output.lines() {
         if line.trim() == ready_marker {
-            return Some(ReadySignal { summary: None, form: SignalForm::Sentinel });
+            return Some(ReadySignal {
+                summary: None,
+                form: SignalForm::Sentinel,
+            });
         }
     }
 
@@ -83,7 +86,10 @@ pub fn detect_signal(output: &str, ready_marker: &str) -> Option<ReadySignal> {
         if trimmed.starts_with('{') {
             if let Ok(sig) = serde_json::from_str::<JsonSignal>(trimmed) {
                 if sig.looper == "ready-for-review" {
-                    return Some(ReadySignal { summary: sig.summary, form: SignalForm::Json });
+                    return Some(ReadySignal {
+                        summary: sig.summary,
+                        form: SignalForm::Json,
+                    });
                 }
             }
         }
@@ -230,8 +236,11 @@ impl PrLifecycle for GhPrLifecycle {
         ];
 
         // gh pr create accepts multiple --label flags.
-        let label_args: Vec<String> =
-            draft.labels.iter().flat_map(|l| ["--label".to_string(), l.clone()]).collect();
+        let label_args: Vec<String> = draft
+            .labels
+            .iter()
+            .flat_map(|l| ["--label".to_string(), l.clone()])
+            .collect();
         let label_strs: Vec<&str> = label_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&label_strs);
 
@@ -254,9 +263,15 @@ impl PrLifecycle for GhPrLifecycle {
             .rsplit('/')
             .next()
             .and_then(|s| s.parse().ok())
-            .ok_or_else(|| PrError::ParseError(format!("cannot parse PR number from URL: {url}")))?;
+            .ok_or_else(|| {
+                PrError::ParseError(format!("cannot parse PR number from URL: {url}"))
+            })?;
 
-        Ok(PrInfo { number, url, title: draft.title.clone() })
+        Ok(PrInfo {
+            number,
+            url,
+            title: draft.title.clone(),
+        })
     }
 
     fn comment_on_pr(&self, pr_number: u32, body: &str) -> Result<(), PrError> {
@@ -268,7 +283,9 @@ impl PrLifecycle for GhPrLifecycle {
 
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            return Err(PrError::GhCommand(format!("gh pr comment failed: {stderr}")));
+            return Err(PrError::GhCommand(format!(
+                "gh pr comment failed: {stderr}"
+            )));
         }
         Ok(())
     }
@@ -279,10 +296,19 @@ impl PrLifecycle for GhPrLifecycle {
 /// Recorded call to the mock lifecycle.
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::enum_variant_names)]
 pub enum PrCall {
-    FindOpenPr { branch: String },
-    OpenPr { branch: String, base: String, title: String },
-    CommentOnPr { pr_number: u32 },
+    FindOpenPr {
+        branch: String,
+    },
+    OpenPr {
+        branch: String,
+        base: String,
+        title: String,
+    },
+    CommentOnPr {
+        pr_number: u32,
+    },
 }
 
 /// Test double for [`PrLifecycle`].
@@ -332,10 +358,9 @@ impl Default for MockPrLifecycle {
 #[cfg(test)]
 impl PrLifecycle for MockPrLifecycle {
     fn find_open_pr(&self, branch: &str) -> Result<Option<PrInfo>, PrError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(PrCall::FindOpenPr { branch: branch.to_string() });
+        self.calls.lock().unwrap().push(PrCall::FindOpenPr {
+            branch: branch.to_string(),
+        });
         Ok(self.existing_pr.lock().unwrap().clone())
     }
 
@@ -350,7 +375,10 @@ impl PrLifecycle for MockPrLifecycle {
 
     fn comment_on_pr(&self, pr_number: u32, body: &str) -> Result<(), PrError> {
         let _ = body;
-        self.calls.lock().unwrap().push(PrCall::CommentOnPr { pr_number });
+        self.calls
+            .lock()
+            .unwrap()
+            .push(PrCall::CommentOnPr { pr_number });
         Ok(())
     }
 }
@@ -387,7 +415,11 @@ impl<L: PrLifecycle> PrManager<L> {
             .ready_marker
             .clone()
             .unwrap_or_else(|| "LOOPER_READY_FOR_REVIEW".to_string());
-        Self { config, lifecycle, ready_marker }
+        Self {
+            config,
+            lifecycle,
+            ready_marker,
+        }
     }
 
     /// Build a PR title from an issue number and title.
@@ -471,14 +503,19 @@ impl<L: PrLifecycle> PrManager<L> {
             Some(pr) => {
                 // Existing PR, human review not required — append a comment.
                 let comment = match signal.summary {
-                    Some(ref s) => format!(
-                        "**Code Looper update** — agent signalled ready-for-review.\n\n{s}"
-                    ),
-                    None => "**Code Looper update** — agent signalled ready-for-review.".to_string(),
+                    Some(ref s) => {
+                        format!("**Code Looper update** — agent signalled ready-for-review.\n\n{s}")
+                    }
+                    None => {
+                        "**Code Looper update** — agent signalled ready-for-review.".to_string()
+                    }
                 };
                 self.lifecycle.comment_on_pr(pr.number, &comment)?;
                 tracing::info!(pr_number = pr.number, "appended comment to existing PR");
-                Ok(PrAction::Updated { pr, comment_added: true })
+                Ok(PrAction::Updated {
+                    pr,
+                    comment_added: true,
+                })
             }
         }
     }
@@ -550,11 +587,7 @@ pub trait PrLifecycleTriage: Send + Sync {
     ///
     /// The implementation queries `gh pr view <number> --json` for check
     /// status, review decision, and labels.
-    fn get_pr_state(
-        &self,
-        pr_number: u32,
-        skip_labels: &[String],
-    ) -> Result<PrWithState, PrError>;
+    fn get_pr_state(&self, pr_number: u32, skip_labels: &[String]) -> Result<PrWithState, PrError>;
 }
 
 impl PrLifecycleTriage for GhPrLifecycle {
@@ -581,14 +614,15 @@ impl PrLifecycleTriage for GhPrLifecycle {
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let prs: Vec<serde_json::Value> = serde_json::from_str(&stdout)
-            .map_err(|e| PrError::ParseError(e.to_string()))?;
+        let prs: Vec<serde_json::Value> =
+            serde_json::from_str(&stdout).map_err(|e| PrError::ParseError(e.to_string()))?;
 
         prs.into_iter()
             .map(|v| {
                 let number = v["number"]
                     .as_u64()
-                    .ok_or_else(|| PrError::ParseError("missing number".into()))? as u32;
+                    .ok_or_else(|| PrError::ParseError("missing number".into()))?
+                    as u32;
                 let url = v["url"]
                     .as_str()
                     .ok_or_else(|| PrError::ParseError("missing url".into()))?
@@ -602,11 +636,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
             .collect()
     }
 
-    fn get_pr_state(
-        &self,
-        pr_number: u32,
-        skip_labels: &[String],
-    ) -> Result<PrWithState, PrError> {
+    fn get_pr_state(&self, pr_number: u32, skip_labels: &[String]) -> Result<PrWithState, PrError> {
         let pr_ref = pr_number.to_string();
         let out = Command::new("gh")
             .args([
@@ -625,8 +655,8 @@ impl PrLifecycleTriage for GhPrLifecycle {
         }
 
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let v: serde_json::Value = serde_json::from_str(&stdout)
-            .map_err(|e| PrError::ParseError(e.to_string()))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&stdout).map_err(|e| PrError::ParseError(e.to_string()))?;
 
         let number = v["number"].as_u64().unwrap_or(pr_number as u64) as u32;
         let url = v["url"].as_str().unwrap_or("").to_string();
@@ -642,7 +672,9 @@ impl PrLifecycleTriage for GhPrLifecycle {
                     if skip_labels.iter().any(|s| s == name) {
                         return Ok(PrWithState {
                             pr,
-                            state: PrTriageState::Skipped { reason: name.to_string() },
+                            state: PrTriageState::Skipped {
+                                reason: name.to_string(),
+                            },
                             created_at,
                         });
                     }
@@ -655,7 +687,10 @@ impl PrLifecycleTriage for GhPrLifecycle {
             .as_array()
             .map(|checks| {
                 checks.iter().any(|c| {
-                    c["conclusion"].as_str().map(|s| s == "FAILURE").unwrap_or(false)
+                    c["conclusion"]
+                        .as_str()
+                        .map(|s| s == "FAILURE")
+                        .unwrap_or(false)
                 })
             })
             .unwrap_or(false);
@@ -677,7 +712,11 @@ impl PrLifecycleTriage for GhPrLifecycle {
             _ => PrTriageState::NeedsReview,
         };
 
-        Ok(PrWithState { pr, state, created_at })
+        Ok(PrWithState {
+            pr,
+            state,
+            created_at,
+        })
     }
 }
 
@@ -716,18 +755,20 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
         }
 
         for pr_info in prs {
-            let with_state =
-                match self.lifecycle.get_pr_state(pr_info.number, &self.config.skip_labels) {
-                    Ok(ws) => ws,
-                    Err(e) => {
-                        tracing::warn!(
-                            pr = pr_info.number,
-                            error = %e,
-                            "PrTriage: failed to get state for PR; skipping"
-                        );
-                        continue;
-                    }
-                };
+            let with_state = match self
+                .lifecycle
+                .get_pr_state(pr_info.number, &self.config.skip_labels)
+            {
+                Ok(ws) => ws,
+                Err(e) => {
+                    tracing::warn!(
+                        pr = pr_info.number,
+                        error = %e,
+                        "PrTriage: failed to get state for PR; skipping"
+                    );
+                    continue;
+                }
+            };
 
             match with_state.state {
                 PrTriageState::Skipped { ref reason } => {
@@ -741,7 +782,10 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
                          the loop engine will handle the merge when checks pass.",
                         with_state.pr.number, with_state.pr.title
                     );
-                    return TriageAction::FixChecks { pr: with_state.pr, prompt };
+                    return TriageAction::FixChecks {
+                        pr: with_state.pr,
+                        prompt,
+                    };
                 }
                 PrTriageState::ChangesRequested => {
                     let prompt = format!(
@@ -828,7 +872,9 @@ impl PrLifecycleTriage for MockPrLifecycleTriage {
         self.calls
             .lock()
             .unwrap()
-            .push(TriageCall::ListOpenPrsWithLabel { label: label.to_string() });
+            .push(TriageCall::ListOpenPrsWithLabel {
+                label: label.to_string(),
+            });
         Ok(self.open_prs.clone())
     }
 
@@ -953,12 +999,18 @@ mod tests {
         let mock = MockPrLifecycle::new();
         let mgr = manager_with_mock(mock);
         let output = "LOOPER_READY_FOR_REVIEW";
-        let action =
-            mgr.handle_milestone("loop/1-feat", 1, "My feature", output).unwrap();
+        let action = mgr
+            .handle_milestone("loop/1-feat", 1, "My feature", output)
+            .unwrap();
         assert!(matches!(action, PrAction::Opened(_)));
 
         let calls = mgr.lifecycle.calls.lock().unwrap();
-        assert_eq!(calls[0], PrCall::FindOpenPr { branch: "loop/1-feat".into() });
+        assert_eq!(
+            calls[0],
+            PrCall::FindOpenPr {
+                branch: "loop/1-feat".into()
+            }
+        );
         assert!(matches!(calls[1], PrCall::OpenPr { .. }));
     }
 
@@ -967,12 +1019,19 @@ mod tests {
         let mock = MockPrLifecycle::new();
         let mgr = manager_with_mock(mock);
         let output = "LOOPER_READY_FOR_REVIEW";
-        mgr.handle_milestone("loop/7-auth", 7, "Add auth", output).unwrap();
+        mgr.handle_milestone("loop/7-auth", 7, "Add auth", output)
+            .unwrap();
 
         let calls = mgr.lifecycle.calls.lock().unwrap();
         if let PrCall::OpenPr { title, .. } = &calls[1] {
-            assert!(title.contains("#7"), "title should reference issue: {title}");
-            assert!(title.contains("Add auth"), "title should include issue title: {title}");
+            assert!(
+                title.contains("#7"),
+                "title should reference issue: {title}"
+            );
+            assert!(
+                title.contains("Add auth"),
+                "title should include issue title: {title}"
+            );
         } else {
             panic!("expected OpenPr call");
         }
@@ -990,8 +1049,9 @@ mod tests {
         cfg.require_human_review = true;
         let mgr = PrManager::new(cfg, mock);
 
-        let action =
-            mgr.handle_milestone("loop/1-feat", 1, "feat", "LOOPER_READY_FOR_REVIEW").unwrap();
+        let action = mgr
+            .handle_milestone("loop/1-feat", 1, "feat", "LOOPER_READY_FOR_REVIEW")
+            .unwrap();
         assert!(matches!(action, PrAction::BlockedOnHumanReview(_)));
 
         // Should NOT have tried to open a new PR or add a comment.
@@ -1011,8 +1071,9 @@ mod tests {
         cfg.require_human_review = false;
         let mgr = PrManager::new(cfg, mock);
 
-        let action =
-            mgr.handle_milestone("loop/1-feat", 1, "feat", "LOOPER_READY_FOR_REVIEW").unwrap();
+        let action = mgr
+            .handle_milestone("loop/1-feat", 1, "feat", "LOOPER_READY_FOR_REVIEW")
+            .unwrap();
         assert!(matches!(action, PrAction::Updated { .. }));
 
         let calls = mgr.lifecycle.calls.lock().unwrap();
@@ -1022,13 +1083,19 @@ mod tests {
     #[test]
     fn pr_body_includes_closes_link() {
         let body = PrManager::<MockPrLifecycle>::pr_body(99, None);
-        assert!(body.contains("Closes #99"), "body should reference issue: {body}");
+        assert!(
+            body.contains("Closes #99"),
+            "body should reference issue: {body}"
+        );
     }
 
     #[test]
     fn pr_body_includes_agent_summary() {
         let body = PrManager::<MockPrLifecycle>::pr_body(5, Some("Auth complete"));
-        assert!(body.contains("Auth complete"), "body should include summary: {body}");
+        assert!(
+            body.contains("Auth complete"),
+            "body should include summary: {body}"
+        );
     }
 
     #[test]
@@ -1049,7 +1116,8 @@ mod tests {
         let mock = MockPrLifecycle::new();
         let mgr = manager_with_mock(mock);
         let output = r#"{"looper":"ready-for-review","summary":"Phase 1 done"}"#;
-        mgr.handle_milestone("loop/3-phase", 3, "Phase 1", output).unwrap();
+        mgr.handle_milestone("loop/3-phase", 3, "Phase 1", output)
+            .unwrap();
 
         let calls = mgr.lifecycle.calls.lock().unwrap();
         if let PrCall::OpenPr { title, .. } = &calls[1] {
@@ -1071,14 +1139,21 @@ mod tests {
     }
 
     fn make_state(pr: PrInfo, state: PrTriageState) -> PrWithState {
-        PrWithState { pr, state, created_at: "2026-01-01T00:00:00Z".into() }
+        PrWithState {
+            pr,
+            state,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        }
     }
 
     #[test]
     fn triage_no_open_prs_returns_no_actionable() {
         let mock = MockPrLifecycleTriage::new();
         let triage = PrTriage::new(default_config(), mock);
-        assert!(matches!(triage.select_action(), TriageAction::NoActionablePr));
+        assert!(matches!(
+            triage.select_action(),
+            TriageAction::NoActionablePr
+        ));
     }
 
     #[test]
@@ -1086,9 +1161,20 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(1);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(1, make_state(pr, PrTriageState::Skipped { reason: "wip".into() }));
+        mock.states.insert(
+            1,
+            make_state(
+                pr,
+                PrTriageState::Skipped {
+                    reason: "wip".into(),
+                },
+            ),
+        );
         let triage = PrTriage::new(default_config(), mock);
-        assert!(matches!(triage.select_action(), TriageAction::NoActionablePr));
+        assert!(matches!(
+            triage.select_action(),
+            TriageAction::NoActionablePr
+        ));
     }
 
     #[test]
@@ -1096,7 +1182,8 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(2);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(2, make_state(pr, PrTriageState::ChecksFailing));
+        mock.states
+            .insert(2, make_state(pr, PrTriageState::ChecksFailing));
         let triage = PrTriage::new(default_config(), mock);
         let action = triage.select_action();
         assert!(matches!(action, TriageAction::FixChecks { .. }));
@@ -1111,7 +1198,8 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(3);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(3, make_state(pr, PrTriageState::ChangesRequested));
+        mock.states
+            .insert(3, make_state(pr, PrTriageState::ChangesRequested));
         let triage = PrTriage::new(default_config(), mock);
         let action = triage.select_action();
         assert!(matches!(action, TriageAction::AddressReviewFeedback { .. }));
@@ -1126,11 +1214,15 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(4);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(4, make_state(pr, PrTriageState::ReadyToMerge));
+        mock.states
+            .insert(4, make_state(pr, PrTriageState::ReadyToMerge));
         let mut cfg = default_config();
         cfg.require_human_review = true;
         let triage = PrTriage::new(cfg, mock);
-        assert!(matches!(triage.select_action(), TriageAction::BlockedOnHumanReview { .. }));
+        assert!(matches!(
+            triage.select_action(),
+            TriageAction::BlockedOnHumanReview { .. }
+        ));
     }
 
     #[test]
@@ -1138,7 +1230,8 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(5);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(5, make_state(pr, PrTriageState::ReadyToMerge));
+        mock.states
+            .insert(5, make_state(pr, PrTriageState::ReadyToMerge));
         let mut cfg = default_config();
         cfg.require_human_review = false;
         let triage = PrTriage::new(cfg, mock);
@@ -1150,9 +1243,13 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(6);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(6, make_state(pr, PrTriageState::NeedsReview));
+        mock.states
+            .insert(6, make_state(pr, PrTriageState::NeedsReview));
         let triage = PrTriage::new(default_config(), mock);
-        assert!(matches!(triage.select_action(), TriageAction::NoActionablePr));
+        assert!(matches!(
+            triage.select_action(),
+            TriageAction::NoActionablePr
+        ));
     }
 
     #[test]
@@ -1162,9 +1259,17 @@ mod tests {
         let pr2 = make_pr(11);
         mock.open_prs = vec![pr1.clone(), pr2.clone()];
         // First PR skipped, second has checks failing.
+        mock.states.insert(
+            10,
+            make_state(
+                pr1,
+                PrTriageState::Skipped {
+                    reason: "wip".into(),
+                },
+            ),
+        );
         mock.states
-            .insert(10, make_state(pr1, PrTriageState::Skipped { reason: "wip".into() }));
-        mock.states.insert(11, make_state(pr2, PrTriageState::ChecksFailing));
+            .insert(11, make_state(pr2, PrTriageState::ChecksFailing));
         let triage = PrTriage::new(default_config(), mock);
         let action = triage.select_action();
         if let TriageAction::FixChecks { pr, .. } = action {
@@ -1181,8 +1286,10 @@ mod tests {
         let pr1 = make_pr(20);
         let pr2 = make_pr(21);
         mock.open_prs = vec![pr1.clone(), pr2.clone()]; // oldest first
-        mock.states.insert(20, make_state(pr1, PrTriageState::ChecksFailing));
-        mock.states.insert(21, make_state(pr2, PrTriageState::ChecksFailing));
+        mock.states
+            .insert(20, make_state(pr1, PrTriageState::ChecksFailing));
+        mock.states
+            .insert(21, make_state(pr2, PrTriageState::ChecksFailing));
         let mut cfg = default_config();
         cfg.triage_priority = TriagePriority::Newest;
         let triage = PrTriage::new(cfg, mock);
@@ -1199,11 +1306,14 @@ mod tests {
         let mut mock = MockPrLifecycleTriage::new();
         let pr = make_pr(30);
         mock.open_prs = vec![pr.clone()];
-        mock.states.insert(30, make_state(pr, PrTriageState::NeedsReview));
+        mock.states
+            .insert(30, make_state(pr, PrTriageState::NeedsReview));
         let triage = PrTriage::new(default_config(), mock);
         triage.select_action();
         let calls = triage.lifecycle.calls.lock().unwrap();
-        assert!(calls.contains(&TriageCall::ListOpenPrsWithLabel { label: "code-looper".into() }));
+        assert!(calls.contains(&TriageCall::ListOpenPrsWithLabel {
+            label: "code-looper".into()
+        }));
         assert!(calls.contains(&TriageCall::GetPrState { pr_number: 30 }));
     }
 }

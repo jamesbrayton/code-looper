@@ -45,12 +45,20 @@ pub struct ServiceResponse {
 impl ServiceResponse {
     /// Build a successful response with an attached payload.
     pub fn success(data: serde_json::Value) -> Self {
-        Self { ok: true, data: Some(data), error: None }
+        Self {
+            ok: true,
+            data: Some(data),
+            error: None,
+        }
     }
 
     /// Build an error response with a description.
     pub fn failure(msg: impl Into<String>) -> Self {
-        Self { ok: false, data: None, error: Some(msg.into()) }
+        Self {
+            ok: false,
+            data: None,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -66,7 +74,12 @@ struct ServiceState {
 
 impl ServiceState {
     fn new() -> Self {
-        Self { started_at: Instant::now(), run_count: 0, success_count: 0, failure_count: 0 }
+        Self {
+            started_at: Instant::now(),
+            run_count: 0,
+            success_count: 0,
+            failure_count: 0,
+        }
     }
 
     fn uptime_secs(&self) -> u64 {
@@ -107,7 +120,11 @@ impl ServiceMode {
     /// parameters.  `config.provider` is used as the default provider for `run`
     /// requests that omit the `provider` field.
     pub fn new(config: LoopConfig, bind_addr: String, port: u16) -> Self {
-        Self { config, bind_addr, port }
+        Self {
+            config,
+            bind_addr,
+            port,
+        }
     }
 
     /// Start the TCP listener and process connections until a `shutdown` command
@@ -124,7 +141,10 @@ impl ServiceMode {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    let peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+                    let peer = stream
+                        .peer_addr()
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
                     info!(peer = %peer, "Client connected");
                     match self.handle_connection(stream, &mut state) {
                         Ok(true) => {
@@ -194,8 +214,12 @@ impl ServiceMode {
         match req {
             ServiceRequest::Run { prompt, provider } => {
                 let provider_kind = provider.as_ref().unwrap_or(&self.config.provider);
-                let adapter =
-                    build_adapter(provider_kind, false, self.config.workspace_dir.clone(), self.config.iteration_timeout_secs);
+                let adapter = build_adapter(
+                    provider_kind,
+                    false,
+                    self.config.workspace_dir.clone(),
+                    self.config.iteration_timeout_secs,
+                );
                 state.run_count += 1;
 
                 match adapter.execute(&prompt) {
@@ -254,7 +278,10 @@ mod tests {
         let req: ServiceRequest = serde_json::from_str(json).unwrap();
         assert_eq!(
             req,
-            ServiceRequest::Run { prompt: "fix tests".to_string(), provider: None }
+            ServiceRequest::Run {
+                prompt: "fix tests".to_string(),
+                provider: None
+            }
         );
     }
 
@@ -373,6 +400,10 @@ mod tests {
         let service = make_service();
         let mut state = ServiceState::new();
         let (resp, _) = service.process_request(ServiceRequest::Status, &mut state);
-        assert!(resp.data.as_ref().and_then(|d| d.get("uptime_secs")).is_some());
+        assert!(resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("uptime_secs"))
+            .is_some());
     }
 }

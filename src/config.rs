@@ -258,11 +258,15 @@ pub struct TelemetryConfig {
     pub no_summary: bool,
 }
 
-fn default_stream_output() -> bool { true }
+fn default_stream_output() -> bool {
+    true
+}
 fn default_artifacts_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(".code-looper/runs")
 }
-fn default_keep_runs() -> usize { 10 }
+fn default_keep_runs() -> usize {
+    10
+}
 
 impl Default for TelemetryConfig {
     fn default() -> Self {
@@ -386,7 +390,6 @@ impl Default for OrchestrationConfig {
         }
     }
 }
-
 
 /// Supported agent CLI providers.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
@@ -886,7 +889,10 @@ prompt_override = "Only work on issues."
         let rule = &config.orchestration.policies[0];
         assert_eq!(rule.condition, PolicyCondition::Always);
         assert_eq!(rule.workflow, PolicyWorkflow::IssueExecution);
-        assert_eq!(rule.prompt_override.as_deref(), Some("Only work on issues."));
+        assert_eq!(
+            rule.prompt_override.as_deref(),
+            Some("Only work on issues.")
+        );
     }
 
     #[test]
@@ -916,15 +922,27 @@ workflow = "backlog-discovery"
         .unwrap();
         let config = LoopConfig::from_toml_file(file.path()).unwrap();
         assert_eq!(config.orchestration.policies.len(), 2);
-        assert_eq!(config.orchestration.policies[0].condition, PolicyCondition::HasOpenPrs);
-        assert_eq!(config.orchestration.policies[1].condition, PolicyCondition::Always);
+        assert_eq!(
+            config.orchestration.policies[0].condition,
+            PolicyCondition::HasOpenPrs
+        );
+        assert_eq!(
+            config.orchestration.policies[1].condition,
+            PolicyCondition::Always
+        );
     }
 
     #[test]
     fn policy_workflow_display() {
         assert_eq!(PolicyWorkflow::PrReview.to_string(), "pr-review");
-        assert_eq!(PolicyWorkflow::IssueExecution.to_string(), "issue-execution");
-        assert_eq!(PolicyWorkflow::BacklogDiscovery.to_string(), "backlog-discovery");
+        assert_eq!(
+            PolicyWorkflow::IssueExecution.to_string(),
+            "issue-execution"
+        );
+        assert_eq!(
+            PolicyWorkflow::BacklogDiscovery.to_string(),
+            "backlog-discovery"
+        );
     }
 
     // ── Exponential backoff config tests ─────────────────────────────────────
@@ -1156,10 +1174,14 @@ local_promise_path = ".code-looper/dev.md"
     fn issue_tracking_defaults_include_standard_labels() {
         let config = LoopConfig::default();
         assert!(!config.issue_tracking.standard_labels.is_empty());
-        assert!(config.issue_tracking.standard_labels.contains(&"bug".to_string()));
-        assert!(
-            config.issue_tracking.standard_labels.contains(&"discovered-during-loop".to_string())
-        );
+        assert!(config
+            .issue_tracking
+            .standard_labels
+            .contains(&"bug".to_string()));
+        assert!(config
+            .issue_tracking
+            .standard_labels
+            .contains(&"discovered-during-loop".to_string()));
         assert!(!config.issue_tracking.auto_close_owned_issues);
     }
 

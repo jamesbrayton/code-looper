@@ -89,8 +89,7 @@ fn redact_prefixed_token(s: &str, prefix: &str, min_suffix: usize) -> String {
 ///
 /// Matching is case-insensitive for the header name and scheme keyword.
 fn redact_auth_headers(s: String) -> String {
-    redact_header_value(&s, "Bearer")
-        .pipe(|s| redact_header_value(&s, "token"))
+    redact_header_value(&s, "Bearer").pipe(|s| redact_header_value(&s, "token"))
 }
 
 fn redact_header_value(s: &str, scheme: &str) -> String {
@@ -309,10 +308,14 @@ mod tests {
 
     #[test]
     fn auth_header_preserves_rest_of_line() {
-        let input = "GET /api HTTP/1.1\nAuthorization: Bearer abc123def\nContent-Type: application/json";
+        let input =
+            "GET /api HTTP/1.1\nAuthorization: Bearer abc123def\nContent-Type: application/json";
         let output = redact_secrets(input);
         assert!(!output.contains("abc123def"), "{output}");
-        assert!(output.contains("Content-Type: application/json"), "{output}");
+        assert!(
+            output.contains("Content-Type: application/json"),
+            "{output}"
+        );
         assert!(output.contains("GET /api HTTP/1.1"), "{output}");
     }
 

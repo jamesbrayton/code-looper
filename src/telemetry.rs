@@ -44,7 +44,10 @@ impl IterationOutcome {
     /// exit states, and policy guard blocks are treated as non-retryable
     /// because a retry is unlikely to change the outcome.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, IterationOutcome::NonZeroExit { .. } | IterationOutcome::Timeout)
+        matches!(
+            self,
+            IterationOutcome::NonZeroExit { .. } | IterationOutcome::Timeout
+        )
     }
 
     /// Classify an exit code into an outcome.
@@ -120,7 +123,10 @@ pub struct IterationRecord {
 impl IterationRecord {
     /// Extract the first non-empty line from a stderr string for the log excerpt.
     pub fn stderr_first_line(stderr: &str) -> Option<String> {
-        stderr.lines().find(|l| !l.trim().is_empty()).map(|l| l.to_string())
+        stderr
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .map(|l| l.to_string())
     }
 }
 
@@ -159,28 +165,28 @@ impl RunArtifacts {
         let run_dir = artifacts_root.join(&run_id);
         if enabled {
             if let Err(e) = std::fs::create_dir_all(&run_dir) {
-                warn!("Could not create run artifacts dir {}: {e}", run_dir.display());
+                warn!(
+                    "Could not create run artifacts dir {}: {e}",
+                    run_dir.display()
+                );
             }
         }
-        Self { run_id, run_dir, enabled }
+        Self {
+            run_id,
+            run_dir,
+            enabled,
+        }
     }
 
     /// Write a transcript for iteration `n` (1-based).  Returns the path
     /// written (relative to the run dir), or `None` when disabled or on error.
-    pub fn write_transcript(
-        &self,
-        iteration: u64,
-        stdout: &str,
-        stderr: &str,
-    ) -> Option<String> {
+    pub fn write_transcript(&self, iteration: u64, stdout: &str, stderr: &str) -> Option<String> {
         if !self.enabled {
             return None;
         }
         let filename = format!("iteration-{iteration}.log");
         let path = self.run_dir.join(&filename);
-        let content = format!(
-            "=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}\n"
-        );
+        let content = format!("=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}\n");
         if let Err(e) = std::fs::write(&path, content) {
             warn!("Could not write transcript {}: {e}", path.display());
             return None;
@@ -205,11 +211,7 @@ impl RunArtifacts {
     }
 
     /// Write the human-readable `summary.md` and return its path.
-    pub fn write_summary(
-        &self,
-        manifest: &RunManifest,
-        no_summary: bool,
-    ) -> Option<PathBuf> {
+    pub fn write_summary(&self, manifest: &RunManifest, no_summary: bool) -> Option<PathBuf> {
         let summary = build_summary_markdown(manifest);
         if !no_summary {
             print_terminal_summary(&summary);
@@ -273,13 +275,14 @@ fn build_summary_markdown(manifest: &RunManifest) -> String {
     let ended = manifest.ended_at.unwrap_or(started);
     let total_secs = ended.saturating_sub(started);
     let iterations_executed = manifest.iterations.len();
-    let successes = manifest.iterations.iter().filter(|i| i.outcome.is_success()).count();
+    let successes = manifest
+        .iterations
+        .iter()
+        .filter(|i| i.outcome.is_success())
+        .count();
     let failures = iterations_executed - successes;
     let total_retries: u32 = manifest.iterations.iter().map(|i| i.retries).sum();
-    let term_reason = manifest
-        .termination_reason
-        .as_deref()
-        .unwrap_or("unknown");
+    let term_reason = manifest.termination_reason.as_deref().unwrap_or("unknown");
 
     let mut md = String::new();
     md.push_str("# Code Looper — Run Summary\n\n");
@@ -297,7 +300,10 @@ fn build_summary_markdown(manifest: &RunManifest) -> String {
         "| Iterations requested | {} |\n",
         manifest.iterations_requested
     ));
-    md.push_str(&format!("| Iterations executed | {} |\n", iterations_executed));
+    md.push_str(&format!(
+        "| Iterations executed | {} |\n",
+        iterations_executed
+    ));
     md.push_str(&format!("| Termination reason | {} |\n\n", term_reason));
 
     // Totals
@@ -307,7 +313,10 @@ fn build_summary_markdown(manifest: &RunManifest) -> String {
     md.push_str(&format!("| Successes | {} |\n", successes));
     md.push_str(&format!("| Failures | {} |\n", failures));
     md.push_str(&format!("| Retries | {} |\n", total_retries));
-    md.push_str(&format!("| Skipped decisions | {} |\n\n", manifest.skipped_decisions));
+    md.push_str(&format!(
+        "| Skipped decisions | {} |\n\n",
+        manifest.skipped_decisions
+    ));
 
     // Per-iteration table
     if !manifest.iterations.is_empty() {
@@ -387,7 +396,10 @@ mod tests {
 
     #[test]
     fn outcome_from_exit_code_zero_is_success() {
-        assert_eq!(IterationOutcome::from_exit_code(Some(0)), IterationOutcome::Success);
+        assert_eq!(
+            IterationOutcome::from_exit_code(Some(0)),
+            IterationOutcome::Success
+        );
         assert!(IterationOutcome::from_exit_code(Some(0)).is_success());
     }
 
@@ -400,12 +412,17 @@ mod tests {
 
     #[test]
     fn outcome_from_exit_code_none_is_signal() {
-        assert_eq!(IterationOutcome::from_exit_code(None), IterationOutcome::Signal);
+        assert_eq!(
+            IterationOutcome::from_exit_code(None),
+            IterationOutcome::Signal
+        );
     }
 
     #[test]
     fn spawn_failure_is_fatal() {
-        let o = IterationOutcome::SpawnFailure { message: "not found".to_string() };
+        let o = IterationOutcome::SpawnFailure {
+            message: "not found".to_string(),
+        };
         assert!(o.is_fatal());
         assert!(!o.is_success());
     }
@@ -421,10 +438,14 @@ mod tests {
         assert!(!IterationOutcome::Success.is_retryable());
         assert!(!IterationOutcome::Signal.is_retryable());
         assert!(!IterationOutcome::Unknown.is_retryable());
-        assert!(!IterationOutcome::SpawnFailure { message: String::new() }.is_retryable());
-        assert!(
-            !IterationOutcome::PolicyGuardBlock { message: String::new() }.is_retryable()
-        );
+        assert!(!IterationOutcome::SpawnFailure {
+            message: String::new()
+        }
+        .is_retryable());
+        assert!(!IterationOutcome::PolicyGuardBlock {
+            message: String::new()
+        }
+        .is_retryable());
     }
 
     #[test]
@@ -435,11 +456,17 @@ mod tests {
             "non_zero_exit"
         );
         assert_eq!(
-            IterationOutcome::SpawnFailure { message: String::new() }.label(),
+            IterationOutcome::SpawnFailure {
+                message: String::new()
+            }
+            .label(),
             "spawn_failure"
         );
         assert_eq!(
-            IterationOutcome::PolicyGuardBlock { message: String::new() }.label(),
+            IterationOutcome::PolicyGuardBlock {
+                message: String::new()
+            }
+            .label(),
             "policy_guard_block"
         );
         assert_eq!(IterationOutcome::Signal.label(), "signal");
@@ -523,20 +550,18 @@ mod tests {
             iterations_requested: 2,
             termination_reason: Some("completed".to_string()),
             skipped_decisions: 2,
-            iterations: vec![
-                IterationRecord {
-                    iteration: 1,
-                    provider: "claude".to_string(),
-                    prompt_source: "inline".to_string(),
-                    workflow_branch: None,
-                    outcome: IterationOutcome::Success,
-                    duration_ms: 500,
-                    retries: 0,
-                    stderr_excerpt: None,
-                    transcript_path: Some("iteration-1.log".to_string()),
-                    started_at: 1000,
-                },
-            ],
+            iterations: vec![IterationRecord {
+                iteration: 1,
+                provider: "claude".to_string(),
+                prompt_source: "inline".to_string(),
+                workflow_branch: None,
+                outcome: IterationOutcome::Success,
+                duration_ms: 500,
+                retries: 0,
+                stderr_excerpt: None,
+                transcript_path: Some("iteration-1.log".to_string()),
+                started_at: 1000,
+            }],
         };
         let md = build_summary_markdown(&manifest);
         assert!(md.contains("test-run"));

@@ -82,10 +82,18 @@ impl std::fmt::Display for BootstrapAction {
         match self {
             BootstrapAction::Created(p) => write!(f, "[bootstrap] {}: created", p.display()),
             BootstrapAction::Appended(p) => {
-                write!(f, "[bootstrap] {}: appended Code Looper section", p.display())
+                write!(
+                    f,
+                    "[bootstrap] {}: appended Code Looper section",
+                    p.display()
+                )
             }
             BootstrapAction::MergedJson(p) => {
-                write!(f, "[bootstrap] {}: added \"github\" server entry", p.display())
+                write!(
+                    f,
+                    "[bootstrap] {}: added \"github\" server entry",
+                    p.display()
+                )
             }
             BootstrapAction::AlreadySatisfied(p) => {
                 write!(f, "[bootstrap] {}: already satisfied", p.display())
@@ -109,13 +117,20 @@ pub fn run_bootstrap(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Vec<
 
 // ── Instruction file ──────────────────────────────────────────────────────────
 
-fn bootstrap_instruction_file(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<BootstrapAction> {
+fn bootstrap_instruction_file(
+    workspace_dir: &Path,
+    dry_run: bool,
+) -> anyhow::Result<BootstrapAction> {
     const CANDIDATES: &[&str] = &["CLAUDE.md", "AGENTS.md", ".github/copilot-instructions.md"];
 
     // Find the first existing instruction file.
     let existing = CANDIDATES.iter().find_map(|name| {
         let p = workspace_dir.join(name);
-        if p.is_file() { Some(p) } else { None }
+        if p.is_file() {
+            Some(p)
+        } else {
+            None
+        }
     });
 
     match existing {
@@ -123,8 +138,11 @@ fn bootstrap_instruction_file(workspace_dir: &Path, dry_run: bool) -> anyhow::Re
             // No instruction file at all → create CLAUDE.md.
             let path = workspace_dir.join("CLAUDE.md");
             if !dry_run {
-                std::fs::write(&path, format!("# Project Instructions\n\n{CLAUDE_MD_SECTION}\n"))
-                    .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
+                std::fs::write(
+                    &path,
+                    format!("# Project Instructions\n\n{CLAUDE_MD_SECTION}\n"),
+                )
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
             }
             Ok(BootstrapAction::Created(path))
         }
@@ -138,7 +156,11 @@ fn bootstrap_instruction_file(workspace_dir: &Path, dry_run: bool) -> anyhow::Re
             } else {
                 // Append the delimited section.
                 if !dry_run {
-                    let separator = if contents.ends_with('\n') { "\n" } else { "\n\n" };
+                    let separator = if contents.ends_with('\n') {
+                        "\n"
+                    } else {
+                        "\n\n"
+                    };
                     let updated = format!("{contents}{separator}{CLAUDE_MD_SECTION}\n");
                     std::fs::write(&path, updated)
                         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
@@ -221,8 +243,16 @@ fn merge_github_server(json: &str) -> Option<String> {
         let inner = &json[insert_pos..];
         let needs_comma = !inner.trim_start().starts_with('}');
         let comma = if needs_comma { "," } else { "" };
-        let indented = github_entry.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n");
-        let result = format!("{}\n{indented}{comma}{}", &json[..insert_pos], &json[insert_pos..]);
+        let indented = github_entry
+            .lines()
+            .map(|l| format!("    {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = format!(
+            "{}\n{indented}{comma}{}",
+            &json[..insert_pos],
+            &json[insert_pos..]
+        );
         return Some(result);
     }
 
@@ -290,7 +320,11 @@ mod tests {
     fn existing_claude_md_with_section_is_satisfied() {
         let dir = tmp();
         let path = dir.path().join("CLAUDE.md");
-        fs::write(&path, format!("# Proj\n{SECTION_BEGIN}\nstuff\n{SECTION_END}\n")).unwrap();
+        fs::write(
+            &path,
+            format!("# Proj\n{SECTION_BEGIN}\nstuff\n{SECTION_END}\n"),
+        )
+        .unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[0], BootstrapAction::AlreadySatisfied(p) if p == &path));
         // Content must not change.
@@ -324,8 +358,11 @@ mod tests {
         let dir = tmp();
         let path = dir.path().join(".mcp.json");
         // Run bootstrap with a CLAUDE.md already present so only .mcp.json changes.
-        fs::write(dir.path().join("CLAUDE.md"), format!("{SECTION_BEGIN}\n{SECTION_END}\n"))
-            .unwrap();
+        fs::write(
+            dir.path().join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[1], BootstrapAction::Created(p) if p == &path));
         let content = fs::read_to_string(&path).unwrap();
@@ -335,8 +372,11 @@ mod tests {
     #[test]
     fn mcp_json_with_github_key_is_satisfied() {
         let dir = tmp();
-        fs::write(dir.path().join("CLAUDE.md"), format!("{SECTION_BEGIN}\n{SECTION_END}\n"))
-            .unwrap();
+        fs::write(
+            dir.path().join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
         let mcp_path = dir.path().join(".mcp.json");
         fs::write(&mcp_path, r#"{"mcpServers":{"github":{}}}"#).unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
@@ -346,22 +386,31 @@ mod tests {
     #[test]
     fn mcp_json_without_github_key_gets_merged() {
         let dir = tmp();
-        fs::write(dir.path().join("CLAUDE.md"), format!("{SECTION_BEGIN}\n{SECTION_END}\n"))
-            .unwrap();
+        fs::write(
+            dir.path().join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
         let mcp_path = dir.path().join(".mcp.json");
         fs::write(&mcp_path, r#"{"mcpServers":{"context7":{}}}"#).unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[1], BootstrapAction::MergedJson(p) if p == &mcp_path));
         let content = fs::read_to_string(&mcp_path).unwrap();
         assert!(content.contains("\"github\""));
-        assert!(content.contains("\"context7\""), "existing keys must be preserved");
+        assert!(
+            content.contains("\"context7\""),
+            "existing keys must be preserved"
+        );
     }
 
     #[test]
     fn dry_run_does_not_create_mcp_json() {
         let dir = tmp();
-        fs::write(dir.path().join("CLAUDE.md"), format!("{SECTION_BEGIN}\n{SECTION_END}\n"))
-            .unwrap();
+        fs::write(
+            dir.path().join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
         let mcp_path = dir.path().join(".mcp.json");
         let actions = run_bootstrap(dir.path(), true).unwrap();
         assert!(matches!(&actions[1], BootstrapAction::Created(_)));
@@ -373,9 +422,16 @@ mod tests {
     #[test]
     fn fully_configured_workspace_produces_all_satisfied() {
         let dir = tmp();
-        fs::write(dir.path().join("CLAUDE.md"), format!("{SECTION_BEGIN}\n{SECTION_END}\n"))
-            .unwrap();
-        fs::write(dir.path().join(".mcp.json"), r#"{"mcpServers":{"github":{}}}"#).unwrap();
+        fs::write(
+            dir.path().join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{"mcpServers":{"github":{}}}"#,
+        )
+        .unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[0], BootstrapAction::AlreadySatisfied(_)));
         assert!(matches!(&actions[1], BootstrapAction::AlreadySatisfied(_)));

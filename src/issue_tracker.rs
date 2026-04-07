@@ -91,8 +91,7 @@ pub trait IssueTracker: Send + Sync {
     fn reopen_issue(&self, number: u32) -> Result<(), IssueTrackerError>;
     /// Record an association between an issue and a pull request by posting a
     /// cross-reference comment on the issue.
-    fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32)
-        -> Result<(), IssueTrackerError>;
+    fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32) -> Result<(), IssueTrackerError>;
     /// Ensure that the given labels exist on the repository, creating any that
     /// are absent.  This is a no-op for backends that do not support label
     /// management (e.g. `LocalPromiseTracker`).
@@ -116,7 +115,10 @@ pub struct GitHubIssueTracker {
 
 impl GitHubIssueTracker {
     pub fn new(owner: impl Into<String>, repo: impl Into<String>) -> Self {
-        Self { owner: owner.into(), repo: repo.into() }
+        Self {
+            owner: owner.into(),
+            repo: repo.into(),
+        }
     }
 
     fn repo_slug(&self) -> String {
@@ -364,11 +366,7 @@ impl IssueTracker for GitHubIssueTracker {
         Ok(())
     }
 
-    fn link_issue_to_pr(
-        &self,
-        issue_number: u32,
-        pr_number: u32,
-    ) -> Result<(), IssueTrackerError> {
+    fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32) -> Result<(), IssueTrackerError> {
         let body = format!("Linked to pull request #{pr_number}.");
         self.add_comment(issue_number, &body)
     }
@@ -442,8 +440,15 @@ impl LocalPromiseTracker {
         numbers.sort_unstable();
         for n in numbers {
             let issue = &store.issues[&n];
-            let state_tag = if issue.state == IssueState::Open { "OPEN" } else { "CLOSED" };
-            out.push_str(&format!("## #{n} {title} [{state_tag}]\n\n", title = issue.title));
+            let state_tag = if issue.state == IssueState::Open {
+                "OPEN"
+            } else {
+                "CLOSED"
+            };
+            out.push_str(&format!(
+                "## #{n} {title} [{state_tag}]\n\n",
+                title = issue.title
+            ));
             if !issue.body.is_empty() {
                 out.push_str(&issue.body);
                 out.push_str("\n\n");
@@ -463,8 +468,7 @@ impl IssueTracker for LocalPromiseTracker {
             .values()
             .filter(|i| i.state == IssueState::Open)
             .filter(|i| {
-                filter.labels.is_empty()
-                    || filter.labels.iter().any(|l| i.labels.contains(l))
+                filter.labels.is_empty() || filter.labels.iter().any(|l| i.labels.contains(l))
             })
             .filter(|i| {
                 filter
@@ -559,7 +563,10 @@ impl IssueTracker for LocalPromiseTracker {
     }
 
     fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32) -> Result<(), IssueTrackerError> {
-        self.add_comment(issue_number, &format!("Linked to pull request #{pr_number}."))
+        self.add_comment(
+            issue_number,
+            &format!("Linked to pull request #{pr_number}."),
+        )
     }
 }
 
@@ -585,12 +592,24 @@ pub struct MockIssueTracker {
 pub enum MockCall {
     ListOpenIssues,
     GetIssue(u32),
-    CreateIssue { title: String, body: String },
-    UpdateIssueBody { number: u32 },
-    AddComment { number: u32, body: String },
+    CreateIssue {
+        title: String,
+        #[allow(dead_code)]
+        body: String,
+    },
+    UpdateIssueBody {
+        number: u32,
+    },
+    AddComment {
+        number: u32,
+        body: String,
+    },
     CloseIssue(u32),
     ReopenIssue(u32),
-    LinkIssueToPr { issue_number: u32, pr_number: u32 },
+    LinkIssueToPr {
+        issue_number: u32,
+        pr_number: u32,
+    },
     EnsureLabels(Vec<String>),
 }
 
@@ -616,9 +635,7 @@ impl MockIssueTracker {
             Some(IssueTrackerError::RateLimited(m)) => {
                 Some(IssueTrackerError::RateLimited(m.clone()))
             }
-            Some(IssueTrackerError::Transport(m)) => {
-                Some(IssueTrackerError::Transport(m.clone()))
-            }
+            Some(IssueTrackerError::Transport(m)) => Some(IssueTrackerError::Transport(m.clone())),
             Some(IssueTrackerError::Validation(m)) => {
                 Some(IssueTrackerError::Validation(m.clone()))
             }
@@ -691,7 +708,10 @@ impl IssueTracker for MockIssueTracker {
     }
 
     fn update_issue_body(&self, number: u32, _body: &str) -> Result<(), IssueTrackerError> {
-        self.calls.lock().unwrap().push(MockCall::UpdateIssueBody { number });
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MockCall::UpdateIssueBody { number });
         if let Some(e) = self.check_force_error() {
             return Err(e);
         }
@@ -710,7 +730,10 @@ impl IssueTracker for MockIssueTracker {
     }
 
     fn close_issue(&self, number: u32, _reason: CloseReason) -> Result<(), IssueTrackerError> {
-        self.calls.lock().unwrap().push(MockCall::CloseIssue(number));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MockCall::CloseIssue(number));
         if let Some(e) = self.check_force_error() {
             return Err(e);
         }
@@ -718,22 +741,21 @@ impl IssueTracker for MockIssueTracker {
     }
 
     fn reopen_issue(&self, number: u32) -> Result<(), IssueTrackerError> {
-        self.calls.lock().unwrap().push(MockCall::ReopenIssue(number));
+        self.calls
+            .lock()
+            .unwrap()
+            .push(MockCall::ReopenIssue(number));
         if let Some(e) = self.check_force_error() {
             return Err(e);
         }
         Ok(())
     }
 
-    fn link_issue_to_pr(
-        &self,
-        issue_number: u32,
-        pr_number: u32,
-    ) -> Result<(), IssueTrackerError> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push(MockCall::LinkIssueToPr { issue_number, pr_number });
+    fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32) -> Result<(), IssueTrackerError> {
+        self.calls.lock().unwrap().push(MockCall::LinkIssueToPr {
+            issue_number,
+            pr_number,
+        });
         if let Some(e) = self.check_force_error() {
             return Err(e);
         }
@@ -852,7 +874,9 @@ mod tests {
         assert_eq!(issue.title, "Fix the thing");
         assert_eq!(issue.body, "Here is why");
         let calls = tracker.recorded_calls();
-        assert!(matches!(&calls[0], MockCall::CreateIssue { title, .. } if title == "Fix the thing"));
+        assert!(
+            matches!(&calls[0], MockCall::CreateIssue { title, .. } if title == "Fix the thing")
+        );
     }
 
     #[test]
@@ -869,14 +893,20 @@ mod tests {
     fn mock_records_close_issue() {
         let tracker = MockIssueTracker::new();
         tracker.close_issue(3, CloseReason::Completed).unwrap();
-        assert!(matches!(tracker.recorded_calls()[0], MockCall::CloseIssue(3)));
+        assert!(matches!(
+            tracker.recorded_calls()[0],
+            MockCall::CloseIssue(3)
+        ));
     }
 
     #[test]
     fn mock_records_reopen_issue() {
         let tracker = MockIssueTracker::new();
         tracker.reopen_issue(8).unwrap();
-        assert!(matches!(tracker.recorded_calls()[0], MockCall::ReopenIssue(8)));
+        assert!(matches!(
+            tracker.recorded_calls()[0],
+            MockCall::ReopenIssue(8)
+        ));
     }
 
     #[test]
@@ -884,9 +914,13 @@ mod tests {
         let tracker = MockIssueTracker::new();
         tracker.link_issue_to_pr(10, 55).unwrap();
         let calls = tracker.recorded_calls();
-        assert!(
-            matches!(&calls[0], MockCall::LinkIssueToPr { issue_number: 10, pr_number: 55 })
-        );
+        assert!(matches!(
+            &calls[0],
+            MockCall::LinkIssueToPr {
+                issue_number: 10,
+                pr_number: 55
+            }
+        ));
     }
 
     #[test]
@@ -904,9 +938,10 @@ mod tests {
     #[test]
     fn mock_propagates_force_error() {
         let mut tracker = MockIssueTracker::new();
-        tracker.force_error =
-            Some(IssueTrackerError::Auth("token expired".to_string()));
-        let err = tracker.list_open_issues(&IssueFilter::default()).unwrap_err();
+        tracker.force_error = Some(IssueTrackerError::Auth("token expired".to_string()));
+        let err = tracker
+            .list_open_issues(&IssueFilter::default())
+            .unwrap_err();
         assert!(matches!(err, IssueTrackerError::Auth(_)));
     }
 
@@ -914,7 +949,10 @@ mod tests {
     fn mock_update_issue_body_records_number() {
         let tracker = MockIssueTracker::new();
         tracker.update_issue_body(12, "new body").unwrap();
-        assert!(matches!(tracker.recorded_calls()[0], MockCall::UpdateIssueBody { number: 12 }));
+        assert!(matches!(
+            tracker.recorded_calls()[0],
+            MockCall::UpdateIssueBody { number: 12 }
+        ));
     }
 
     // ── classify_gh_error tests ───────────────────────────────────────────────
@@ -949,7 +987,10 @@ mod tests {
     fn github_tracker_validate_empty_title() {
         let tracker = GitHubIssueTracker::new("owner", "repo");
         let err = tracker
-            .create_issue(IssueDraft { title: "  ".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "  ".to_string(),
+                ..Default::default()
+            })
             .unwrap_err();
         assert!(matches!(err, IssueTrackerError::Validation(_)));
     }
@@ -1045,10 +1086,16 @@ mod tests {
     fn local_tracker_list_open() {
         let tracker = temp_tracker();
         tracker
-            .create_issue(IssueDraft { title: "A".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "A".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker
-            .create_issue(IssueDraft { title: "B".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "B".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker.close_issue(1, CloseReason::Completed).unwrap();
 
@@ -1061,7 +1108,10 @@ mod tests {
     fn local_tracker_update_body() {
         let tracker = temp_tracker();
         tracker
-            .create_issue(IssueDraft { title: "T".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "T".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker.update_issue_body(1, "updated body").unwrap();
         let issue = tracker.get_issue(1).unwrap();
@@ -1072,7 +1122,11 @@ mod tests {
     fn local_tracker_add_comment_appends_to_body() {
         let tracker = temp_tracker();
         tracker
-            .create_issue(IssueDraft { title: "T".to_string(), body: "original".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "T".to_string(),
+                body: "original".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker.add_comment(1, "a comment").unwrap();
         let issue = tracker.get_issue(1).unwrap();
@@ -1083,7 +1137,10 @@ mod tests {
     fn local_tracker_close_and_reopen() {
         let tracker = temp_tracker();
         tracker
-            .create_issue(IssueDraft { title: "T".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "T".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker.close_issue(1, CloseReason::Completed).unwrap();
         assert_eq!(tracker.get_issue(1).unwrap().state, IssueState::Closed);
@@ -1095,7 +1152,10 @@ mod tests {
     fn local_tracker_link_pr_adds_comment() {
         let tracker = temp_tracker();
         tracker
-            .create_issue(IssueDraft { title: "T".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "T".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker.link_issue_to_pr(1, 42).unwrap();
         let issue = tracker.get_issue(1).unwrap();
@@ -1106,7 +1166,10 @@ mod tests {
     fn local_tracker_empty_title_rejected() {
         let tracker = temp_tracker();
         let err = tracker
-            .create_issue(IssueDraft { title: "".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "".to_string(),
+                ..Default::default()
+            })
             .unwrap_err();
         assert!(matches!(err, IssueTrackerError::Validation(_)));
     }
@@ -1117,7 +1180,10 @@ mod tests {
         let path = dir.path().join("nested").join("deep").join("promise.md");
         let tracker = LocalPromiseTracker::new(&path);
         tracker
-            .create_issue(IssueDraft { title: "dir test".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "dir test".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         assert!(path.exists());
     }
@@ -1126,13 +1192,22 @@ mod tests {
     fn local_tracker_search_filter() {
         let tracker = temp_tracker();
         tracker
-            .create_issue(IssueDraft { title: "fix login bug".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "fix login bug".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         tracker
-            .create_issue(IssueDraft { title: "update docs".to_string(), ..Default::default() })
+            .create_issue(IssueDraft {
+                title: "update docs".to_string(),
+                ..Default::default()
+            })
             .unwrap();
         let results = tracker
-            .list_open_issues(&IssueFilter { search: Some("login".to_string()), ..Default::default() })
+            .list_open_issues(&IssueFilter {
+                search: Some("login".to_string()),
+                ..Default::default()
+            })
             .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "fix login bug");
@@ -1143,8 +1218,7 @@ mod tests {
     #[test]
     fn mock_records_ensure_labels_call() {
         let tracker = MockIssueTracker::new();
-        let labels =
-            vec!["bug".to_string(), "discovered-during-loop".to_string()];
+        let labels = vec!["bug".to_string(), "discovered-during-loop".to_string()];
         tracker.ensure_labels(&labels).unwrap();
         let calls = tracker.recorded_calls();
         assert_eq!(calls.len(), 1);
@@ -1163,8 +1237,7 @@ mod tests {
     #[test]
     fn mock_ensure_labels_propagates_force_error() {
         let mut tracker = MockIssueTracker::new();
-        tracker.force_error =
-            Some(IssueTrackerError::Transport("network error".to_string()));
+        tracker.force_error = Some(IssueTrackerError::Transport("network error".to_string()));
         let labels = vec!["bug".to_string()];
         let err = tracker.ensure_labels(&labels).unwrap_err();
         assert!(matches!(err, IssueTrackerError::Transport(_)));

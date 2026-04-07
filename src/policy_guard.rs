@@ -108,7 +108,9 @@ mod tests {
     }
 
     fn permissive_guard() -> PolicyGuard {
-        PolicyGuard::new(UnsafeOverrides { allow_direct_github: true })
+        PolicyGuard::new(UnsafeOverrides {
+            allow_direct_github: true,
+        })
     }
 
     // ── validate_orchestration ────────────────────────────────────────────────

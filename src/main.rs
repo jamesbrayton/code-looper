@@ -3,7 +3,6 @@ mod branch;
 mod cli;
 mod config;
 mod error;
-mod security;
 mod issue_tracker;
 mod loop_engine;
 mod multi_repo;
@@ -12,6 +11,7 @@ mod policy_guard;
 mod pr_manager;
 mod pr_strategy;
 mod provider;
+mod security;
 mod service;
 mod telemetry;
 mod workspace;
@@ -26,18 +26,25 @@ fn main() -> anyhow::Result<()> {
     // Dispatch subcommands before config resolution so they can run without a
     // full loop configuration.
     match cli_args.command {
-        Some(cli::Commands::Bootstrap { workspace_dir, dry_run }) => {
+        Some(cli::Commands::Bootstrap {
+            workspace_dir,
+            dry_run,
+        }) => {
             let ws_dir = workspace::resolve_workspace_dir(workspace_dir.as_deref());
             let prefix = if dry_run { "[dry-run]" } else { "[bootstrap]" };
-            let actions = bootstrap::run_bootstrap(&ws_dir, dry_run)
-                .context("bootstrap failed")?;
+            let actions = bootstrap::run_bootstrap(&ws_dir, dry_run).context("bootstrap failed")?;
             for action in &actions {
                 let msg = action.to_string();
-                let display = if dry_run { msg.replacen("[bootstrap]", prefix, 1) } else { msg };
+                let display = if dry_run {
+                    msg.replacen("[bootstrap]", prefix, 1)
+                } else {
+                    msg
+                };
                 println!("{display}");
             }
-            let all_satisfied =
-                actions.iter().all(|a| matches!(a, bootstrap::BootstrapAction::AlreadySatisfied(_)));
+            let all_satisfied = actions
+                .iter()
+                .all(|a| matches!(a, bootstrap::BootstrapAction::AlreadySatisfied(_)));
             if all_satisfied {
                 println!("{prefix} workspace prerequisites already satisfied — nothing to do.");
             } else if !dry_run {
@@ -49,7 +56,10 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
 
-        Some(cli::Commands::Serve { port, ref bind_addr }) => {
+        Some(cli::Commands::Serve {
+            port,
+            ref bind_addr,
+        }) => {
             let bind_addr = bind_addr.clone();
             // Build config from file / CLI overrides, then hand off to service mode.
             let base = if let Some(ref path) = cli_args.config {
@@ -62,8 +72,9 @@ fn main() -> anyhow::Result<()> {
 
             tracing_subscriber::fmt()
                 .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&resolved.log_level)),
+                    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                        tracing_subscriber::EnvFilter::new(&resolved.log_level)
+                    }),
                 )
                 .init();
 
@@ -74,7 +85,6 @@ fn main() -> anyhow::Result<()> {
 
         None => {}
     }
-
 
     // Determine base config: file-loaded or default.
     let base = if let Some(ref path) = cli_args.config {
@@ -100,8 +110,7 @@ fn main() -> anyhow::Result<()> {
 
     // Run workspace prerequisite checks unless explicitly skipped.
     if !resolved.skip_prereq_check {
-        let ws_dir =
-            workspace::resolve_workspace_dir(resolved.workspace_dir.as_deref());
+        let ws_dir = workspace::resolve_workspace_dir(resolved.workspace_dir.as_deref());
         let checker = workspace::PrerequisiteChecker::new(&ws_dir);
         let check_result = checker.run();
         if !check_result.is_ok() {

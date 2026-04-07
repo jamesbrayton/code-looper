@@ -1,4 +1,4 @@
-use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow, default_policy_rules};
+use crate::config::{default_policy_rules, PolicyCondition, PolicyRule, PolicyWorkflow};
 use crate::error::LooperError;
 use tracing::info;
 
@@ -108,7 +108,10 @@ impl PolicyEngine {
     /// Create a policy engine with the default three-rule chain.
     #[allow(dead_code)]
     pub fn new(resolver: Box<dyn ContextResolver>) -> Self {
-        Self { resolver, rules: default_policy_rules() }
+        Self {
+            resolver,
+            rules: default_policy_rules(),
+        }
     }
 
     /// Create a policy engine with a caller-supplied rule list.
@@ -191,7 +194,9 @@ fn count_gh_items(owner: &str, repo: &str, kind: &str) -> Result<u32, LooperErro
 
     let repo_slug = format!("{owner}/{repo}");
     let output = Command::new("gh")
-        .args([kind, "list", "--repo", &repo_slug, "--state", "open", "--json", "number"])
+        .args([
+            kind, "list", "--repo", &repo_slug, "--state", "open", "--json", "number",
+        ])
         .output()
         .map_err(|e| LooperError::ProviderSpawn {
             binary: "gh".to_string(),
@@ -231,7 +236,10 @@ pub mod tests {
     #[test]
     fn selects_pr_review_when_prs_open() {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
-            context: RepoContext { open_pr_count: 2, open_issue_count: 5 },
+            context: RepoContext {
+                open_pr_count: 2,
+                open_issue_count: 5,
+            },
         }));
         let sel = engine.select_branch().unwrap();
         assert_eq!(sel.branch, WorkflowBranch::PrReview);
@@ -240,7 +248,10 @@ pub mod tests {
     #[test]
     fn selects_issue_execution_when_no_prs_but_issues() {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
-            context: RepoContext { open_pr_count: 0, open_issue_count: 3 },
+            context: RepoContext {
+                open_pr_count: 0,
+                open_issue_count: 3,
+            },
         }));
         let sel = engine.select_branch().unwrap();
         assert_eq!(sel.branch, WorkflowBranch::IssueExecution);
@@ -249,7 +260,10 @@ pub mod tests {
     #[test]
     fn selects_backlog_discovery_when_nothing_open() {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
-            context: RepoContext { open_pr_count: 0, open_issue_count: 0 },
+            context: RepoContext {
+                open_pr_count: 0,
+                open_issue_count: 0,
+            },
         }));
         let sel = engine.select_branch().unwrap();
         assert_eq!(sel.branch, WorkflowBranch::BacklogDiscovery);
@@ -258,7 +272,10 @@ pub mod tests {
     #[test]
     fn prs_take_precedence_over_issues() {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
-            context: RepoContext { open_pr_count: 1, open_issue_count: 10 },
+            context: RepoContext {
+                open_pr_count: 1,
+                open_issue_count: 10,
+            },
         }));
         let sel = engine.select_branch().unwrap();
         assert_eq!(sel.branch, WorkflowBranch::PrReview);
@@ -268,17 +285,29 @@ pub mod tests {
     #[test]
     fn workflow_branch_display() {
         assert_eq!(WorkflowBranch::PrReview.to_string(), "pr-review");
-        assert_eq!(WorkflowBranch::IssueExecution.to_string(), "issue-execution");
-        assert_eq!(WorkflowBranch::BacklogDiscovery.to_string(), "backlog-discovery");
+        assert_eq!(
+            WorkflowBranch::IssueExecution.to_string(),
+            "issue-execution"
+        );
+        assert_eq!(
+            WorkflowBranch::BacklogDiscovery.to_string(),
+            "backlog-discovery"
+        );
     }
 
     #[test]
     fn repo_context_helpers() {
-        let ctx = RepoContext { open_pr_count: 1, open_issue_count: 0 };
+        let ctx = RepoContext {
+            open_pr_count: 1,
+            open_issue_count: 0,
+        };
         assert!(ctx.has_open_prs());
         assert!(!ctx.has_open_issues());
 
-        let ctx2 = RepoContext { open_pr_count: 0, open_issue_count: 2 };
+        let ctx2 = RepoContext {
+            open_pr_count: 0,
+            open_issue_count: 2,
+        };
         assert!(!ctx2.has_open_prs());
         assert!(ctx2.has_open_issues());
     }
@@ -303,7 +332,10 @@ pub mod tests {
         }];
         let engine = PolicyEngine::with_rules(
             Box::new(StubContextResolver {
-                context: RepoContext { open_pr_count: 5, open_issue_count: 0 },
+                context: RepoContext {
+                    open_pr_count: 5,
+                    open_issue_count: 0,
+                },
             }),
             rules,
         );
@@ -322,12 +354,18 @@ pub mod tests {
         }];
         let engine = PolicyEngine::with_rules(
             Box::new(StubContextResolver {
-                context: RepoContext { open_pr_count: 1, open_issue_count: 0 },
+                context: RepoContext {
+                    open_pr_count: 1,
+                    open_issue_count: 0,
+                },
             }),
             rules,
         );
         let sel = engine.select_branch().unwrap();
-        assert_eq!(sel.prompt_override.as_deref(), Some("Custom PR review prompt."));
+        assert_eq!(
+            sel.prompt_override.as_deref(),
+            Some("Custom PR review prompt.")
+        );
     }
 
     #[test]
@@ -340,7 +378,10 @@ pub mod tests {
         }];
         let engine = PolicyEngine::with_rules(
             Box::new(StubContextResolver {
-                context: RepoContext { open_pr_count: 0, open_issue_count: 0 },
+                context: RepoContext {
+                    open_pr_count: 0,
+                    open_issue_count: 0,
+                },
             }),
             rules,
         );
@@ -365,7 +406,10 @@ pub mod tests {
         ];
         let engine = PolicyEngine::with_rules(
             Box::new(StubContextResolver {
-                context: RepoContext { open_pr_count: 0, open_issue_count: 2 },
+                context: RepoContext {
+                    open_pr_count: 0,
+                    open_issue_count: 2,
+                },
             }),
             rules,
         );
@@ -385,7 +429,10 @@ pub mod tests {
         }];
         let engine = PolicyEngine::with_rules(
             Box::new(StubContextResolver {
-                context: RepoContext { open_pr_count: 0, open_issue_count: 0 },
+                context: RepoContext {
+                    open_pr_count: 0,
+                    open_issue_count: 0,
+                },
             }),
             rules,
         );
@@ -396,7 +443,10 @@ pub mod tests {
     fn policy_condition_display() {
         use crate::config::PolicyCondition;
         assert_eq!(PolicyCondition::HasOpenPrs.to_string(), "has_open_prs");
-        assert_eq!(PolicyCondition::HasOpenIssues.to_string(), "has_open_issues");
+        assert_eq!(
+            PolicyCondition::HasOpenIssues.to_string(),
+            "has_open_issues"
+        );
         assert_eq!(PolicyCondition::Always.to_string(), "always");
     }
 }

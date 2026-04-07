@@ -128,7 +128,11 @@ mod tests {
             prompt_inline: Some("base prompt".to_string()),
             ..LoopConfig::default()
         };
-        let targets = vec![make_target("/tmp/repo-a", Some("repo-a"), Some("custom prompt"))];
+        let targets = [make_target(
+            "/tmp/repo-a",
+            Some("repo-a"),
+            Some("custom prompt"),
+        )];
 
         // Verify that run_multi_repo builds the correct derived config by
         // checking that the loop engine receives the override prompt.
@@ -160,16 +164,10 @@ mod tests {
             ..LoopConfig::default()
         };
 
-        let summary_a = LoopEngine::with_adapter(
-            config_a,
-            Box::new(FakeAdapter::success("fake")),
-        )
-        .run();
-        let summary_b = LoopEngine::with_adapter(
-            config_b,
-            Box::new(FakeAdapter::success("fake")),
-        )
-        .run();
+        let summary_a =
+            LoopEngine::with_adapter(config_a, Box::new(FakeAdapter::success("fake"))).run();
+        let summary_b =
+            LoopEngine::with_adapter(config_b, Box::new(FakeAdapter::success("fake"))).run();
 
         assert_eq!(summary_a.successes, 1);
         assert_eq!(summary_b.successes, 2);
