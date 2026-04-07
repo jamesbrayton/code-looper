@@ -1,16 +1,39 @@
 # Configuration Reference
 
-Code Looper can be configured through a TOML file, CLI flags, or a combination of both. CLI flags always take precedence over values in the TOML file.
+Code Looper can be configured through a config file (TOML or YAML), CLI flags, or a combination of both. CLI flags always take precedence over values in the config file.
 
 ## Precedence
 
 ```
-CLI flags  >  TOML config file  >  built-in defaults
+CLI flags  >  config file (TOML or YAML)  >  built-in defaults
 ```
 
 ## Loading a config file
 
-Pass `--config path/to/config.toml` to load a base configuration. Any CLI flag explicitly set on the same invocation overrides the corresponding TOML value.
+Pass `--config path/to/config.toml` (or `.yaml` / `.yml`) to load a base configuration. Any CLI flag explicitly set on the same invocation overrides the corresponding value from the file.
+
+The format is detected automatically from the file extension:
+
+| Extension | Format |
+|-----------|--------|
+| `.yaml`, `.yml` | YAML |
+| `.toml` or anything else | TOML (default) |
+
+**TOML example (`looper.toml`):**
+
+```toml
+provider = "claude"
+iterations = 5
+log_level = "info"
+```
+
+**YAML equivalent (`looper.yaml`):**
+
+```yaml
+provider: claude
+iterations: 5
+log_level: info
+```
 
 ---
 

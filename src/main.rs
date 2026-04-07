@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
             let bind_addr = bind_addr.clone();
             // Build config from file / CLI overrides, then hand off to service mode.
             let base = if let Some(ref path) = cli_args.config {
-                config::LoopConfig::from_toml_file(path)
+                config::LoopConfig::from_file(path)
                     .with_context(|| format!("failed to load config from {}", path.display()))?
             } else {
                 config::LoopConfig::default()
@@ -88,7 +88,7 @@ fn main() -> anyhow::Result<()> {
 
     // Determine base config: file-loaded or default.
     let base = if let Some(ref path) = cli_args.config {
-        config::LoopConfig::from_toml_file(path)
+        config::LoopConfig::from_file(path)
             .with_context(|| format!("failed to load config from {}", path.display()))?
     } else {
         config::LoopConfig::default()

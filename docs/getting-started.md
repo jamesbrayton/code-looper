@@ -52,7 +52,7 @@ Key flags:
 
 ## Use a config file
 
-For repeated runs, put your configuration in `looper.toml` at the repository root:
+For repeated runs, put your configuration in `looper.toml` (or `looper.yaml` / `looper.yml`) at the repository root:
 
 ```toml
 provider = "claude"

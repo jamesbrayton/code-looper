@@ -76,7 +76,9 @@ pub struct Cli {
     #[arg(long, conflicts_with = "prompt_inline")]
     pub prompt_file: Option<PathBuf>,
 
-    /// Path to a TOML config file to load as a base configuration.
+    /// Path to a config file to load as a base configuration.
+    /// Supports TOML (`.toml`, default) and YAML (`.yaml` / `.yml`).
+    /// Format is detected automatically from the file extension.
     #[arg(long)]
     pub config: Option<PathBuf>,
 
@@ -219,7 +221,7 @@ impl Cli {
     /// Merge CLI overrides onto a base `LoopConfig`.
     ///
     /// The base is either `LoopConfig::default()` or values loaded from a
-    /// TOML config file; any CLI flag that is explicitly set takes precedence.
+    /// TOML / YAML config file; any CLI flag that is explicitly set takes precedence.
     pub fn apply_overrides(self, mut base: LoopConfig) -> LoopConfig {
         if let Some(p) = self.provider {
             base.provider = p;

@@ -542,12 +542,57 @@ impl Default for LoopConfig {
     }
 }
 
+/// Supported config file formats, detected from the file extension.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigFormat {
+    /// TOML (`.toml`) — default format.
+    Toml,
+    /// YAML (`.yaml` or `.yml`).
+    Yaml,
+}
+
+impl ConfigFormat {
+    /// Detect format from a file path's extension.
+    /// `.yaml` and `.yml` map to [`ConfigFormat::Yaml`]; everything else is
+    /// treated as [`ConfigFormat::Toml`].
+    pub fn detect(path: &std::path::Path) -> Self {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .as_deref()
+        {
+            Some("yaml") | Some("yml") => ConfigFormat::Yaml,
+            _ => ConfigFormat::Toml,
+        }
+    }
+}
+
 impl LoopConfig {
     /// Load config from a TOML file.
     pub fn from_toml_file(path: &std::path::Path) -> Result<Self, LooperError> {
         let content = std::fs::read_to_string(path)?;
         let config: Self = toml::from_str(&content)?;
         Ok(config)
+    }
+
+    /// Load config from a YAML file (`.yaml` / `.yml`).
+    pub fn from_yaml_file(path: &std::path::Path) -> Result<Self, LooperError> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Self = serde_yaml::from_str(&content)
+            .map_err(|e| LooperError::InvalidArgument(format!("YAML parse error: {e}")))?;
+        Ok(config)
+    }
+
+    /// Load config from a file, auto-detecting format by extension.
+    ///
+    /// `.yaml` / `.yml` extensions are parsed as YAML; everything else is
+    /// parsed as TOML.
+    pub fn from_file(path: &std::path::Path) -> Result<Self, LooperError> {
+        match ConfigFormat::detect(path) {
+            ConfigFormat::Yaml => Self::from_yaml_file(path),
+            ConfigFormat::Toml => Self::from_toml_file(path),
+        }
     }
 
     /// Validate that the config is internally consistent.
@@ -1320,5 +1365,117 @@ prompt_override = "Run linting only"
         assert_eq!(deserialized.multi_repo.len(), 2);
         assert_eq!(deserialized.multi_repo[0], config.multi_repo[0]);
         assert_eq!(deserialized.multi_repo[1], config.multi_repo[1]);
+    }
+
+    // ── YAML config tests ─────────────────────────────────────────────────────
+
+    /// Helper: write content to a temp file with the given suffix.
+    fn write_temp_file(suffix: &str, content: &str) -> NamedTempFile {
+        let file = tempfile::Builder::new().suffix(suffix).tempfile().unwrap();
+        std::fs::write(file.path(), content).unwrap();
+        file
+    }
+
+    #[test]
+    fn parse_yaml_config_file() {
+        let file = write_temp_file(
+            ".yaml",
+            "provider: copilot\niterations: 7\nlog_level: debug\n",
+        );
+        let config = LoopConfig::from_yaml_file(file.path()).unwrap();
+        assert_eq!(config.provider, Provider::Copilot);
+        assert_eq!(config.iterations, 7);
+        assert_eq!(config.log_level, "debug");
+    }
+
+    #[test]
+    fn parse_yml_config_file() {
+        let file = write_temp_file(
+            ".yml",
+            "provider: codex\niterations: 3\nlog_level: info\nprompt_inline: \"run lints\"\n",
+        );
+        let config = LoopConfig::from_yaml_file(file.path()).unwrap();
+        assert_eq!(config.provider, Provider::Codex);
+        assert_eq!(config.prompt_inline.as_deref(), Some("run lints"));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn from_file_detects_yaml_extension() {
+        let file = write_temp_file(
+            ".yaml",
+            "provider: claude\niterations: 2\nlog_level: info\n",
+        );
+        let config = LoopConfig::from_file(file.path()).unwrap();
+        assert_eq!(config.provider, Provider::Claude);
+        assert_eq!(config.iterations, 2);
+    }
+
+    #[test]
+    fn from_file_detects_toml_extension() {
+        let file = write_temp_file(
+            ".toml",
+            "provider = \"copilot\"\niterations = 4\nlog_level = \"info\"\n",
+        );
+        let config = LoopConfig::from_file(file.path()).unwrap();
+        assert_eq!(config.provider, Provider::Copilot);
+        assert_eq!(config.iterations, 4);
+    }
+
+    #[test]
+    fn from_file_defaults_to_toml_for_unknown_extension() {
+        let file = write_temp_file(
+            ".conf",
+            "provider = \"codex\"\niterations = 1\nlog_level = \"info\"\n",
+        );
+        let config = LoopConfig::from_file(file.path()).unwrap();
+        assert_eq!(config.provider, Provider::Codex);
+    }
+
+    #[test]
+    fn config_format_detect_yaml() {
+        assert_eq!(
+            ConfigFormat::detect(std::path::Path::new("looper.yaml")),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            ConfigFormat::detect(std::path::Path::new("looper.yml")),
+            ConfigFormat::Yaml
+        );
+        assert_eq!(
+            ConfigFormat::detect(std::path::Path::new("looper.YAML")),
+            ConfigFormat::Yaml
+        );
+    }
+
+    #[test]
+    fn config_format_detect_toml() {
+        assert_eq!(
+            ConfigFormat::detect(std::path::Path::new("looper.toml")),
+            ConfigFormat::Toml
+        );
+        assert_eq!(
+            ConfigFormat::detect(std::path::Path::new("looper")),
+            ConfigFormat::Toml
+        );
+    }
+
+    #[test]
+    fn yaml_parse_error_returns_invalid_argument() {
+        let file = write_temp_file(".yaml", "provider: [invalid yaml structure\n");
+        let err = LoopConfig::from_yaml_file(file.path()).unwrap_err();
+        assert!(err.to_string().contains("YAML parse error"));
+    }
+
+    #[test]
+    fn parse_yaml_with_orchestration() {
+        let file = write_temp_file(
+            ".yaml",
+            "provider: claude\niterations: 1\nlog_level: info\norchestration:\n  enabled: true\n  repo_owner: acme\n  repo_name: my-repo\n",
+        );
+        let config = LoopConfig::from_yaml_file(file.path()).unwrap();
+        assert!(config.orchestration.enabled);
+        assert_eq!(config.orchestration.repo_owner.as_deref(), Some("acme"));
+        assert_eq!(config.orchestration.repo_name.as_deref(), Some("my-repo"));
     }
 }
