@@ -6,6 +6,7 @@ mod issue_tracker;
 mod loop_engine;
 mod orchestration;
 mod policy_guard;
+mod pr_manager;
 mod pr_strategy;
 mod provider;
 mod telemetry;

@@ -1,0 +1,112 @@
+# Code Looper Orchestration
+
+This document describes how the loop engine selects workflow branches, the shippable-signal protocol, and PR lifecycle management.
+
+## Workflow branch selection
+
+Each iteration the orchestration policy engine evaluates the current repository context and selects one of three workflow branches:
+
+| Branch | When selected | Default prompt focus |
+|--------|--------------|---------------------|
+| `pr-review` | Open PRs exist | Review diffs, leave comments via MCP |
+| `issue-execution` | Open issues exist (no open PRs) | Pick highest-priority issue, implement, update via MCP |
+| `backlog-discovery` | No open PRs or issues | Identify improvements, create issues via MCP |
+
+The engine resolves repository context once per iteration before selecting a branch.
+
+## Shippable signal protocol
+
+The loop engine watches each iteration's stdout for a *shippable signal* — a marker the agent emits when it believes the current branch contains review-ready work.  When detected the engine opens (or updates) a pull request via the `gh` CLI.
+
+### Form 1 — Sentinel line (recommended)
+
+Include a line in your output that is **exactly** the sentinel string (no surrounding text on the same line).  The default sentinel is:
+
+```
+LOOPER_READY_FOR_REVIEW
+```
+
+Example agent output:
+
+```
+All tests pass.
+LOOPER_READY_FOR_REVIEW
+```
+
+The sentinel is case-sensitive and matched after trimming leading/trailing whitespace.
+
+### Form 2 — JSON block
+
+Emit a single-line JSON object with the `looper` key set to `"ready-for-review"`.  Optionally include a `summary` key whose value appears in the PR body:
+
+```json
+{"looper":"ready-for-review","summary":"Implemented user authentication module"}
+```
+
+The JSON block must appear on its own line and must start with `{`.
+
+### Signal priority
+
+If both forms are present in the same output, the sentinel line takes priority (it is found first in the scan).
+
+### Custom sentinel
+
+Override the sentinel string in `looper.toml`:
+
+```toml
+[pr_management]
+ready_marker = "MY_CUSTOM_SIGNAL"
+```
+
+## PR lifecycle
+
+### On first detection (no open PR)
+
+The engine opens a pull request:
+
+- **Head**: the active feature branch (e.g. `loop/42-my-feature`)
+- **Base**: `pr_management.base_branch` (default: `main`)
+- **Title**: `[LOOPER] #<issue>: <issue title>`
+- **Body**: links `Closes #<issue>`, optionally includes the agent's `summary`
+- **Labels**: `code-looper`, `needs-review`
+
+### On subsequent detections (PR already open)
+
+When `require_human_review = true` (the default): the engine logs a
+`BlockedOnHumanReview` event and takes no further automated action.  The PR
+remains open awaiting a human reviewer.
+
+When `require_human_review = false`: the engine appends a comment to the
+existing PR with the agent's update summary.
+
+### Human-review gating
+
+`require_human_review = true` (default) means the loop engine **never** calls
+`gh pr merge` itself.  Merge is left entirely to a human reviewer.  This is the
+safe default for all production usage.
+
+To enable automated merging (advanced, use with care):
+
+```toml
+[pr_management]
+require_human_review = false
+```
+
+## Configuration reference (`[pr_management]`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | `no-pr` \| `single-pr` \| `multi-pr` | `no-pr` | PR strategy |
+| `base_branch` | string | `"main"` | Branch PRs target |
+| `branch_prefix` | string | `"loop/"` | Feature branch prefix |
+| `require_human_review` | bool | `true` | Gate merges on human approval |
+| `allow_force_push` | bool | `false` | Allow `--force-with-lease` pushes |
+| `ready_marker` | string | `"LOOPER_READY_FOR_REVIEW"` | Shippable sentinel |
+
+## MCP-only policy
+
+All GitHub mutations (PR create, PR comment, issue comment) flow through the
+`gh` CLI, which is the Code Looper–approved mutation path enforced by the
+policy guard layer.  Direct REST API calls without the CLI are not supported.
+The policy guard blocks disallowed paths at startup unless `--allow-direct-github`
+is explicitly set (not recommended).

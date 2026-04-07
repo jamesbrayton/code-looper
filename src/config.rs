@@ -176,6 +176,10 @@ pub struct PrManagementConfig {
     /// `--force-with-lease`.  Default: `false` (safe default).
     #[serde(default)]
     pub allow_force_push: bool,
+    /// Sentinel string the loop looks for in agent output to trigger PR
+    /// creation.  Default: `LOOPER_READY_FOR_REVIEW`.
+    #[serde(default)]
+    pub ready_marker: Option<String>,
 }
 
 impl Default for PrManagementConfig {
@@ -186,6 +190,7 @@ impl Default for PrManagementConfig {
             branch_prefix: default_branch_prefix(),
             require_human_review: default_require_human_review(),
             allow_force_push: false,
+            ready_marker: None,
         }
     }
 }

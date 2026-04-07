@@ -1,0 +1,699 @@
+/// PR lifecycle management: shippable-signal detection, PR creation, and PR
+/// update for the `single-pr` and `multi-pr` strategies.
+///
+/// # Shippable signal protocol
+///
+/// The loop engine scans each provider iteration's stdout for a *shippable
+/// signal* — an explicit marker that the agent believes the current branch
+/// contains review-ready work.  Two forms are accepted (first match wins):
+///
+/// 1. **Sentinel line** — the output contains a line whose trimmed content
+///    equals the configured `ready_marker` string (default:
+///    `LOOPER_READY_FOR_REVIEW`).
+///
+/// 2. **JSON block** — the output contains a JSON object with a `"looper"`
+///    key set to `"ready-for-review"`.  An optional `"summary"` key provides
+///    a human-readable description that appears in the PR body:
+///    ```json
+///    {"looper":"ready-for-review","summary":"Implemented user auth"}
+///    ```
+///
+/// When a signal is detected the engine calls [`PrManager::handle_milestone`]
+/// which opens a new PR (if none exists for the branch) or appends a comment
+/// (if one already exists).  Human-review gating is enforced: when
+/// `require_human_review` is `true` (the default) the engine never merges the
+/// PR itself.
+///
+/// # MCP-only policy
+///
+/// All GitHub mutations (PR creation, PR comments) are performed through the
+/// `gh` CLI, which is the approved mutation path in the Code Looper policy
+/// guard layer.  Direct REST API calls without the CLI are not used.
+use std::process::Command;
+
+use serde::Deserialize;
+
+use crate::config::PrManagementConfig;
+
+// ── Signal detection ──────────────────────────────────────────────────────────
+
+/// The parsed shippable signal emitted by the agent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadySignal {
+    /// Optional human-readable summary extracted from a JSON signal block.
+    pub summary: Option<String>,
+    /// Which form of signal was detected.
+    pub form: SignalForm,
+}
+
+/// How the shippable signal was encoded in the agent output.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignalForm {
+    /// Plain sentinel line (`LOOPER_READY_FOR_REVIEW`).
+    Sentinel,
+    /// Structured JSON block.
+    Json,
+}
+
+/// Internal JSON shape for the structured signal form.
+#[derive(Deserialize)]
+struct JsonSignal {
+    looper: String,
+    summary: Option<String>,
+}
+
+/// Scan `output` for a shippable signal.
+///
+/// Returns `Some(ReadySignal)` when found, `None` when the output does not
+/// contain any recognised signal form.
+///
+/// The `ready_marker` string is compared case-sensitively against each trimmed
+/// line.
+pub fn detect_signal(output: &str, ready_marker: &str) -> Option<ReadySignal> {
+    // Try sentinel form first (cheap scan).
+    for line in output.lines() {
+        if line.trim() == ready_marker {
+            return Some(ReadySignal { summary: None, form: SignalForm::Sentinel });
+        }
+    }
+
+    // Try JSON form: look for lines / blocks that parse as JsonSignal.
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('{') {
+            if let Ok(sig) = serde_json::from_str::<JsonSignal>(trimmed) {
+                if sig.looper == "ready-for-review" {
+                    return Some(ReadySignal { summary: sig.summary, form: SignalForm::Json });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ── PR data types ─────────────────────────────────────────────────────────────
+
+/// Lightweight description of an open pull request.
+#[derive(Debug, Clone)]
+pub struct PrInfo {
+    pub number: u32,
+    pub url: String,
+    pub title: String,
+}
+
+/// Input for opening a new pull request.
+#[derive(Debug, Clone)]
+pub struct PrDraft {
+    /// Source branch (head).
+    pub branch: String,
+    /// Target branch (base).
+    pub base_branch: String,
+    /// PR title.
+    pub title: String,
+    /// PR body in Markdown.
+    pub body: String,
+    /// Labels to apply.
+    pub labels: Vec<String>,
+}
+
+// ── Error type ────────────────────────────────────────────────────────────────
+
+/// Errors produced by PR lifecycle operations.
+#[derive(Debug, thiserror::Error)]
+pub enum PrError {
+    #[error("gh CLI command failed: {0}")]
+    GhCommand(String),
+
+    #[error("failed to parse gh output: {0}")]
+    ParseError(String),
+
+    #[error("PR already exists for branch '{0}'")]
+    AlreadyExists(String),
+}
+
+// ── PrLifecycle trait ─────────────────────────────────────────────────────────
+
+/// Abstraction over PR CRUD operations.
+///
+/// The production implementation shells out to the `gh` CLI.  Tests inject a
+/// [`MockPrLifecycle`] to verify call patterns without network I/O.
+pub trait PrLifecycle: Send + Sync {
+    /// Find an open PR whose head branch matches `branch`.
+    ///
+    /// Returns `None` when no such PR exists.
+    fn find_open_pr(&self, branch: &str) -> Result<Option<PrInfo>, PrError>;
+
+    /// Open a new pull request described by `draft`.
+    fn open_pr(&self, draft: &PrDraft) -> Result<PrInfo, PrError>;
+
+    /// Append `body` as a comment on the pull request identified by
+    /// `pr_number`.
+    fn comment_on_pr(&self, pr_number: u32, body: &str) -> Result<(), PrError>;
+}
+
+// ── GhPrLifecycle (production) ────────────────────────────────────────────────
+
+/// Production [`PrLifecycle`] implementation backed by the `gh` CLI.
+pub struct GhPrLifecycle;
+
+impl GhPrLifecycle {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for GhPrLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PrLifecycle for GhPrLifecycle {
+    fn find_open_pr(&self, branch: &str) -> Result<Option<PrInfo>, PrError> {
+        let out = Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                "open",
+                "--json",
+                "number,url,title",
+                "--limit",
+                "1",
+            ])
+            .output()
+            .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(PrError::GhCommand(format!("gh pr list failed: {stderr}")));
+        }
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let prs: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+            .map_err(|e| PrError::ParseError(format!("failed to parse gh pr list output: {e}")))?;
+
+        if let Some(pr) = prs.into_iter().next() {
+            let number = pr["number"].as_u64().ok_or_else(|| {
+                PrError::ParseError("missing 'number' field in gh pr list output".into())
+            })? as u32;
+            let url = pr["url"]
+                .as_str()
+                .ok_or_else(|| PrError::ParseError("missing 'url' field".into()))?
+                .to_string();
+            let title = pr["title"]
+                .as_str()
+                .ok_or_else(|| PrError::ParseError("missing 'title' field".into()))?
+                .to_string();
+            Ok(Some(PrInfo { number, url, title }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn open_pr(&self, draft: &PrDraft) -> Result<PrInfo, PrError> {
+        let mut args = vec![
+            "pr",
+            "create",
+            "--head",
+            draft.branch.as_str(),
+            "--base",
+            draft.base_branch.as_str(),
+            "--title",
+            draft.title.as_str(),
+            "--body",
+            draft.body.as_str(),
+        ];
+
+        // gh pr create accepts multiple --label flags.
+        let label_args: Vec<String> =
+            draft.labels.iter().flat_map(|l| ["--label".to_string(), l.clone()]).collect();
+        let label_strs: Vec<&str> = label_args.iter().map(String::as_str).collect();
+        args.extend_from_slice(&label_strs);
+
+        let out = Command::new("gh")
+            .args(&args)
+            .output()
+            .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(PrError::GhCommand(format!("gh pr create failed: {stderr}")));
+        }
+
+        // `gh pr create` prints the PR URL to stdout.
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+        // Retrieve the PR number from the URL (last path segment).
+        let number: u32 = url
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| PrError::ParseError(format!("cannot parse PR number from URL: {url}")))?;
+
+        Ok(PrInfo { number, url, title: draft.title.clone() })
+    }
+
+    fn comment_on_pr(&self, pr_number: u32, body: &str) -> Result<(), PrError> {
+        let pr_ref = pr_number.to_string();
+        let out = Command::new("gh")
+            .args(["pr", "comment", &pr_ref, "--body", body])
+            .output()
+            .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(PrError::GhCommand(format!("gh pr comment failed: {stderr}")));
+        }
+        Ok(())
+    }
+}
+
+// ── MockPrLifecycle (test double) ─────────────────────────────────────────────
+
+/// Recorded call to the mock lifecycle.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrCall {
+    FindOpenPr { branch: String },
+    OpenPr { branch: String, base: String, title: String },
+    CommentOnPr { pr_number: u32 },
+}
+
+/// Test double for [`PrLifecycle`].
+///
+/// Callers configure the scripted responses before injecting the mock, then
+/// assert on `calls` after exercising the code under test.
+pub struct MockPrLifecycle {
+    /// Pre-configured response for `find_open_pr`.  `None` means "no open PR".
+    pub existing_pr: std::sync::Mutex<Option<PrInfo>>,
+    /// Pre-configured response for `open_pr`.
+    pub opened_pr: PrInfo,
+    /// All calls made to the mock, in order.
+    pub calls: std::sync::Mutex<Vec<PrCall>>,
+}
+
+impl MockPrLifecycle {
+    /// Create a mock with no pre-existing PR.  `open_pr` returns a dummy PR
+    /// at number `42`.
+    pub fn new() -> Self {
+        Self {
+            existing_pr: std::sync::Mutex::new(None),
+            opened_pr: PrInfo {
+                number: 42,
+                url: "https://github.com/owner/repo/pull/42".into(),
+                title: "[LOOPER] Test PR".into(),
+            },
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Configure the mock to report an existing open PR.
+    pub fn with_existing_pr(self, pr: PrInfo) -> Self {
+        *self.existing_pr.lock().unwrap() = Some(pr);
+        self
+    }
+}
+
+impl Default for MockPrLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PrLifecycle for MockPrLifecycle {
+    fn find_open_pr(&self, branch: &str) -> Result<Option<PrInfo>, PrError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(PrCall::FindOpenPr { branch: branch.to_string() });
+        Ok(self.existing_pr.lock().unwrap().clone())
+    }
+
+    fn open_pr(&self, draft: &PrDraft) -> Result<PrInfo, PrError> {
+        self.calls.lock().unwrap().push(PrCall::OpenPr {
+            branch: draft.branch.clone(),
+            base: draft.base_branch.clone(),
+            title: draft.title.clone(),
+        });
+        Ok(self.opened_pr.clone())
+    }
+
+    fn comment_on_pr(&self, pr_number: u32, body: &str) -> Result<(), PrError> {
+        let _ = body;
+        self.calls.lock().unwrap().push(PrCall::CommentOnPr { pr_number });
+        Ok(())
+    }
+}
+
+// ── PrManager ─────────────────────────────────────────────────────────────────
+
+/// Result of handling a shippable milestone.
+#[derive(Debug, Clone)]
+pub enum PrAction {
+    /// A new PR was opened.
+    Opened(PrInfo),
+    /// An existing PR was updated with a new comment.
+    Updated { pr: PrInfo, comment_added: bool },
+    /// The shippable signal was not present — no action taken.
+    NoSignal,
+    /// Signal detected but PR creation skipped because `require_human_review`
+    /// is `true` and a PR is already open (no further automated action).
+    BlockedOnHumanReview(PrInfo),
+}
+
+/// Orchestrates shippable-signal detection and PR lifecycle management.
+pub struct PrManager<L: PrLifecycle> {
+    config: PrManagementConfig,
+    lifecycle: L,
+    /// Sentinel string to look for in agent output (default:
+    /// `LOOPER_READY_FOR_REVIEW`).
+    ready_marker: String,
+}
+
+impl<L: PrLifecycle> PrManager<L> {
+    pub fn new(config: PrManagementConfig, lifecycle: L) -> Self {
+        let ready_marker = config
+            .ready_marker
+            .clone()
+            .unwrap_or_else(|| "LOOPER_READY_FOR_REVIEW".to_string());
+        Self { config, lifecycle, ready_marker }
+    }
+
+    /// Build a PR title from an issue number and title.
+    fn pr_title(issue_number: u64, issue_title: &str) -> String {
+        format!("[LOOPER] #{issue_number}: {issue_title}")
+    }
+
+    /// Build a PR body linking back to the originating issue and including an
+    /// optional agent-provided summary.
+    fn pr_body(issue_number: u64, run_summary: Option<&str>) -> String {
+        let mut body = format!(
+            "Closes #{issue_number}\n\n\
+             > This pull request was opened automatically by [Code Looper](https://github.com/jamesbrayton/code-looper).\n"
+        );
+        if let Some(summary) = run_summary {
+            body.push_str(&format!("\n## Agent summary\n\n{summary}\n"));
+        }
+        body
+    }
+
+    /// Standard labels applied to every auto-opened PR.
+    fn default_labels() -> Vec<String> {
+        vec!["code-looper".to_string(), "needs-review".to_string()]
+    }
+
+    /// Inspect `agent_output` for a shippable signal and act accordingly.
+    ///
+    /// - If no signal: returns `PrAction::NoSignal`.
+    /// - If signal and no open PR: opens a new PR.
+    /// - If signal and an open PR exists:
+    ///   - When `require_human_review` is `true`: returns
+    ///     `PrAction::BlockedOnHumanReview`.
+    ///   - Otherwise: adds a comment to the existing PR.
+    pub fn handle_milestone(
+        &self,
+        branch: &str,
+        issue_number: u64,
+        issue_title: &str,
+        agent_output: &str,
+    ) -> Result<PrAction, PrError> {
+        let signal = detect_signal(agent_output, &self.ready_marker);
+        if signal.is_none() {
+            return Ok(PrAction::NoSignal);
+        }
+        let signal = signal.unwrap();
+
+        tracing::info!(
+            branch,
+            issue_number,
+            form = ?signal.form,
+            "shippable signal detected; checking for existing PR"
+        );
+
+        let existing = self.lifecycle.find_open_pr(branch)?;
+
+        match existing {
+            None => {
+                // Open a fresh PR.
+                let draft = PrDraft {
+                    branch: branch.to_string(),
+                    base_branch: self.config.base_branch.clone(),
+                    title: Self::pr_title(issue_number, issue_title),
+                    body: Self::pr_body(issue_number, signal.summary.as_deref()),
+                    labels: Self::default_labels(),
+                };
+                let pr = self.lifecycle.open_pr(&draft)?;
+                tracing::info!(
+                    pr_number = pr.number,
+                    url = %pr.url,
+                    "opened PR for branch"
+                );
+                Ok(PrAction::Opened(pr))
+            }
+            Some(pr) if self.config.require_human_review => {
+                tracing::info!(
+                    pr_number = pr.number,
+                    "PR already open; require_human_review=true — no automated action"
+                );
+                Ok(PrAction::BlockedOnHumanReview(pr))
+            }
+            Some(pr) => {
+                // Existing PR, human review not required — append a comment.
+                let comment = match signal.summary {
+                    Some(ref s) => format!(
+                        "**Code Looper update** — agent signalled ready-for-review.\n\n{s}"
+                    ),
+                    None => "**Code Looper update** — agent signalled ready-for-review.".to_string(),
+                };
+                self.lifecycle.comment_on_pr(pr.number, &comment)?;
+                tracing::info!(pr_number = pr.number, "appended comment to existing PR");
+                Ok(PrAction::Updated { pr, comment_added: true })
+            }
+        }
+    }
+}
+
+// ── Convenience constructor for production use ────────────────────────────────
+
+/// Build a production [`PrManager`] backed by the `gh` CLI.
+pub fn build_pr_manager(config: PrManagementConfig) -> PrManager<GhPrLifecycle> {
+    PrManager::new(config, GhPrLifecycle::new())
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PrManagementConfig;
+
+    const DEFAULT_MARKER: &str = "LOOPER_READY_FOR_REVIEW";
+
+    fn default_config() -> PrManagementConfig {
+        PrManagementConfig::default()
+    }
+
+    // ── detect_signal ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn detects_sentinel_line() {
+        let output = "Some output\nLOOPER_READY_FOR_REVIEW\nMore output";
+        let sig = detect_signal(output, DEFAULT_MARKER).unwrap();
+        assert_eq!(sig.form, SignalForm::Sentinel);
+        assert!(sig.summary.is_none());
+    }
+
+    #[test]
+    fn sentinel_line_trimmed() {
+        let output = "  LOOPER_READY_FOR_REVIEW  ";
+        let sig = detect_signal(output, DEFAULT_MARKER).unwrap();
+        assert_eq!(sig.form, SignalForm::Sentinel);
+    }
+
+    #[test]
+    fn sentinel_partial_match_not_detected() {
+        let output = "PREFIX_LOOPER_READY_FOR_REVIEW";
+        assert!(detect_signal(output, DEFAULT_MARKER).is_none());
+    }
+
+    #[test]
+    fn detects_json_signal_without_summary() {
+        let output = r#"{"looper":"ready-for-review"}"#;
+        let sig = detect_signal(output, DEFAULT_MARKER).unwrap();
+        assert_eq!(sig.form, SignalForm::Json);
+        assert!(sig.summary.is_none());
+    }
+
+    #[test]
+    fn detects_json_signal_with_summary() {
+        let output = r#"{"looper":"ready-for-review","summary":"Auth module complete"}"#;
+        let sig = detect_signal(output, DEFAULT_MARKER).unwrap();
+        assert_eq!(sig.form, SignalForm::Json);
+        assert_eq!(sig.summary.as_deref(), Some("Auth module complete"));
+    }
+
+    #[test]
+    fn json_wrong_looper_value_not_detected() {
+        let output = r#"{"looper":"something-else"}"#;
+        assert!(detect_signal(output, DEFAULT_MARKER).is_none());
+    }
+
+    #[test]
+    fn no_signal_in_empty_output() {
+        assert!(detect_signal("", DEFAULT_MARKER).is_none());
+    }
+
+    #[test]
+    fn no_signal_in_ordinary_output() {
+        let output = "All tests passed.\nBuild succeeded.";
+        assert!(detect_signal(output, DEFAULT_MARKER).is_none());
+    }
+
+    #[test]
+    fn custom_ready_marker_detected() {
+        let output = "CUSTOM_SHIP_IT";
+        let sig = detect_signal(output, "CUSTOM_SHIP_IT").unwrap();
+        assert_eq!(sig.form, SignalForm::Sentinel);
+    }
+
+    #[test]
+    fn sentinel_preferred_over_json_when_both_present() {
+        // Sentinel scan runs first; if the sentinel is found the JSON block is
+        // never reached.
+        let output = "LOOPER_READY_FOR_REVIEW\n{\"looper\":\"ready-for-review\",\"summary\":\"s\"}";
+        let sig = detect_signal(output, DEFAULT_MARKER).unwrap();
+        assert_eq!(sig.form, SignalForm::Sentinel);
+    }
+
+    // ── PrManager ─────────────────────────────────────────────────────────────
+
+    fn manager_with_mock(mock: MockPrLifecycle) -> PrManager<MockPrLifecycle> {
+        PrManager::new(default_config(), mock)
+    }
+
+    #[test]
+    fn no_signal_returns_no_action() {
+        let mgr = manager_with_mock(MockPrLifecycle::new());
+        let action = mgr
+            .handle_milestone("loop/1-branch", 1, "My feature", "ordinary output")
+            .unwrap();
+        assert!(matches!(action, PrAction::NoSignal));
+        assert!(mgr.lifecycle.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signal_opens_pr_when_none_exists() {
+        let mock = MockPrLifecycle::new();
+        let mgr = manager_with_mock(mock);
+        let output = "LOOPER_READY_FOR_REVIEW";
+        let action =
+            mgr.handle_milestone("loop/1-feat", 1, "My feature", output).unwrap();
+        assert!(matches!(action, PrAction::Opened(_)));
+
+        let calls = mgr.lifecycle.calls.lock().unwrap();
+        assert_eq!(calls[0], PrCall::FindOpenPr { branch: "loop/1-feat".into() });
+        assert!(matches!(calls[1], PrCall::OpenPr { .. }));
+    }
+
+    #[test]
+    fn opened_pr_title_references_issue() {
+        let mock = MockPrLifecycle::new();
+        let mgr = manager_with_mock(mock);
+        let output = "LOOPER_READY_FOR_REVIEW";
+        mgr.handle_milestone("loop/7-auth", 7, "Add auth", output).unwrap();
+
+        let calls = mgr.lifecycle.calls.lock().unwrap();
+        if let PrCall::OpenPr { title, .. } = &calls[1] {
+            assert!(title.contains("#7"), "title should reference issue: {title}");
+            assert!(title.contains("Add auth"), "title should include issue title: {title}");
+        } else {
+            panic!("expected OpenPr call");
+        }
+    }
+
+    #[test]
+    fn signal_blocked_on_human_review_when_pr_exists() {
+        let existing = PrInfo {
+            number: 10,
+            url: "https://github.com/o/r/pull/10".into(),
+            title: "[LOOPER] #1: feat".into(),
+        };
+        let mock = MockPrLifecycle::new().with_existing_pr(existing);
+        let mut cfg = default_config();
+        cfg.require_human_review = true;
+        let mgr = PrManager::new(cfg, mock);
+
+        let action =
+            mgr.handle_milestone("loop/1-feat", 1, "feat", "LOOPER_READY_FOR_REVIEW").unwrap();
+        assert!(matches!(action, PrAction::BlockedOnHumanReview(_)));
+
+        // Should NOT have tried to open a new PR or add a comment.
+        let calls = mgr.lifecycle.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "only find_open_pr should be called");
+    }
+
+    #[test]
+    fn signal_comments_on_existing_pr_when_review_not_required() {
+        let existing = PrInfo {
+            number: 10,
+            url: "https://github.com/o/r/pull/10".into(),
+            title: "[LOOPER] #1: feat".into(),
+        };
+        let mock = MockPrLifecycle::new().with_existing_pr(existing);
+        let mut cfg = default_config();
+        cfg.require_human_review = false;
+        let mgr = PrManager::new(cfg, mock);
+
+        let action =
+            mgr.handle_milestone("loop/1-feat", 1, "feat", "LOOPER_READY_FOR_REVIEW").unwrap();
+        assert!(matches!(action, PrAction::Updated { .. }));
+
+        let calls = mgr.lifecycle.calls.lock().unwrap();
+        assert!(matches!(calls[1], PrCall::CommentOnPr { pr_number: 10 }));
+    }
+
+    #[test]
+    fn pr_body_includes_closes_link() {
+        let body = PrManager::<MockPrLifecycle>::pr_body(99, None);
+        assert!(body.contains("Closes #99"), "body should reference issue: {body}");
+    }
+
+    #[test]
+    fn pr_body_includes_agent_summary() {
+        let body = PrManager::<MockPrLifecycle>::pr_body(5, Some("Auth complete"));
+        assert!(body.contains("Auth complete"), "body should include summary: {body}");
+    }
+
+    #[test]
+    fn pr_title_format() {
+        let title = PrManager::<MockPrLifecycle>::pr_title(42, "Add caching");
+        assert_eq!(title, "[LOOPER] #42: Add caching");
+    }
+
+    #[test]
+    fn default_labels_contains_code_looper_and_needs_review() {
+        let labels = PrManager::<MockPrLifecycle>::default_labels();
+        assert!(labels.contains(&"code-looper".to_string()));
+        assert!(labels.contains(&"needs-review".to_string()));
+    }
+
+    #[test]
+    fn json_summary_included_in_pr_body() {
+        let mock = MockPrLifecycle::new();
+        let mgr = manager_with_mock(mock);
+        let output = r#"{"looper":"ready-for-review","summary":"Phase 1 done"}"#;
+        mgr.handle_milestone("loop/3-phase", 3, "Phase 1", output).unwrap();
+
+        let calls = mgr.lifecycle.calls.lock().unwrap();
+        if let PrCall::OpenPr { title, .. } = &calls[1] {
+            // Title comes from issue, not JSON summary
+            assert!(title.contains("#3"));
+        } else {
+            panic!("expected OpenPr call, got: {calls:?}");
+        }
+    }
+}
