@@ -92,6 +92,55 @@ To enable automated merging (advanced, use with care):
 require_human_review = false
 ```
 
+## Multi-PR triage workflow
+
+When `mode = "multi-pr"`, the engine runs a **triage step** at the start of
+each iteration before invoking the agent.
+
+### PR discovery
+
+Open PRs are discovered by the `code-looper` label via `gh pr list`.
+
+### State classification
+
+Each candidate PR is classified into one of:
+
+| State | Meaning | Engine action |
+|-------|---------|---------------|
+| `ChecksFailing` | One or more CI checks have `conclusion: FAILURE` | Agent is prompted to fix failures and push |
+| `ChangesRequested` | `reviewDecision` is `CHANGES_REQUESTED` | Agent is prompted to address each review comment |
+| `ReadyToMerge` | Approved (or no review required) and checks pass | Merge directly (when `require_human_review = false`) or report blocked |
+| `NeedsReview` | Awaiting initial review | Skipped; engine proceeds to next PR |
+| `Skipped` | PR carries a skip label (`do-not-loop`, `wip`, …) | Ignored entirely |
+
+### Triage priority
+
+The `triage_priority` setting controls which PR is acted on first when multiple
+actionable PRs exist:
+
+| Value | Behaviour |
+|-------|-----------|
+| `oldest` *(default)* | Oldest PR first (ascending creation order) |
+| `newest` | Newest PR first |
+| `least-conflicts` | Same ordering as `oldest` (conflict detection not yet implemented) |
+
+### Fall-through
+
+If no open PR can be advanced (all skipped, all `NeedsReview`, or all blocked
+on human review) the triage step reports this and the iteration proceeds as
+normal issue-work.
+
+### Prompt override
+
+When an actionable PR is found, the engine **replaces** the normal iteration
+prompt with a triage-generated prompt.  The agent is directed to:
+
+- Fix failing CI checks (when `ChecksFailing`)
+- Address reviewer feedback (when `ChangesRequested`)
+
+The prompt includes the PR number and title so the agent can locate the correct
+branch and PR.
+
 ## Configuration reference (`[pr_management]`)
 
 | Key | Type | Default | Description |
@@ -102,6 +151,8 @@ require_human_review = false
 | `require_human_review` | bool | `true` | Gate merges on human approval |
 | `allow_force_push` | bool | `false` | Allow `--force-with-lease` pushes |
 | `ready_marker` | string | `"LOOPER_READY_FOR_REVIEW"` | Shippable sentinel |
+| `triage_priority` | `oldest` \| `newest` \| `least-conflicts` | `oldest` | Multi-PR ordering |
+| `skip_labels` | list of strings | `["do-not-loop","wip"]` | Labels that exclude a PR from triage |
 
 ## MCP-only policy
 

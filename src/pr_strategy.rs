@@ -1,16 +1,23 @@
 use crate::config::{PrManagementConfig, PrMode};
+use crate::pr_manager::{PrTriage, PrLifecycleTriage, TriageAction, build_pr_triage};
 
 /// The plan produced by a `PrStrategy` before each iteration.
 ///
 /// The loop engine passes this to the orchestration policy engine so the
 /// prompt can reflect the active PR strategy.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct IterationPlan {
     /// Human-readable description of what the strategy intends to do this
     /// iteration (used in structured logs and prompt preambles).
     pub description: String,
     /// The PR mode that produced this plan.
     pub mode: PrMode,
+    /// When set, the loop engine uses this prompt instead of the normal
+    /// resolved prompt.  Used by multi-PR triage to direct the agent toward
+    /// a specific PR action.
+    pub prompt_override: Option<String>,
+    /// The triage action that produced this plan (present for multi-PR mode).
+    pub triage_action: Option<TriageAction>,
 }
 
 /// Trait implemented by all PR strategy variants.
@@ -53,6 +60,8 @@ impl PrStrategy for NoPrStrategy {
                 self.config.base_branch
             ),
             mode: PrMode::NoPr,
+            prompt_override: None,
+            triage_action: None,
         }
     }
 }
@@ -84,38 +93,83 @@ impl PrStrategy for SinglePrStrategy {
                 self.config.base_branch, self.config.require_human_review
             ),
             mode: PrMode::SinglePr,
+            prompt_override: None,
+            triage_action: None,
         }
     }
 }
 
 /// Multi-PR strategy: triage open PRs first; start new feature branch work
 /// only when no PR can be advanced.
-pub struct MultiPrStrategy {
+pub struct MultiPrStrategy<L: PrLifecycleTriage + 'static> {
     config: PrManagementConfig,
+    triage: PrTriage<L>,
 }
 
-impl MultiPrStrategy {
+impl MultiPrStrategy<crate::pr_manager::GhPrLifecycle> {
+    /// Build a production `MultiPrStrategy` backed by the `gh` CLI.
     pub fn new(config: PrManagementConfig) -> Self {
-        Self { config }
+        let triage = build_pr_triage(config.clone());
+        Self { config, triage }
     }
 }
 
-impl PrStrategy for MultiPrStrategy {
+impl<L: PrLifecycleTriage + 'static> MultiPrStrategy<L> {
+    /// Build a `MultiPrStrategy` with a custom triage lifecycle (for testing).
+    pub fn with_triage(config: PrManagementConfig, triage: PrTriage<L>) -> Self {
+        Self { config, triage }
+    }
+}
+
+impl<L: PrLifecycleTriage + 'static> PrStrategy for MultiPrStrategy<L> {
     fn plan_iteration(&self, iteration: u64) -> IterationPlan {
         tracing::debug!(
             iteration,
             mode = %self.config.mode,
             base_branch = %self.config.base_branch,
             require_human_review = self.config.require_human_review,
-            "MultiPrStrategy: triage open PRs first, then issue work"
+            "MultiPrStrategy: running PR triage step"
         );
-        IterationPlan {
-            description: format!(
-                "multi-pr: triage open PRs first, then open new feature branch for issue \
-                 work (base: {}, human review required: {})",
-                self.config.base_branch, self.config.require_human_review
+
+        let action = self.triage.select_action();
+
+        let (description, prompt_override) = match &action {
+            TriageAction::FixChecks { pr, prompt } => (
+                format!("multi-pr: fix CI checks on PR #{} ({})", pr.number, pr.title),
+                Some(prompt.clone()),
             ),
+            TriageAction::AddressReviewFeedback { pr, prompt } => (
+                format!(
+                    "multi-pr: address review feedback on PR #{} ({})",
+                    pr.number, pr.title
+                ),
+                Some(prompt.clone()),
+            ),
+            TriageAction::Merge { pr } => (
+                format!("multi-pr: merging PR #{} ({})", pr.number, pr.title),
+                None,
+            ),
+            TriageAction::BlockedOnHumanReview { pr } => (
+                format!(
+                    "multi-pr: PR #{} ready but blocked on human review — falling through",
+                    pr.number
+                ),
+                None,
+            ),
+            TriageAction::NoActionablePr => (
+                format!(
+                    "multi-pr: no actionable open PR — proceed with issue work (base: {})",
+                    self.config.base_branch
+                ),
+                None,
+            ),
+        };
+
+        IterationPlan {
+            description,
             mode: PrMode::MultiPr,
+            prompt_override,
+            triage_action: Some(action),
         }
     }
 }
@@ -129,6 +183,14 @@ pub fn build_strategy(config: PrManagementConfig) -> Box<dyn PrStrategy> {
         PrMode::SinglePr => Box::new(SinglePrStrategy::new(config)),
         PrMode::MultiPr => Box::new(MultiPrStrategy::new(config)),
     }
+}
+
+/// Build a `MultiPrStrategy` with a custom triage lifecycle (for testing).
+pub fn build_multi_pr_strategy_with_triage<L: PrLifecycleTriage + 'static>(
+    config: PrManagementConfig,
+    triage: PrTriage<L>,
+) -> Box<dyn PrStrategy> {
+    Box::new(MultiPrStrategy::with_triage(config, triage))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -186,19 +248,109 @@ mod tests {
 
     // ── MultiPrStrategy ──────────────────────────────────────────────────────
 
+    fn mock_triage(config: PrManagementConfig) -> PrTriage<crate::pr_manager::MockPrLifecycleTriage> {
+        PrTriage::new(config, crate::pr_manager::MockPrLifecycleTriage::new())
+    }
+
     #[test]
     fn multi_pr_strategy_plan_contains_mode() {
-        let strategy = MultiPrStrategy::new(config_with_mode(PrMode::MultiPr));
+        let cfg = config_with_mode(PrMode::MultiPr);
+        let triage = mock_triage(cfg.clone());
+        let strategy = MultiPrStrategy::with_triage(cfg, triage);
         let plan = strategy.plan_iteration(1);
         assert_eq!(plan.mode, PrMode::MultiPr);
         assert!(plan.description.contains("multi-pr"));
     }
 
     #[test]
-    fn multi_pr_strategy_mentions_triage() {
-        let strategy = MultiPrStrategy::new(config_with_mode(PrMode::MultiPr));
-        let plan = strategy.plan_iteration(2);
-        assert!(plan.description.contains("triage"));
+    fn multi_pr_strategy_no_actionable_pr_falls_through() {
+        // Empty mock → select_action returns NoActionablePr.
+        let cfg = config_with_mode(PrMode::MultiPr);
+        let triage = mock_triage(cfg.clone());
+        let strategy = MultiPrStrategy::with_triage(cfg, triage);
+        let plan = strategy.plan_iteration(1);
+        assert_eq!(plan.mode, PrMode::MultiPr);
+        assert!(plan.prompt_override.is_none());
+        // Description should mention issue work fall-through.
+        assert!(plan.description.contains("issue work") || plan.description.contains("no actionable"));
+    }
+
+    #[test]
+    fn multi_pr_strategy_checks_failing_returns_prompt_override() {
+        use crate::pr_manager::{MockPrLifecycleTriage, PrInfo, PrTriage, PrTriageState, PrWithState};
+        let cfg = config_with_mode(PrMode::MultiPr);
+        let pr = PrInfo { number: 7, url: "https://example.com/pull/7".into(), title: "Fix foo".into() };
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(7, PrWithState {
+            pr,
+            state: PrTriageState::ChecksFailing,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+        let triage = PrTriage::new(cfg.clone(), mock);
+        let strategy = MultiPrStrategy::with_triage(cfg, triage);
+        let plan = strategy.plan_iteration(1);
+        assert!(plan.prompt_override.is_some());
+        assert!(plan.prompt_override.unwrap().contains("CI checks"));
+    }
+
+    #[test]
+    fn multi_pr_strategy_changes_requested_returns_prompt_override() {
+        use crate::pr_manager::{MockPrLifecycleTriage, PrInfo, PrTriage, PrTriageState, PrWithState};
+        let cfg = config_with_mode(PrMode::MultiPr);
+        let pr = PrInfo { number: 8, url: "https://example.com/pull/8".into(), title: "Add bar".into() };
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(8, PrWithState {
+            pr,
+            state: PrTriageState::ChangesRequested,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+        let triage = PrTriage::new(cfg.clone(), mock);
+        let strategy = MultiPrStrategy::with_triage(cfg, triage);
+        let plan = strategy.plan_iteration(1);
+        assert!(plan.prompt_override.is_some());
+        assert!(plan.prompt_override.unwrap().contains("review comment"));
+    }
+
+    #[test]
+    fn multi_pr_strategy_ready_to_merge_human_review_required() {
+        use crate::pr_manager::{MockPrLifecycleTriage, PrInfo, PrTriage, PrTriageState, PrWithState};
+        let mut cfg = config_with_mode(PrMode::MultiPr);
+        cfg.require_human_review = true;
+        let pr = PrInfo { number: 9, url: "https://example.com/pull/9".into(), title: "Ship it".into() };
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(9, PrWithState {
+            pr,
+            state: PrTriageState::ReadyToMerge,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+        let triage = PrTriage::new(cfg.clone(), mock);
+        let strategy = MultiPrStrategy::with_triage(cfg, triage);
+        let plan = strategy.plan_iteration(1);
+        // Blocked on human review → no prompt override, falls through
+        assert!(plan.prompt_override.is_none());
+        assert!(plan.description.contains("human review"));
+    }
+
+    #[test]
+    fn multi_pr_strategy_skipped_pr_falls_through() {
+        use crate::pr_manager::{MockPrLifecycleTriage, PrInfo, PrTriage, PrTriageState, PrWithState};
+        let cfg = config_with_mode(PrMode::MultiPr);
+        let pr = PrInfo { number: 10, url: "https://example.com/pull/10".into(), title: "WIP".into() };
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(10, PrWithState {
+            pr,
+            state: PrTriageState::Skipped { reason: "wip".into() },
+            created_at: "2026-01-01T00:00:00Z".into(),
+        });
+        let triage = PrTriage::new(cfg.clone(), mock);
+        let strategy = MultiPrStrategy::with_triage(cfg, triage);
+        let plan = strategy.plan_iteration(1);
+        // All PRs skipped → no prompt override
+        assert!(plan.prompt_override.is_none());
     }
 
     // ── build_strategy ───────────────────────────────────────────────────────
@@ -215,13 +367,6 @@ mod tests {
         let strategy = build_strategy(config_with_mode(PrMode::SinglePr));
         let plan = strategy.plan_iteration(1);
         assert_eq!(plan.mode, PrMode::SinglePr);
-    }
-
-    #[test]
-    fn build_strategy_multi_pr() {
-        let strategy = build_strategy(config_with_mode(PrMode::MultiPr));
-        let plan = strategy.plan_iteration(1);
-        assert_eq!(plan.mode, PrMode::MultiPr);
     }
 
     // ── Iteration number propagation ─────────────────────────────────────────

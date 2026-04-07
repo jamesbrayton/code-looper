@@ -1,12 +1,16 @@
-use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig};
+use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
+use crate::pr_manager::{
+    GhPrLifecycle, PrManager, TriageAction, build_pr_manager,
+};
 use crate::pr_strategy::{PrStrategy, build_strategy};
 use crate::provider::{build_adapter, ProviderAdapter};
 use crate::telemetry::{
     IterationOutcome, IterationRecord, RunArtifacts, RunManifest, unix_now,
 };
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -110,6 +114,9 @@ pub struct LoopEngine {
     tracker: Box<dyn IssueTracker>,
     /// PR strategy: consulted once per iteration before the provider is invoked.
     pr_strategy: Box<dyn PrStrategy>,
+    /// PR manager for single-PR mode: scans iteration output for shippable
+    /// signals and opens/updates PRs accordingly.
+    pr_manager: Option<PrManager<GhPrLifecycle>>,
     /// Shared flag set to `true` when SIGINT is received.
     interrupted: Arc<AtomicBool>,
 }
@@ -126,8 +133,13 @@ impl LoopEngine {
         };
         let tracker = build_tracker(&config);
         let pr_strategy = build_strategy(config.pr_management.clone());
+        let pr_manager = if config.pr_management.mode == PrMode::SinglePr {
+            Some(build_pr_manager(config.pr_management.clone()))
+        } else {
+            None
+        };
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine, guard, tracker, pr_strategy, interrupted }
+        Self { config, adapter, policy_engine, guard, tracker, pr_strategy, pr_manager, interrupted }
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
@@ -137,7 +149,16 @@ impl LoopEngine {
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
         let pr_strategy = build_strategy(config.pr_management.clone());
-        Self { config, adapter, policy_engine: None, guard, tracker, pr_strategy, interrupted }
+        Self {
+            config,
+            adapter,
+            policy_engine: None,
+            guard,
+            tracker,
+            pr_strategy,
+            pr_manager: None,
+            interrupted,
+        }
     }
 
     /// Constructor that accepts a custom adapter and issue tracker (useful for testing).
@@ -150,7 +171,16 @@ impl LoopEngine {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let pr_strategy = build_strategy(config.pr_management.clone());
-        Self { config, adapter, policy_engine: None, guard, tracker, pr_strategy, interrupted }
+        Self {
+            config,
+            adapter,
+            policy_engine: None,
+            guard,
+            tracker,
+            pr_strategy,
+            pr_manager: None,
+            interrupted,
+        }
     }
 
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
@@ -164,7 +194,16 @@ impl LoopEngine {
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
         let pr_strategy = build_strategy(config.pr_management.clone());
-        Self { config, adapter, policy_engine: Some(policy_engine), guard, tracker, pr_strategy, interrupted }
+        Self {
+            config,
+            adapter,
+            policy_engine: Some(policy_engine),
+            guard,
+            tracker,
+            pr_strategy,
+            pr_manager: None,
+            interrupted,
+        }
     }
 
     /// Install a Ctrl+C handler that sets the interrupted flag.
@@ -341,6 +380,61 @@ impl LoopEngine {
                 "PR strategy plan"
             );
 
+            // For multi-PR mode: handle Merge action directly (no agent needed)
+            // and skip agent invocation for BlockedOnHumanReview.
+            if let Some(ref action) = pr_plan.triage_action {
+                match action {
+                    TriageAction::Merge { pr } => {
+                        info!(
+                            iteration = i,
+                            pr = pr.number,
+                            url = %pr.url,
+                            "multi-pr: merging ready PR"
+                        );
+                        let merge_result = Command::new("gh")
+                            .args(["pr", "merge", &pr.number.to_string(), "--merge"])
+                            .output();
+                        match merge_result {
+                            Ok(out) if out.status.success() => {
+                                info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
+                            }
+                            Ok(out) => {
+                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                warn!(iteration = i, pr = pr.number, stderr = %stderr, "multi-pr: merge failed");
+                            }
+                            Err(e) => {
+                                warn!(iteration = i, pr = pr.number, error = %e, "multi-pr: failed to spawn gh for merge");
+                            }
+                        }
+                        // Record as a success iteration (merge happened, no agent needed).
+                        iteration_records.push(IterationRecord {
+                            iteration: i,
+                            provider: self.adapter.name().to_string(),
+                            prompt_source: "triage-merge".to_string(),
+                            workflow_branch: None,
+                            outcome: IterationOutcome::Success,
+                            duration_ms: iter_start.elapsed().as_millis(),
+                            retries: 0,
+                            stderr_excerpt: None,
+                            transcript_path: None,
+                            started_at: iter_started_at,
+                        });
+                        summary.iterations_run += 1;
+                        summary.successes += 1;
+                        continue;
+                    }
+                    TriageAction::BlockedOnHumanReview { pr } => {
+                        info!(
+                            iteration = i,
+                            pr = pr.number,
+                            "multi-pr: PR ready but blocked on human review; falling through to issue work"
+                        );
+                        // Fall through — no prompt override set, so normal issue-work prompt is used.
+                    }
+                    _ => {}
+                }
+            }
+
             // If orchestration is enabled, select a workflow branch and use its prompt.
             let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {
                 match engine.select_branch() {
@@ -386,6 +480,13 @@ impl LoopEngine {
                     "Iteration start"
                 );
                 (prompt.clone(), None)
+            };
+
+            // Apply prompt override from the PR triage plan (multi-PR mode only).
+            let raw_prompt = if let Some(ref override_prompt) = pr_plan.prompt_override {
+                override_prompt.clone()
+            } else {
+                raw_prompt
             };
 
             // Augment prompt with MCP-use preamble (no-op when allow_direct_github is set).
@@ -497,6 +598,63 @@ impl LoopEngine {
                 retries = attempt,
                 "Iteration complete"
             );
+
+            // Single-PR: after each successful iteration, scan output for the
+            // shippable signal and open/update the PR if detected.
+            if final_outcome.is_success() {
+                if let Some(ref manager) = self.pr_manager {
+                    let branch = self
+                        .config
+                        .pr_management
+                        .branch_prefix
+                        .trim_end_matches('/')
+                        .to_string();
+                    let issue_number = self
+                        .config
+                        .issue_tracking
+                        .comment_issue_number
+                        .map(|n| n as u64)
+                        .unwrap_or(0);
+                    match manager.handle_milestone(
+                        &branch,
+                        issue_number,
+                        "loop iteration",
+                        &final_stdout,
+                    ) {
+                        Ok(crate::pr_manager::PrAction::Opened(pr)) => {
+                            info!(
+                                iteration = i,
+                                pr = pr.number,
+                                url = %pr.url,
+                                "single-pr: opened PR for shippable work"
+                            );
+                            // Post cross-reference comment on linked issue.
+                            if issue_number > 0 {
+                                let msg = format!(
+                                    "**PR opened** — [#{pr_num}]({url}) opened from this iteration.",
+                                    pr_num = pr.number,
+                                    url = pr.url
+                                );
+                                self.post_comment(&msg);
+                            }
+                        }
+                        Ok(crate::pr_manager::PrAction::Updated { pr, .. }) => {
+                            info!(iteration = i, pr = pr.number, "single-pr: commented on existing PR");
+                        }
+                        Ok(crate::pr_manager::PrAction::BlockedOnHumanReview(pr)) => {
+                            info!(
+                                iteration = i,
+                                pr = pr.number,
+                                "single-pr: PR already open; blocked on human review"
+                            );
+                        }
+                        Ok(crate::pr_manager::PrAction::NoSignal) => {}
+                        Err(e) => {
+                            warn!(iteration = i, error = %e, "single-pr: PrManager error");
+                        }
+                    }
+                }
+            }
 
             // Post iteration comment based on cadence.
             let cadence = &self.config.issue_tracking.comment_cadence;

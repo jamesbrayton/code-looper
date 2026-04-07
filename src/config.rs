@@ -156,6 +156,37 @@ fn default_require_human_review() -> bool {
     true
 }
 
+fn default_triage_priority() -> TriagePriority {
+    TriagePriority::Oldest
+}
+
+fn default_skip_labels() -> Vec<String> {
+    vec!["do-not-loop".to_string(), "wip".to_string()]
+}
+
+/// How the multi-PR triage step orders open PRs when selecting which one to
+/// advance first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum TriagePriority {
+    /// Oldest PR first (by creation date).  This is the default.
+    Oldest,
+    /// Newest PR first (by creation date).
+    Newest,
+    /// PRs with the fewest merge conflicts first.
+    LeastConflicts,
+}
+
+impl std::fmt::Display for TriagePriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TriagePriority::Oldest => write!(f, "oldest"),
+            TriagePriority::Newest => write!(f, "newest"),
+            TriagePriority::LeastConflicts => write!(f, "least-conflicts"),
+        }
+    }
+}
+
 /// Pull-request management configuration (`[pr_management]` TOML section).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrManagementConfig {
@@ -180,6 +211,13 @@ pub struct PrManagementConfig {
     /// creation.  Default: `LOOPER_READY_FOR_REVIEW`.
     #[serde(default)]
     pub ready_marker: Option<String>,
+    /// Ordering policy for PR triage in `multi-pr` mode.  Default: `oldest`.
+    #[serde(default = "default_triage_priority")]
+    pub triage_priority: TriagePriority,
+    /// Labels that cause a PR to be skipped during `multi-pr` triage.
+    /// Default: `["do-not-loop", "wip"]`.
+    #[serde(default = "default_skip_labels")]
+    pub skip_labels: Vec<String>,
 }
 
 impl Default for PrManagementConfig {
@@ -191,6 +229,8 @@ impl Default for PrManagementConfig {
             require_human_review: default_require_human_review(),
             allow_force_push: false,
             ready_marker: None,
+            triage_priority: default_triage_priority(),
+            skip_labels: default_skip_labels(),
         }
     }
 }

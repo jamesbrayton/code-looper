@@ -33,7 +33,7 @@ use std::process::Command;
 
 use serde::Deserialize;
 
-use crate::config::PrManagementConfig;
+use crate::config::{PrManagementConfig, TriagePriority};
 
 // ── Signal detection ──────────────────────────────────────────────────────────
 
@@ -484,6 +484,356 @@ pub fn build_pr_manager(config: PrManagementConfig) -> PrManager<GhPrLifecycle> 
     PrManager::new(config, GhPrLifecycle::new())
 }
 
+// ── PR triage types ───────────────────────────────────────────────────────────
+
+/// Review/check state of an open PR as seen by the triage step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrTriageState {
+    /// One or more CI checks are failing.
+    ChecksFailing,
+    /// Reviewer has requested changes.
+    ChangesRequested,
+    /// Approved (or no review required) and all checks pass — ready to merge.
+    ReadyToMerge,
+    /// Awaiting initial review; not yet approved.
+    NeedsReview,
+    /// PR is labeled with a skip label (`do-not-loop`, `wip`, etc.).
+    Skipped { reason: String },
+}
+
+/// An open PR with its resolved triage state.
+#[derive(Debug, Clone)]
+pub struct PrWithState {
+    pub pr: PrInfo,
+    pub state: PrTriageState,
+    /// ISO-8601 creation timestamp (used for `oldest`/`newest` ordering).
+    pub created_at: String,
+}
+
+/// Outcome of a `PrTriage::select_action` call.
+#[derive(Debug, Clone)]
+pub enum TriageAction {
+    /// Instruct the agent to fix CI failures on this PR.
+    FixChecks { pr: PrInfo, prompt: String },
+    /// Instruct the agent to address review feedback on this PR.
+    AddressReviewFeedback { pr: PrInfo, prompt: String },
+    /// The PR is ready to merge; the engine will merge it directly (when
+    /// `require_human_review = false`).
+    Merge { pr: PrInfo },
+    /// The PR is ready to merge but `require_human_review = true`; engine
+    /// reports the situation and falls through.
+    BlockedOnHumanReview { pr: PrInfo },
+    /// No open PR could be advanced — fall through to issue work.
+    NoActionablePr,
+}
+
+// ── Extended PrLifecycle methods (triage) ────────────────────────────────────
+
+/// Extra methods on [`PrLifecycle`] required by the triage step.
+///
+/// Kept as a separate trait so existing implementations are not broken, and to
+/// make it easy to implement only what is needed in tests.
+pub trait PrLifecycleTriage: Send + Sync {
+    /// List open PRs that carry `label`.  Returns PRs in ascending creation
+    /// order (oldest first).
+    fn list_open_prs_with_label(&self, label: &str) -> Result<Vec<PrInfo>, PrError>;
+
+    /// Fetch the triage state for a single PR.
+    ///
+    /// The implementation queries `gh pr view <number> --json` for check
+    /// status, review decision, and labels.
+    fn get_pr_state(
+        &self,
+        pr_number: u32,
+        skip_labels: &[String],
+    ) -> Result<PrWithState, PrError>;
+}
+
+impl PrLifecycleTriage for GhPrLifecycle {
+    fn list_open_prs_with_label(&self, label: &str) -> Result<Vec<PrInfo>, PrError> {
+        let out = Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--label",
+                label,
+                "--state",
+                "open",
+                "--json",
+                "number,url,title",
+                "--limit",
+                "100",
+            ])
+            .output()
+            .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(PrError::GhCommand(format!("gh pr list failed: {stderr}")));
+        }
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let prs: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+            .map_err(|e| PrError::ParseError(e.to_string()))?;
+
+        prs.into_iter()
+            .map(|v| {
+                let number = v["number"]
+                    .as_u64()
+                    .ok_or_else(|| PrError::ParseError("missing number".into()))? as u32;
+                let url = v["url"]
+                    .as_str()
+                    .ok_or_else(|| PrError::ParseError("missing url".into()))?
+                    .to_string();
+                let title = v["title"]
+                    .as_str()
+                    .ok_or_else(|| PrError::ParseError("missing title".into()))?
+                    .to_string();
+                Ok(PrInfo { number, url, title })
+            })
+            .collect()
+    }
+
+    fn get_pr_state(
+        &self,
+        pr_number: u32,
+        skip_labels: &[String],
+    ) -> Result<PrWithState, PrError> {
+        let pr_ref = pr_number.to_string();
+        let out = Command::new("gh")
+            .args([
+                "pr",
+                "view",
+                &pr_ref,
+                "--json",
+                "number,url,title,labels,statusCheckRollup,reviewDecision,createdAt",
+            ])
+            .output()
+            .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(PrError::GhCommand(format!("gh pr view failed: {stderr}")));
+        }
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let v: serde_json::Value = serde_json::from_str(&stdout)
+            .map_err(|e| PrError::ParseError(e.to_string()))?;
+
+        let number = v["number"].as_u64().unwrap_or(pr_number as u64) as u32;
+        let url = v["url"].as_str().unwrap_or("").to_string();
+        let title = v["title"].as_str().unwrap_or("").to_string();
+        let created_at = v["createdAt"].as_str().unwrap_or("").to_string();
+
+        let pr = PrInfo { number, url, title };
+
+        // Check skip labels.
+        if let Some(labels) = v["labels"].as_array() {
+            for lv in labels {
+                if let Some(name) = lv["name"].as_str() {
+                    if skip_labels.iter().any(|s| s == name) {
+                        return Ok(PrWithState {
+                            pr,
+                            state: PrTriageState::Skipped { reason: name.to_string() },
+                            created_at,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Check CI status.
+        let checks_failing = v["statusCheckRollup"]
+            .as_array()
+            .map(|checks| {
+                checks.iter().any(|c| {
+                    c["conclusion"].as_str().map(|s| s == "FAILURE").unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if checks_failing {
+            return Ok(PrWithState {
+                pr,
+                state: PrTriageState::ChecksFailing,
+                created_at,
+            });
+        }
+
+        // Check review decision.
+        let review_decision = v["reviewDecision"].as_str().unwrap_or("");
+        let state = match review_decision {
+            "CHANGES_REQUESTED" => PrTriageState::ChangesRequested,
+            "APPROVED" | "" => PrTriageState::ReadyToMerge,
+            "REVIEW_REQUIRED" => PrTriageState::NeedsReview,
+            _ => PrTriageState::NeedsReview,
+        };
+
+        Ok(PrWithState { pr, state, created_at })
+    }
+}
+
+// ── PrTriage ──────────────────────────────────────────────────────────────────
+
+/// Implements the multi-PR triage step: inspect open PRs and decide which
+/// action to take (or fall through to issue work).
+pub struct PrTriage<L: PrLifecycleTriage> {
+    config: PrManagementConfig,
+    lifecycle: L,
+}
+
+impl<L: PrLifecycleTriage> PrTriage<L> {
+    pub fn new(config: PrManagementConfig, lifecycle: L) -> Self {
+        Self { config, lifecycle }
+    }
+
+    /// Select the highest-priority actionable PR and return the triage action.
+    ///
+    /// PRs are fetched by the `code-looper` label, then filtered (skip
+    /// labels), sorted by triage priority, and the first actionable one is
+    /// returned.
+    pub fn select_action(&self) -> TriageAction {
+        let mut prs = match self.lifecycle.list_open_prs_with_label("code-looper") {
+            Ok(prs) => prs,
+            Err(e) => {
+                tracing::warn!(error = %e, "PrTriage: failed to list open PRs; falling through");
+                return TriageAction::NoActionablePr;
+            }
+        };
+
+        // Apply triage priority ordering.
+        match self.config.triage_priority {
+            TriagePriority::Newest => prs.reverse(),
+            TriagePriority::Oldest | TriagePriority::LeastConflicts => {}
+        }
+
+        for pr_info in prs {
+            let with_state =
+                match self.lifecycle.get_pr_state(pr_info.number, &self.config.skip_labels) {
+                    Ok(ws) => ws,
+                    Err(e) => {
+                        tracing::warn!(
+                            pr = pr_info.number,
+                            error = %e,
+                            "PrTriage: failed to get state for PR; skipping"
+                        );
+                        continue;
+                    }
+                };
+
+            match with_state.state {
+                PrTriageState::Skipped { ref reason } => {
+                    tracing::debug!(pr = pr_info.number, %reason, "PrTriage: skipping PR");
+                    continue;
+                }
+                PrTriageState::ChecksFailing => {
+                    let prompt = format!(
+                        "The CI checks on PR #{} («{}») are failing. Check out the branch, \
+                         diagnose the root cause, fix it, commit, and push. Do not merge — \
+                         the loop engine will handle the merge when checks pass.",
+                        with_state.pr.number, with_state.pr.title
+                    );
+                    return TriageAction::FixChecks { pr: with_state.pr, prompt };
+                }
+                PrTriageState::ChangesRequested => {
+                    let prompt = format!(
+                        "PR #{} («{}») has review comments requesting changes. Read each \
+                         review comment, address the feedback, commit the fixes, and push. \
+                         After pushing, reply to each resolved comment thread.",
+                        with_state.pr.number, with_state.pr.title
+                    );
+                    return TriageAction::AddressReviewFeedback {
+                        pr: with_state.pr,
+                        prompt,
+                    };
+                }
+                PrTriageState::ReadyToMerge => {
+                    if self.config.require_human_review {
+                        tracing::info!(
+                            pr = with_state.pr.number,
+                            "PrTriage: PR ready to merge but require_human_review=true"
+                        );
+                        return TriageAction::BlockedOnHumanReview { pr: with_state.pr };
+                    }
+                    return TriageAction::Merge { pr: with_state.pr };
+                }
+                PrTriageState::NeedsReview => {
+                    tracing::debug!(
+                        pr = with_state.pr.number,
+                        "PrTriage: PR awaiting initial review; skipping"
+                    );
+                    continue;
+                }
+            }
+        }
+
+        TriageAction::NoActionablePr
+    }
+}
+
+/// Build a production [`PrTriage`] backed by the `gh` CLI.
+pub fn build_pr_triage(config: PrManagementConfig) -> PrTriage<GhPrLifecycle> {
+    PrTriage::new(config, GhPrLifecycle::new())
+}
+
+// ── MockPrLifecycleTriage (test double) ───────────────────────────────────────
+
+/// Pre-scripted responses for [`PrLifecycleTriage`] in tests.
+pub struct MockPrLifecycleTriage {
+    /// PRs returned by `list_open_prs_with_label`.
+    pub open_prs: Vec<PrInfo>,
+    /// State returned for each PR by number.
+    pub states: std::collections::HashMap<u32, PrWithState>,
+    /// All calls recorded in order.
+    pub calls: std::sync::Mutex<Vec<TriageCall>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TriageCall {
+    ListOpenPrsWithLabel { label: String },
+    GetPrState { pr_number: u32 },
+}
+
+impl MockPrLifecycleTriage {
+    pub fn new() -> Self {
+        Self {
+            open_prs: Vec::new(),
+            states: std::collections::HashMap::new(),
+            calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl Default for MockPrLifecycleTriage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PrLifecycleTriage for MockPrLifecycleTriage {
+    fn list_open_prs_with_label(&self, label: &str) -> Result<Vec<PrInfo>, PrError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(TriageCall::ListOpenPrsWithLabel { label: label.to_string() });
+        Ok(self.open_prs.clone())
+    }
+
+    fn get_pr_state(
+        &self,
+        pr_number: u32,
+        _skip_labels: &[String],
+    ) -> Result<PrWithState, PrError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(TriageCall::GetPrState { pr_number });
+        self.states.get(&pr_number).cloned().ok_or_else(|| {
+            PrError::GhCommand(format!("mock: no state configured for PR #{pr_number}"))
+        })
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -695,5 +1045,152 @@ mod tests {
         } else {
             panic!("expected OpenPr call, got: {calls:?}");
         }
+    }
+
+    // ── PrTriage::select_action ───────────────────────────────────────────────
+
+    fn make_pr(number: u32) -> PrInfo {
+        PrInfo {
+            number,
+            url: format!("https://github.com/o/r/pull/{number}"),
+            title: format!("PR {number}"),
+        }
+    }
+
+    fn make_state(pr: PrInfo, state: PrTriageState) -> PrWithState {
+        PrWithState { pr, state, created_at: "2026-01-01T00:00:00Z".into() }
+    }
+
+    #[test]
+    fn triage_no_open_prs_returns_no_actionable() {
+        let mock = MockPrLifecycleTriage::new();
+        let triage = PrTriage::new(default_config(), mock);
+        assert!(matches!(triage.select_action(), TriageAction::NoActionablePr));
+    }
+
+    #[test]
+    fn triage_all_skipped_returns_no_actionable() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(1);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(1, make_state(pr, PrTriageState::Skipped { reason: "wip".into() }));
+        let triage = PrTriage::new(default_config(), mock);
+        assert!(matches!(triage.select_action(), TriageAction::NoActionablePr));
+    }
+
+    #[test]
+    fn triage_checks_failing_returns_fix_checks() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(2);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(2, make_state(pr, PrTriageState::ChecksFailing));
+        let triage = PrTriage::new(default_config(), mock);
+        let action = triage.select_action();
+        assert!(matches!(action, TriageAction::FixChecks { .. }));
+        if let TriageAction::FixChecks { pr, prompt } = action {
+            assert_eq!(pr.number, 2);
+            assert!(prompt.contains("CI checks"));
+        }
+    }
+
+    #[test]
+    fn triage_changes_requested_returns_address_review() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(3);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(3, make_state(pr, PrTriageState::ChangesRequested));
+        let triage = PrTriage::new(default_config(), mock);
+        let action = triage.select_action();
+        assert!(matches!(action, TriageAction::AddressReviewFeedback { .. }));
+        if let TriageAction::AddressReviewFeedback { pr, prompt } = action {
+            assert_eq!(pr.number, 3);
+            assert!(prompt.contains("review comment"));
+        }
+    }
+
+    #[test]
+    fn triage_ready_to_merge_require_human_review_returns_blocked() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(4);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(4, make_state(pr, PrTriageState::ReadyToMerge));
+        let mut cfg = default_config();
+        cfg.require_human_review = true;
+        let triage = PrTriage::new(cfg, mock);
+        assert!(matches!(triage.select_action(), TriageAction::BlockedOnHumanReview { .. }));
+    }
+
+    #[test]
+    fn triage_ready_to_merge_no_human_review_returns_merge() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(5);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(5, make_state(pr, PrTriageState::ReadyToMerge));
+        let mut cfg = default_config();
+        cfg.require_human_review = false;
+        let triage = PrTriage::new(cfg, mock);
+        assert!(matches!(triage.select_action(), TriageAction::Merge { .. }));
+    }
+
+    #[test]
+    fn triage_needs_review_skipped_falls_through() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(6);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(6, make_state(pr, PrTriageState::NeedsReview));
+        let triage = PrTriage::new(default_config(), mock);
+        assert!(matches!(triage.select_action(), TriageAction::NoActionablePr));
+    }
+
+    #[test]
+    fn triage_picks_first_actionable_pr_in_order() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr1 = make_pr(10);
+        let pr2 = make_pr(11);
+        mock.open_prs = vec![pr1.clone(), pr2.clone()];
+        // First PR skipped, second has checks failing.
+        mock.states
+            .insert(10, make_state(pr1, PrTriageState::Skipped { reason: "wip".into() }));
+        mock.states.insert(11, make_state(pr2, PrTriageState::ChecksFailing));
+        let triage = PrTriage::new(default_config(), mock);
+        let action = triage.select_action();
+        if let TriageAction::FixChecks { pr, .. } = action {
+            assert_eq!(pr.number, 11);
+        } else {
+            panic!("expected FixChecks");
+        }
+    }
+
+    #[test]
+    fn triage_newest_priority_reverses_pr_order() {
+        use crate::config::TriagePriority;
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr1 = make_pr(20);
+        let pr2 = make_pr(21);
+        mock.open_prs = vec![pr1.clone(), pr2.clone()]; // oldest first
+        mock.states.insert(20, make_state(pr1, PrTriageState::ChecksFailing));
+        mock.states.insert(21, make_state(pr2, PrTriageState::ChecksFailing));
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::Newest;
+        let triage = PrTriage::new(cfg, mock);
+        // With Newest first, the last in the list (21) should be selected.
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(pr.number, 21);
+        } else {
+            panic!("expected FixChecks for PR 21");
+        }
+    }
+
+    #[test]
+    fn triage_calls_list_then_get_state_for_each_pr() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(30);
+        mock.open_prs = vec![pr.clone()];
+        mock.states.insert(30, make_state(pr, PrTriageState::NeedsReview));
+        let triage = PrTriage::new(default_config(), mock);
+        triage.select_action();
+        let calls = triage.lifecycle.calls.lock().unwrap();
+        assert!(calls.contains(&TriageCall::ListOpenPrsWithLabel { label: "code-looper".into() }));
+        assert!(calls.contains(&TriageCall::GetPrState { pr_number: 30 }));
     }
 }
