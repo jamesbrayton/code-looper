@@ -23,6 +23,34 @@ impl std::fmt::Display for IssueTrackingMode {
     }
 }
 
+/// Controls how often the loop engine posts comments to the active issue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommentCadence {
+    /// Comment at run start, run end, blockers, and failed iterations (default).
+    Milestones,
+    /// Comment after every iteration regardless of outcome.
+    EveryIteration,
+    /// Engine never posts comments; the agent is still prompted to do so.
+    OffEngine,
+}
+
+impl Default for CommentCadence {
+    fn default() -> Self {
+        Self::Milestones
+    }
+}
+
+impl std::fmt::Display for CommentCadence {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommentCadence::Milestones => write!(f, "milestones"),
+            CommentCadence::EveryIteration => write!(f, "every-iteration"),
+            CommentCadence::OffEngine => write!(f, "off-engine"),
+        }
+    }
+}
+
 /// Issue tracking configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueTrackingConfig {
@@ -40,6 +68,12 @@ pub struct IssueTrackingConfig {
     /// Path to the local promise markdown file (when `mode = "local"`).
     /// Defaults to `.code-looper/promise.md`.
     pub local_promise_path: Option<PathBuf>,
+    /// GitHub issue number the engine should post run-lifecycle comments on.
+    /// When `None` (or mode is `local`), engine comments are skipped.
+    pub comment_issue_number: Option<u32>,
+    /// How often the engine posts comments to the linked issue.
+    #[serde(default)]
+    pub comment_cadence: CommentCadence,
 }
 
 fn default_issue_tracking_mode() -> IssueTrackingMode {
@@ -53,6 +87,8 @@ impl Default for IssueTrackingConfig {
             repo_owner: None,
             repo_name: None,
             local_promise_path: None,
+            comment_issue_number: None,
+            comment_cadence: CommentCadence::default(),
         }
     }
 }
@@ -589,7 +625,7 @@ repo_name = "my-repo"
                 mode: IssueTrackingMode::Github,
                 repo_owner: None,
                 repo_name: None,
-                local_promise_path: None,
+                ..IssueTrackingConfig::default()
             },
             ..Default::default()
         };
@@ -604,7 +640,7 @@ repo_name = "my-repo"
                 mode: IssueTrackingMode::Github,
                 repo_owner: Some("owner".to_string()),
                 repo_name: None,
-                local_promise_path: None,
+                ..IssueTrackingConfig::default()
             },
             ..Default::default()
         };
@@ -619,7 +655,7 @@ repo_name = "my-repo"
                 mode: IssueTrackingMode::Github,
                 repo_owner: Some("owner".to_string()),
                 repo_name: Some("repo".to_string()),
-                local_promise_path: None,
+                ..IssueTrackingConfig::default()
             },
             ..Default::default()
         };
@@ -633,7 +669,7 @@ repo_name = "my-repo"
                 mode: IssueTrackingMode::Github,
                 repo_owner: None,
                 repo_name: None,
-                local_promise_path: None,
+                ..IssueTrackingConfig::default()
             },
             orchestration: OrchestrationConfig {
                 enabled: true,
@@ -650,9 +686,7 @@ repo_name = "my-repo"
         let config = LoopConfig {
             issue_tracking: IssueTrackingConfig {
                 mode: IssueTrackingMode::Local,
-                repo_owner: None,
-                repo_name: None,
-                local_promise_path: None,
+                ..IssueTrackingConfig::default()
             },
             ..Default::default()
         };
@@ -748,7 +782,7 @@ local_promise_path = ".code-looper/dev.md"
                 mode: IssueTrackingMode::Github,
                 repo_owner: Some("owner".to_string()),
                 repo_name: Some("repo".to_string()),
-                local_promise_path: None,
+                ..IssueTrackingConfig::default()
             },
             ..LoopConfig::default()
         };

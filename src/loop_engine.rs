@@ -1,4 +1,4 @@
-use crate::config::{IssueTrackingMode, LoopConfig};
+use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
@@ -106,9 +106,7 @@ pub struct LoopEngine {
     policy_engine: Option<PolicyEngine>,
     /// Policy guard used to augment prompts with MCP-use requirements.
     guard: PolicyGuard,
-    /// Issue tracker for this run.  Not yet actively called by the engine;
-    /// active use (start/milestone/end comments) lands in a follow-up issue.
-    #[allow(dead_code)]
+    /// Issue tracker for this run.
     tracker: Box<dyn IssueTracker>,
     /// PR strategy: consulted once per iteration before the provider is invoked.
     pr_strategy: Box<dyn PrStrategy>,
@@ -138,6 +136,19 @@ impl LoopEngine {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
+        let pr_strategy = build_strategy(config.pr_management.clone());
+        Self { config, adapter, policy_engine: None, guard, tracker, pr_strategy, interrupted }
+    }
+
+    /// Constructor that accepts a custom adapter and issue tracker (useful for testing).
+    #[cfg(test)]
+    pub fn with_adapter_and_tracker(
+        config: LoopConfig,
+        adapter: Box<dyn ProviderAdapter>,
+        tracker: Box<dyn IssueTracker>,
+    ) -> Self {
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let pr_strategy = build_strategy(config.pr_management.clone());
         Self { config, adapter, policy_engine: None, guard, tracker, pr_strategy, interrupted }
     }
@@ -182,6 +193,22 @@ impl LoopEngine {
         }
         // No prompt configured — use empty string; provider decides behaviour.
         Ok(String::new())
+    }
+
+    /// Post a comment to the configured issue, logging a warning on failure.
+    ///
+    /// No-ops when `comment_issue_number` is `None` or when in local mode.
+    fn post_comment(&self, body: &str) {
+        let issue_number = match self.config.issue_tracking.comment_issue_number {
+            Some(n) => n,
+            None => return,
+        };
+        if self.config.issue_tracking.mode != IssueTrackingMode::Github {
+            return;
+        }
+        if let Err(e) = self.tracker.add_comment(issue_number, body) {
+            warn!(issue = issue_number, error = %e, "Failed to post comment to issue");
+        }
     }
 
     /// Run the loop and return a session summary.
@@ -268,6 +295,24 @@ impl LoopEngine {
             prompt_source,
             "Loop starting"
         );
+
+        // Post run-start comment when a linked issue is configured.
+        if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
+            let iter_display = if infinite {
+                "infinite".to_string()
+            } else {
+                max.to_string()
+            };
+            self.post_comment(&format!(
+                "**Loop run started** — run-id: `{run_id}`, provider: `{provider}`, \
+                 iterations: `{iter_display}`, prompt-source: `{prompt_source}`",
+                run_id = artifacts.run_id,
+                provider = self.adapter.name(),
+            ));
+        }
+
+        // Tracks the body of the most recently posted failure comment for deduplication.
+        let mut last_failure_comment: Option<String> = None;
 
         for i in 1..=max {
             if self.interrupted.load(Ordering::SeqCst) {
@@ -414,6 +459,12 @@ impl LoopEngine {
                         error!(iteration = i, provider = self.adapter.name(), "{msg}");
                         final_outcome =
                             IterationOutcome::SpawnFailure { message: msg.clone() };
+                        if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
+                            self.post_comment(&format!(
+                                "**Blocker** — iteration {i} aborted: provider spawn failure. \
+                                 `{msg}`"
+                            ));
+                        }
                         summary.termination_reason = Some(TerminationReason::ProviderError(msg));
                         abort_loop = true;
                         break;
@@ -437,6 +488,56 @@ impl LoopEngine {
                 retries = attempt,
                 "Iteration complete"
             );
+
+            // Post iteration comment based on cadence.
+            let cadence = &self.config.issue_tracking.comment_cadence;
+            let is_failure = !final_outcome.is_success();
+            let should_comment = match cadence {
+                CommentCadence::OffEngine => false,
+                CommentCadence::EveryIteration => true,
+                CommentCadence::Milestones => is_failure || abort_loop,
+            };
+            if should_comment {
+                let retry_note = if attempt > 0 {
+                    format!(", retries: {attempt}")
+                } else {
+                    String::new()
+                };
+                let err_note = if let Some(ref exc) = IterationRecord::stderr_first_line(&final_stderr) {
+                    format!("\n> `{exc}`")
+                } else {
+                    String::new()
+                };
+                let comment_body = format!(
+                    "**Iteration {i}** — outcome: `{outcome}`, duration: {ms}ms{retry}{err}",
+                    outcome = final_outcome.label(),
+                    ms = final_duration_ms,
+                    retry = retry_note,
+                    err = err_note,
+                );
+                // Deduplicate consecutive identical failure comments.
+                let is_duplicate = last_failure_comment.as_deref() == Some(&comment_body);
+                if !is_duplicate {
+                    self.post_comment(&comment_body);
+                    if is_failure {
+                        last_failure_comment = Some(comment_body);
+                    } else {
+                        last_failure_comment = None;
+                    }
+                }
+            } else if !is_failure {
+                last_failure_comment = None;
+            }
+
+            // Post blocker comment when aborting due to stop_on_failure.
+            let stop_on_fail = !final_outcome.is_success() && self.config.stop_on_failure && !abort_loop;
+            if stop_on_fail && cadence != &CommentCadence::OffEngine {
+                self.post_comment(&format!(
+                    "**Blocker** — iteration {i} failed and `stop_on_failure` is set; \
+                     halting loop. Outcome: `{outcome}`",
+                    outcome = final_outcome.label(),
+                ));
+            }
 
             iteration_records.push(IterationRecord {
                 iteration: i,
@@ -487,6 +588,23 @@ impl LoopEngine {
         );
 
         summary.print();
+
+        // Post run-end comment.
+        if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
+            let reason = summary
+                .termination_reason
+                .as_ref()
+                .map(|r| r.to_string())
+                .unwrap_or_default();
+            self.post_comment(&format!(
+                "**Loop run finished** — iterations: {iters}, successes: {ok}, \
+                 failures: {fail}, retries: {retries}, termination: `{reason}`",
+                iters = summary.iterations_run,
+                ok = summary.successes,
+                fail = summary.failures,
+                retries = summary.retries,
+            ));
+        }
 
         // Write run manifest and summary.
         let manifest = RunManifest {
@@ -884,5 +1002,186 @@ mod tests {
             summary.termination_reason,
             Some(TerminationReason::ProviderError(_))
         ));
+    }
+
+    // ── Engine-driven issue comment tests ────────────────────────────────────
+
+    use crate::config::{CommentCadence, IssueTrackingConfig, IssueTrackingMode};
+    use crate::issue_tracker::{MockCall, MockIssueTracker};
+    use std::sync::Arc;
+
+    fn github_tracker_config(issue: u32, cadence: CommentCadence) -> LoopConfig {
+        LoopConfig {
+            iterations: 2,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                comment_issue_number: Some(issue),
+                comment_cadence: cadence,
+                local_promise_path: None,
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn milestones_cadence_posts_start_and_end_on_success() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = github_tracker_config(42, CommentCadence::Milestones);
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        // With milestones cadence and all successes: start comment + end comment only.
+        let add_comment_calls: Vec<_> = calls
+            .iter()
+            .filter(|c| matches!(c, MockCall::AddComment { .. }))
+            .collect();
+        assert_eq!(add_comment_calls.len(), 2, "expected start + end comments, got {add_comment_calls:?}");
+        if let MockCall::AddComment { number, body } = &add_comment_calls[0] {
+            assert_eq!(*number, 42);
+            assert!(body.contains("Loop run started"), "start comment body: {body}");
+        }
+        if let MockCall::AddComment { number, body } = &add_comment_calls[1] {
+            assert_eq!(*number, 42);
+            assert!(body.contains("Loop run finished"), "end comment body: {body}");
+        }
+    }
+
+    #[test]
+    fn milestones_cadence_posts_failure_comment() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = github_tracker_config(7, CommentCadence::Milestones);
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::failure("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        let comment_bodies: Vec<_> = calls
+            .iter()
+            .filter_map(|c| {
+                if let MockCall::AddComment { body, .. } = c { Some(body.as_str()) } else { None }
+            })
+            .collect();
+        // start + 2 failure iteration comments (deduplicated if identical) + end
+        assert!(
+            comment_bodies.iter().any(|b| b.contains("Loop run started")),
+            "missing start comment; got: {comment_bodies:?}"
+        );
+        assert!(
+            comment_bodies.iter().any(|b| b.contains("Loop run finished")),
+            "missing end comment"
+        );
+        assert!(
+            comment_bodies.iter().any(|b| b.contains("Iteration")),
+            "missing iteration comment"
+        );
+    }
+
+    #[test]
+    fn every_iteration_cadence_posts_comment_per_iteration() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = github_tracker_config(1, CommentCadence::EveryIteration);
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        let add_comment_count = calls
+            .iter()
+            .filter(|c| matches!(c, MockCall::AddComment { .. }))
+            .count();
+        // 1 start + 2 iteration comments + 1 end = 4
+        assert_eq!(add_comment_count, 4, "expected 4 comments for 2 iterations, got {add_comment_count}");
+    }
+
+    #[test]
+    fn off_engine_cadence_posts_no_comments() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = github_tracker_config(99, CommentCadence::OffEngine);
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        let has_comment = calls.iter().any(|c| matches!(c, MockCall::AddComment { .. }));
+        assert!(!has_comment, "off-engine cadence should post no comments");
+    }
+
+    #[test]
+    fn local_mode_posts_no_comments() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Local, // local mode — no comments
+                comment_issue_number: Some(5),
+                comment_cadence: CommentCadence::EveryIteration,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        assert!(
+            !calls.iter().any(|c| matches!(c, MockCall::AddComment { .. })),
+            "local mode should never post comments"
+        );
+    }
+
+    #[test]
+    fn stop_on_failure_posts_blocker_comment() {
+        let tracker = Arc::new(MockIssueTracker::new());
+        let config = LoopConfig {
+            iterations: 5,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            stop_on_failure: true,
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("o".to_string()),
+                repo_name: Some("r".to_string()),
+                comment_issue_number: Some(3),
+                comment_cadence: CommentCadence::Milestones,
+                local_promise_path: None,
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::failure("fake")),
+            Box::new(crate::issue_tracker::SharedMockIssueTracker(Arc::clone(&tracker))),
+        );
+        engine.run();
+        let calls = tracker.recorded_calls();
+        let comment_bodies: Vec<_> = calls
+            .iter()
+            .filter_map(|c| {
+                if let MockCall::AddComment { body, .. } = c { Some(body.as_str()) } else { None }
+            })
+            .collect();
+        assert!(
+            comment_bodies.iter().any(|b| b.contains("Blocker")),
+            "expected a blocker comment; got: {comment_bodies:?}"
+        );
     }
 }

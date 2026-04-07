@@ -699,6 +699,44 @@ impl IssueTracker for MockIssueTracker {
     }
 }
 
+// ── SharedMockIssueTracker ────────────────────────────────────────────────────
+
+/// Thin newtype that lets tests hold an `Arc<MockIssueTracker>` while also
+/// giving the engine ownership of a `Box<dyn IssueTracker>`.
+///
+/// Only compiled in `#[cfg(test)]` because it's a test utility, not production
+/// code.
+#[cfg(test)]
+pub struct SharedMockIssueTracker(pub std::sync::Arc<MockIssueTracker>);
+
+#[cfg(test)]
+impl IssueTracker for SharedMockIssueTracker {
+    fn list_open_issues(&self, f: &IssueFilter) -> Result<Vec<Issue>, IssueTrackerError> {
+        self.0.list_open_issues(f)
+    }
+    fn get_issue(&self, n: u32) -> Result<Issue, IssueTrackerError> {
+        self.0.get_issue(n)
+    }
+    fn create_issue(&self, d: IssueDraft) -> Result<Issue, IssueTrackerError> {
+        self.0.create_issue(d)
+    }
+    fn update_issue_body(&self, n: u32, b: &str) -> Result<(), IssueTrackerError> {
+        self.0.update_issue_body(n, b)
+    }
+    fn add_comment(&self, n: u32, b: &str) -> Result<(), IssueTrackerError> {
+        self.0.add_comment(n, b)
+    }
+    fn close_issue(&self, n: u32, r: CloseReason) -> Result<(), IssueTrackerError> {
+        self.0.close_issue(n, r)
+    }
+    fn reopen_issue(&self, n: u32) -> Result<(), IssueTrackerError> {
+        self.0.reopen_issue(n)
+    }
+    fn link_issue_to_pr(&self, issue: u32, pr: u32) -> Result<(), IssueTrackerError> {
+        self.0.link_issue_to_pr(issue, pr)
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

@@ -1,4 +1,4 @@
-use crate::config::{IssueTrackingMode, LoopConfig, PrMode, Provider};
+use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode, Provider};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -93,6 +93,16 @@ pub struct Cli {
     /// Path to the local promise markdown file (when --issue-tracking-mode=local).
     #[arg(long)]
     pub local_promise_path: Option<PathBuf>,
+
+    /// GitHub issue number the engine should post run-lifecycle comments on.
+    /// Requires --issue-tracking-mode=github.
+    #[arg(long)]
+    pub comment_issue: Option<u32>,
+
+    /// How often the engine posts comments to the linked issue.
+    /// One of: `milestones` (default), `every-iteration`, `off-engine`.
+    #[arg(long)]
+    pub comment_cadence: Option<CommentCadence>,
 
     /// Stream provider stdout/stderr to the terminal in real time (default: on).
     /// Use --no-stream-output to disable.
@@ -197,6 +207,12 @@ impl Cli {
         if let Some(path) = self.local_promise_path {
             base.issue_tracking.local_promise_path = Some(path);
         }
+        if let Some(n) = self.comment_issue {
+            base.issue_tracking.comment_issue_number = Some(n);
+        }
+        if let Some(cadence) = self.comment_cadence {
+            base.issue_tracking.comment_cadence = cadence;
+        }
         if let Some(s) = self.stream_output {
             base.telemetry.stream_output = s;
         }
@@ -256,6 +272,8 @@ mod tests {
             issue_tracking_owner: None,
             issue_tracking_repo: None,
             local_promise_path: None,
+            comment_issue: None,
+            comment_cadence: None,
             stream_output: None,
             artifacts_dir: None,
             keep_runs: None,
