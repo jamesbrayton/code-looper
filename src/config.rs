@@ -279,16 +279,116 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Condition that must be satisfied for a policy rule to match.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicyCondition {
+    /// Matches when the repository has at least one open pull request.
+    HasOpenPrs,
+    /// Matches when the repository has at least one open issue (and no open PRs
+    /// unless a prior rule already handled them).
+    HasOpenIssues,
+    /// Always matches — use as the final fallback rule.
+    Always,
+}
+
+impl std::fmt::Display for PolicyCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyCondition::HasOpenPrs => write!(f, "has_open_prs"),
+            PolicyCondition::HasOpenIssues => write!(f, "has_open_issues"),
+            PolicyCondition::Always => write!(f, "always"),
+        }
+    }
+}
+
+/// Workflow branch to execute when a policy rule matches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PolicyWorkflow {
+    /// Review open pull requests.
+    PrReview,
+    /// Work on open GitHub issues.
+    IssueExecution,
+    /// Discover and create backlog items.
+    BacklogDiscovery,
+}
+
+impl std::fmt::Display for PolicyWorkflow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyWorkflow::PrReview => write!(f, "pr-review"),
+            PolicyWorkflow::IssueExecution => write!(f, "issue-execution"),
+            PolicyWorkflow::BacklogDiscovery => write!(f, "backlog-discovery"),
+        }
+    }
+}
+
+/// A single rule in the orchestration policy chain.
+///
+/// Rules are evaluated in order; the first rule whose condition matches the
+/// current repository context determines the workflow branch and prompt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRule {
+    /// Condition that triggers this rule.
+    pub condition: PolicyCondition,
+    /// Workflow to execute when the condition matches.
+    pub workflow: PolicyWorkflow,
+    /// Optional prompt override for this rule.  When `None` the workflow's
+    /// built-in default prompt is used.
+    #[serde(default)]
+    pub prompt_override: Option<String>,
+}
+
+/// Returns the default policy chain, which mirrors the hardcoded behaviour that
+/// existed before pluggable policies were introduced.
+pub fn default_policy_rules() -> Vec<PolicyRule> {
+    vec![
+        PolicyRule {
+            condition: PolicyCondition::HasOpenPrs,
+            workflow: PolicyWorkflow::PrReview,
+            prompt_override: None,
+        },
+        PolicyRule {
+            condition: PolicyCondition::HasOpenIssues,
+            workflow: PolicyWorkflow::IssueExecution,
+            prompt_override: None,
+        },
+        PolicyRule {
+            condition: PolicyCondition::Always,
+            workflow: PolicyWorkflow::BacklogDiscovery,
+            prompt_override: None,
+        },
+    ]
+}
+
 /// Orchestration policy engine configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationConfig {
     /// Enable the policy engine; when true the engine selects a workflow branch
     /// per iteration and generates the prompt automatically.
+    #[serde(default)]
     pub enabled: bool,
     /// GitHub repository owner (user or org). Required when enabled.
     pub repo_owner: Option<String>,
     /// GitHub repository name. Required when enabled.
     pub repo_name: Option<String>,
+    /// Ordered list of policy rules evaluated against repository context each
+    /// iteration.  First matching rule wins.  Defaults to the standard three-
+    /// rule chain (pr-review → issue-execution → backlog-discovery).
+    #[serde(default = "default_policy_rules")]
+    pub policies: Vec<PolicyRule>,
+}
+
+impl Default for OrchestrationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repo_owner: None,
+            repo_name: None,
+            policies: default_policy_rules(),
+        }
+    }
 }
 
 
@@ -345,9 +445,17 @@ pub struct LoopConfig {
     /// `0` means no retries (fail fast).
     #[serde(default)]
     pub max_retries: u32,
-    /// Milliseconds to wait between retry attempts.
+    /// Milliseconds to wait between retry attempts (base delay for attempt 1).
     #[serde(default = "default_retry_backoff_ms")]
     pub retry_backoff_ms: u64,
+    /// Exponential backoff multiplier applied per retry attempt.
+    ///
+    /// The delay for attempt N (1-indexed) is computed as:
+    /// `retry_backoff_ms * retry_backoff_multiplier^(N-1)`.
+    ///
+    /// `1.0` (default) gives flat backoff; `2.0` doubles the delay each retry.
+    #[serde(default = "default_retry_backoff_multiplier")]
+    pub retry_backoff_multiplier: f64,
     /// Optional shell command to execute once after the loop finishes.
     /// The command is run via the system shell (`sh -c` on Unix).
     #[serde(default)]
@@ -367,6 +475,10 @@ fn default_retry_backoff_ms() -> u64 {
     500
 }
 
+fn default_retry_backoff_multiplier() -> f64 {
+    1.0
+}
+
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
@@ -382,6 +494,7 @@ impl Default for LoopConfig {
             stop_on_failure: false,
             max_retries: 0,
             retry_backoff_ms: default_retry_backoff_ms(),
+            retry_backoff_multiplier: default_retry_backoff_multiplier(),
             on_complete: None,
             issue_tracking: IssueTrackingConfig::default(),
             pr_management: PrManagementConfig::default(),
@@ -573,6 +686,7 @@ prompt_inline = "run the tests"
                 enabled: true,
                 repo_owner: None,
                 repo_name: None,
+                ..OrchestrationConfig::default()
             },
             ..Default::default()
         };
@@ -586,6 +700,7 @@ prompt_inline = "run the tests"
                 enabled: true,
                 repo_owner: Some("owner".to_string()),
                 repo_name: None,
+                ..OrchestrationConfig::default()
             },
             ..Default::default()
         };
@@ -599,6 +714,7 @@ prompt_inline = "run the tests"
                 enabled: true,
                 repo_owner: Some("owner".to_string()),
                 repo_name: Some("repo".to_string()),
+                ..OrchestrationConfig::default()
             },
             ..Default::default()
         };
@@ -678,6 +794,113 @@ repo_name = "my-repo"
         assert_eq!(config.orchestration.repo_name.as_deref(), Some("my-repo"));
     }
 
+    // ── Pluggable policy tests ────────────────────────────────────────────────
+
+    #[test]
+    fn default_orchestration_has_three_policy_rules() {
+        let cfg = OrchestrationConfig::default();
+        assert_eq!(cfg.policies.len(), 3);
+        assert_eq!(cfg.policies[0].condition, PolicyCondition::HasOpenPrs);
+        assert_eq!(cfg.policies[1].condition, PolicyCondition::HasOpenIssues);
+        assert_eq!(cfg.policies[2].condition, PolicyCondition::Always);
+    }
+
+    #[test]
+    fn parse_toml_with_custom_policies() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[orchestration]
+enabled = true
+repo_owner = "acme"
+repo_name = "my-repo"
+
+[[orchestration.policies]]
+condition = "always"
+workflow = "issue-execution"
+prompt_override = "Only work on issues."
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.orchestration.policies.len(), 1);
+        let rule = &config.orchestration.policies[0];
+        assert_eq!(rule.condition, PolicyCondition::Always);
+        assert_eq!(rule.workflow, PolicyWorkflow::IssueExecution);
+        assert_eq!(rule.prompt_override.as_deref(), Some("Only work on issues."));
+    }
+
+    #[test]
+    fn parse_toml_with_multiple_policies() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[orchestration]
+enabled = true
+repo_owner = "acme"
+repo_name = "my-repo"
+
+[[orchestration.policies]]
+condition = "has_open_prs"
+workflow = "pr-review"
+
+[[orchestration.policies]]
+condition = "always"
+workflow = "backlog-discovery"
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.orchestration.policies.len(), 2);
+        assert_eq!(config.orchestration.policies[0].condition, PolicyCondition::HasOpenPrs);
+        assert_eq!(config.orchestration.policies[1].condition, PolicyCondition::Always);
+    }
+
+    #[test]
+    fn policy_workflow_display() {
+        assert_eq!(PolicyWorkflow::PrReview.to_string(), "pr-review");
+        assert_eq!(PolicyWorkflow::IssueExecution.to_string(), "issue-execution");
+        assert_eq!(PolicyWorkflow::BacklogDiscovery.to_string(), "backlog-discovery");
+    }
+
+    // ── Exponential backoff config tests ─────────────────────────────────────
+
+    #[test]
+    fn default_retry_backoff_multiplier_is_one() {
+        let config = LoopConfig::default();
+        assert_eq!(config.retry_backoff_multiplier, 1.0);
+    }
+
+    #[test]
+    fn parse_toml_with_exponential_backoff() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 3
+log_level = "info"
+max_retries = 3
+retry_backoff_ms = 100
+retry_backoff_multiplier = 2.0
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.retry_backoff_ms, 100);
+        assert_eq!(config.retry_backoff_multiplier, 2.0);
+    }
+
     // ── Issue tracking config tests ───────────────────────────────────────────
 
     #[test]
@@ -746,6 +969,7 @@ repo_name = "my-repo"
                 enabled: true,
                 repo_owner: Some("org".to_string()),
                 repo_name: Some("project".to_string()),
+                ..OrchestrationConfig::default()
             },
             ..Default::default()
         };

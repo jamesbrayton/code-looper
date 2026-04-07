@@ -1,6 +1,6 @@
 use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
-use crate::orchestration::{GhCliContextResolver, PolicyEngine};
+use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
 use crate::pr_manager::{
     GhPrLifecycle, PrManager, TriageAction, build_pr_manager,
@@ -74,6 +74,19 @@ impl SessionSummary {
 }
 
 /// Construct the appropriate `IssueTracker` from the resolved config.
+/// Compute the delay in milliseconds for a given retry attempt using
+/// exponential backoff: `base_ms * multiplier^attempt` (attempt is 0-indexed).
+///
+/// With `multiplier = 1.0` this degrades to flat backoff.
+fn compute_backoff_ms(base_ms: u64, multiplier: f64, attempt: u32) -> u64 {
+    if multiplier <= 1.0 || attempt == 0 {
+        return base_ms;
+    }
+    let scaled = (base_ms as f64) * multiplier.powi(attempt as i32);
+    // Cap at ~10 minutes to avoid absurdly long sleeps on many retries.
+    scaled.min(600_000.0) as u64
+}
+
 fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
     match config.issue_tracking.mode {
         IssueTrackingMode::Github => {
@@ -127,7 +140,11 @@ impl LoopEngine {
         let policy_engine = if config.orchestration.enabled {
             let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
             let repo = config.orchestration.repo_name.clone().unwrap_or_default();
-            Some(PolicyEngine::new(Box::new(GhCliContextResolver { owner, repo })))
+            let rules = config.orchestration.policies.clone();
+            Some(PolicyEngine::with_rules(
+                Box::new(GhCliContextResolver { owner, repo }),
+                rules,
+            ))
         } else {
             None
         };
@@ -438,7 +455,7 @@ impl LoopEngine {
             // If orchestration is enabled, select a workflow branch and use its prompt.
             let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {
                 match engine.select_branch() {
-                    Ok((branch, _ctx)) => {
+                    Ok(BranchSelection { branch, prompt_override, .. }) => {
                         let branch_name = branch.to_string();
                         info!(
                             iteration = i,
@@ -446,7 +463,8 @@ impl LoopEngine {
                             workflow_branch = %branch_name,
                             "Iteration start"
                         );
-                        let p = branch.default_prompt().to_string();
+                        let p = prompt_override
+                            .unwrap_or_else(|| branch.default_prompt().to_string());
                         (p, Some(branch_name))
                     }
                     Err(e) => {
@@ -531,37 +549,43 @@ impl LoopEngine {
                                 );
                             }
                             break;
-                        } else if attempt < self.config.max_retries {
-                            summary.retries += 1;
-                            warn!(
-                                iteration = i,
-                                attempt = attempt + 1,
-                                max_retries = self.config.max_retries,
-                                provider = self.adapter.name(),
-                                exit_code = result.exit_code,
-                                backoff_ms = self.config.retry_backoff_ms,
-                                "Iteration failed, retrying"
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(
-                                self.config.retry_backoff_ms,
-                            ));
-                            attempt += 1;
                         } else {
-                            final_outcome = IterationOutcome::from_exit_code(result.exit_code);
-                            let first_err =
-                                IterationRecord::stderr_first_line(&result.stderr);
-                            warn!(
-                                iteration = i,
-                                provider = self.adapter.name(),
-                                exit_code = result.exit_code,
-                                duration_ms,
-                                stderr = %result.stderr.trim(),
-                                "Iteration failed (non-zero exit)"
-                            );
-                            if let Some(ref excerpt) = first_err {
-                                warn!(iteration = i, stderr_first_line = %excerpt, "");
+                            let outcome = IterationOutcome::from_exit_code(result.exit_code);
+                            if attempt < self.config.max_retries && outcome.is_retryable() {
+                                summary.retries += 1;
+                                let delay_ms = compute_backoff_ms(
+                                    self.config.retry_backoff_ms,
+                                    self.config.retry_backoff_multiplier,
+                                    attempt,
+                                );
+                                warn!(
+                                    iteration = i,
+                                    attempt = attempt + 1,
+                                    max_retries = self.config.max_retries,
+                                    provider = self.adapter.name(),
+                                    exit_code = result.exit_code,
+                                    backoff_ms = delay_ms,
+                                    "Iteration failed (retryable), retrying"
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                                attempt += 1;
+                            } else {
+                                final_outcome = outcome;
+                                let first_err =
+                                    IterationRecord::stderr_first_line(&result.stderr);
+                                warn!(
+                                    iteration = i,
+                                    provider = self.adapter.name(),
+                                    exit_code = result.exit_code,
+                                    duration_ms,
+                                    stderr = %result.stderr.trim(),
+                                    "Iteration failed (non-zero exit)"
+                                );
+                                if let Some(ref excerpt) = first_err {
+                                    warn!(iteration = i, stderr_first_line = %excerpt, "");
+                                }
+                                break;
                             }
-                            break;
                         }
                     }
                     Err(crate::error::LooperError::ProviderSpawn { binary, source }) => {
@@ -883,6 +907,30 @@ mod tests {
     use crate::config::{LoopConfig, Provider};
     use crate::provider::tests::FakeAdapter;
 
+    // ── compute_backoff_ms ────────────────────────────────────────────────────
+
+    #[test]
+    fn flat_backoff_returns_base_for_all_attempts() {
+        assert_eq!(compute_backoff_ms(500, 1.0, 0), 500);
+        assert_eq!(compute_backoff_ms(500, 1.0, 1), 500);
+        assert_eq!(compute_backoff_ms(500, 1.0, 5), 500);
+    }
+
+    #[test]
+    fn exponential_backoff_doubles_each_attempt() {
+        assert_eq!(compute_backoff_ms(100, 2.0, 0), 100); // 100 * 2^0 = 100
+        assert_eq!(compute_backoff_ms(100, 2.0, 1), 200); // 100 * 2^1 = 200
+        assert_eq!(compute_backoff_ms(100, 2.0, 2), 400); // 100 * 2^2 = 400
+        assert_eq!(compute_backoff_ms(100, 2.0, 3), 800); // 100 * 2^3 = 800
+    }
+
+    #[test]
+    fn exponential_backoff_is_capped_at_ten_minutes() {
+        // With base 1000ms and multiplier 2, attempt 30 would be > 1 billion ms.
+        let capped = compute_backoff_ms(1000, 2.0, 30);
+        assert_eq!(capped, 600_000);
+    }
+
     fn config_with_iterations(n: i64) -> LoopConfig {
         LoopConfig {
             iterations: n,
@@ -1169,6 +1217,7 @@ mod tests {
                 enabled: true,
                 repo_owner: Some("owner".to_string()),
                 repo_name: Some("repo".to_string()),
+                ..OrchestrationConfig::default()
             },
             ..Default::default()
         };
@@ -1204,6 +1253,7 @@ mod tests {
                 enabled: true,
                 repo_owner: Some("owner".to_string()),
                 repo_name: Some("repo".to_string()),
+                ..OrchestrationConfig::default()
             },
             ..Default::default()
         };

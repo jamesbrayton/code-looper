@@ -1,3 +1,4 @@
+use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow, default_policy_rules};
 use crate::error::LooperError;
 use tracing::info;
 
@@ -81,38 +82,85 @@ pub trait ContextResolver: Send + Sync {
     fn resolve(&self) -> Result<RepoContext, LooperError>;
 }
 
+/// Result of the policy engine's branch selection.
+#[derive(Debug, Clone)]
+pub struct BranchSelection {
+    /// The workflow branch to execute.
+    pub branch: WorkflowBranch,
+    /// Prompt override from the matching rule, if any.
+    pub prompt_override: Option<String>,
+    /// Repository context snapshot used to make the decision.
+    pub context: RepoContext,
+}
+
 /// Policy engine: resolves context and selects the appropriate workflow branch.
+///
+/// Rules are evaluated in order; the first rule whose condition matches wins.
+/// Construct with [`PolicyEngine::new`] (uses the default three-rule chain) or
+/// [`PolicyEngine::with_rules`] (uses caller-supplied rules).
 pub struct PolicyEngine {
     resolver: Box<dyn ContextResolver>,
+    rules: Vec<PolicyRule>,
 }
 
 impl PolicyEngine {
+    /// Create a policy engine with the default three-rule chain.
     pub fn new(resolver: Box<dyn ContextResolver>) -> Self {
-        Self { resolver }
+        Self { resolver, rules: default_policy_rules() }
     }
 
-    /// Evaluate repository context and select the highest-priority workflow branch.
+    /// Create a policy engine with a caller-supplied rule list.
     ///
-    /// Decision order:
-    /// 1. Open PRs → PrReview
-    /// 2. Open issues (no PRs) → IssueExecution
-    /// 3. Nothing open → BacklogDiscovery
-    pub fn select_branch(&self) -> Result<(WorkflowBranch, RepoContext), LooperError> {
+    /// An empty `rules` list is accepted; the engine will return an error at
+    /// runtime if no rule matches (since there is no `Always` fallback).
+    pub fn with_rules(resolver: Box<dyn ContextResolver>, rules: Vec<PolicyRule>) -> Self {
+        Self { resolver, rules }
+    }
+
+    /// Evaluate repository context against the configured rule list and return
+    /// the first matching branch selection.
+    ///
+    /// Returns an error if the resolver fails or if no rule matches.
+    pub fn select_branch(&self) -> Result<BranchSelection, LooperError> {
         let ctx = self.resolver.resolve()?;
-        let branch = if ctx.has_open_prs() {
-            WorkflowBranch::PrReview
-        } else if ctx.has_open_issues() {
-            WorkflowBranch::IssueExecution
-        } else {
-            WorkflowBranch::BacklogDiscovery
-        };
-        info!(
-            open_prs = ctx.open_pr_count,
-            open_issues = ctx.open_issue_count,
-            selected_branch = %branch,
-            "Policy engine selected workflow branch"
-        );
-        Ok((branch, ctx))
+
+        for rule in &self.rules {
+            let matches = match rule.condition {
+                PolicyCondition::HasOpenPrs => ctx.has_open_prs(),
+                PolicyCondition::HasOpenIssues => ctx.has_open_issues(),
+                PolicyCondition::Always => true,
+            };
+
+            if matches {
+                let branch = workflow_to_branch(&rule.workflow);
+                info!(
+                    open_prs = ctx.open_pr_count,
+                    open_issues = ctx.open_issue_count,
+                    selected_branch = %branch,
+                    condition = %rule.condition,
+                    "Policy engine selected workflow branch"
+                );
+                return Ok(BranchSelection {
+                    branch,
+                    prompt_override: rule.prompt_override.clone(),
+                    context: ctx,
+                });
+            }
+        }
+
+        Err(LooperError::InvalidArgument(
+            "No policy rule matched the current repository context. \
+             Add an `always` fallback rule to your [[orchestration.policies]] config."
+                .to_string(),
+        ))
+    }
+}
+
+fn workflow_to_branch(workflow: &PolicyWorkflow) -> WorkflowBranch {
+    match workflow {
+        PolicyWorkflow::PrReview => WorkflowBranch::PrReview,
+        PolicyWorkflow::IssueExecution => WorkflowBranch::IssueExecution,
+        PolicyWorkflow::BacklogDiscovery => WorkflowBranch::BacklogDiscovery,
     }
 }
 
@@ -183,8 +231,8 @@ pub mod tests {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
             context: RepoContext { open_pr_count: 2, open_issue_count: 5 },
         }));
-        let (branch, _) = engine.select_branch().unwrap();
-        assert_eq!(branch, WorkflowBranch::PrReview);
+        let sel = engine.select_branch().unwrap();
+        assert_eq!(sel.branch, WorkflowBranch::PrReview);
     }
 
     #[test]
@@ -192,8 +240,8 @@ pub mod tests {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
             context: RepoContext { open_pr_count: 0, open_issue_count: 3 },
         }));
-        let (branch, _) = engine.select_branch().unwrap();
-        assert_eq!(branch, WorkflowBranch::IssueExecution);
+        let sel = engine.select_branch().unwrap();
+        assert_eq!(sel.branch, WorkflowBranch::IssueExecution);
     }
 
     #[test]
@@ -201,8 +249,8 @@ pub mod tests {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
             context: RepoContext { open_pr_count: 0, open_issue_count: 0 },
         }));
-        let (branch, _) = engine.select_branch().unwrap();
-        assert_eq!(branch, WorkflowBranch::BacklogDiscovery);
+        let sel = engine.select_branch().unwrap();
+        assert_eq!(sel.branch, WorkflowBranch::BacklogDiscovery);
     }
 
     #[test]
@@ -210,9 +258,9 @@ pub mod tests {
         let engine = PolicyEngine::new(Box::new(StubContextResolver {
             context: RepoContext { open_pr_count: 1, open_issue_count: 10 },
         }));
-        let (branch, ctx) = engine.select_branch().unwrap();
-        assert_eq!(branch, WorkflowBranch::PrReview);
-        assert_eq!(ctx.open_issue_count, 10);
+        let sel = engine.select_branch().unwrap();
+        assert_eq!(sel.branch, WorkflowBranch::PrReview);
+        assert_eq!(sel.context.open_issue_count, 10);
     }
 
     #[test]
@@ -238,5 +286,115 @@ pub mod tests {
         assert!(!WorkflowBranch::PrReview.default_prompt().is_empty());
         assert!(!WorkflowBranch::IssueExecution.default_prompt().is_empty());
         assert!(!WorkflowBranch::BacklogDiscovery.default_prompt().is_empty());
+    }
+
+    // ── Pluggable policy rules ────────────────────────────────────────────────
+
+    #[test]
+    fn custom_rules_override_default_chain() {
+        use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow};
+        // Single rule: always → issue-execution (reversed from default).
+        let rules = vec![PolicyRule {
+            condition: PolicyCondition::Always,
+            workflow: PolicyWorkflow::IssueExecution,
+            prompt_override: None,
+        }];
+        let engine = PolicyEngine::with_rules(
+            Box::new(StubContextResolver {
+                context: RepoContext { open_pr_count: 5, open_issue_count: 0 },
+            }),
+            rules,
+        );
+        // Even though there are open PRs, our single rule maps Always → IssueExecution.
+        let sel = engine.select_branch().unwrap();
+        assert_eq!(sel.branch, WorkflowBranch::IssueExecution);
+    }
+
+    #[test]
+    fn prompt_override_is_returned_when_set() {
+        use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow};
+        let rules = vec![PolicyRule {
+            condition: PolicyCondition::Always,
+            workflow: PolicyWorkflow::PrReview,
+            prompt_override: Some("Custom PR review prompt.".to_string()),
+        }];
+        let engine = PolicyEngine::with_rules(
+            Box::new(StubContextResolver {
+                context: RepoContext { open_pr_count: 1, open_issue_count: 0 },
+            }),
+            rules,
+        );
+        let sel = engine.select_branch().unwrap();
+        assert_eq!(sel.prompt_override.as_deref(), Some("Custom PR review prompt."));
+    }
+
+    #[test]
+    fn no_prompt_override_when_none_set() {
+        use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow};
+        let rules = vec![PolicyRule {
+            condition: PolicyCondition::Always,
+            workflow: PolicyWorkflow::BacklogDiscovery,
+            prompt_override: None,
+        }];
+        let engine = PolicyEngine::with_rules(
+            Box::new(StubContextResolver {
+                context: RepoContext { open_pr_count: 0, open_issue_count: 0 },
+            }),
+            rules,
+        );
+        let sel = engine.select_branch().unwrap();
+        assert!(sel.prompt_override.is_none());
+    }
+
+    #[test]
+    fn first_matching_rule_wins() {
+        use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow};
+        let rules = vec![
+            PolicyRule {
+                condition: PolicyCondition::HasOpenIssues,
+                workflow: PolicyWorkflow::IssueExecution,
+                prompt_override: None,
+            },
+            PolicyRule {
+                condition: PolicyCondition::Always,
+                workflow: PolicyWorkflow::BacklogDiscovery,
+                prompt_override: None,
+            },
+        ];
+        let engine = PolicyEngine::with_rules(
+            Box::new(StubContextResolver {
+                context: RepoContext { open_pr_count: 0, open_issue_count: 2 },
+            }),
+            rules,
+        );
+        let sel = engine.select_branch().unwrap();
+        // HasOpenIssues matches first, so IssueExecution wins over Always fallback.
+        assert_eq!(sel.branch, WorkflowBranch::IssueExecution);
+    }
+
+    #[test]
+    fn no_matching_rule_returns_error() {
+        use crate::config::{PolicyCondition, PolicyRule, PolicyWorkflow};
+        // Rules require open PRs, but context has none.
+        let rules = vec![PolicyRule {
+            condition: PolicyCondition::HasOpenPrs,
+            workflow: PolicyWorkflow::PrReview,
+            prompt_override: None,
+        }];
+        let engine = PolicyEngine::with_rules(
+            Box::new(StubContextResolver {
+                context: RepoContext { open_pr_count: 0, open_issue_count: 0 },
+            }),
+            rules,
+        );
+        assert!(engine.select_branch().is_err());
+    }
+
+    #[test]
+    fn policy_condition_display() {
+        use crate::config::PolicyCondition;
+        assert_eq!(PolicyCondition::HasOpenPrs.to_string(), "has_open_prs");
+        assert_eq!(PolicyCondition::HasOpenIssues.to_string(), "has_open_issues");
+        assert_eq!(PolicyCondition::Always.to_string(), "always");
     }
 }

@@ -28,7 +28,8 @@ Pass `--config path/to/config.toml` to load a base configuration. Any CLI flag e
 | `allow_direct_github` | `--allow-direct-github` | bool | `false` | **Unsafe.** Allow GitHub access via `gh` CLI instead of requiring MCP |
 | `stop_on_failure` | `--stop-on-failure` | bool | `false` | Stop the loop after the first iteration that fails after all retries |
 | `max_retries` | `--max-retries` | integer | `0` | Additional retry attempts per iteration on non-zero exit |
-| `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Milliseconds to wait between retry attempts |
+| `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
+| `retry_backoff_multiplier` | — | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
 | `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`) |
 
 ### Prompt validation
@@ -47,6 +48,48 @@ Controls the policy engine that selects a workflow branch per iteration from rep
 | `orchestration.enabled` | `--orchestration` | bool | `false` | Enable the policy engine |
 | `orchestration.repo_owner` | `--repo-owner` | string | — | GitHub owner (user or org); required when `enabled = true` |
 | `orchestration.repo_name` | `--repo-name` | string | — | GitHub repository name; required when `enabled = true` |
+| `orchestration.policies` | — | array of `PolicyRule` | see below | Ordered policy rule chain evaluated each iteration |
+
+### `[[orchestration.policies]]` — pluggable policy rules
+
+Each rule in the array specifies a condition and the workflow to execute when that condition is met. Rules are evaluated **in order**; the first matching rule wins.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `condition` | string | yes | `has_open_prs` · `has_open_issues` · `always` |
+| `workflow` | string | yes | `pr-review` · `issue-execution` · `backlog-discovery` |
+| `prompt_override` | string | no | Custom prompt for this rule; overrides the built-in default for the selected workflow |
+
+**Default policy chain** (used when `policies` is omitted):
+
+```toml
+[[orchestration.policies]]
+condition = "has_open_prs"
+workflow = "pr-review"
+
+[[orchestration.policies]]
+condition = "has_open_issues"
+workflow = "issue-execution"
+
+[[orchestration.policies]]
+condition = "always"
+workflow = "backlog-discovery"
+```
+
+**Custom example** — skip PR review entirely and only work on issues with a custom prompt:
+
+```toml
+[[orchestration.policies]]
+condition = "has_open_issues"
+workflow = "issue-execution"
+prompt_override = "Focus only on bugs labelled `critical` this iteration."
+
+[[orchestration.policies]]
+condition = "always"
+workflow = "backlog-discovery"
+```
+
+> **Note:** If no rule matches (e.g. you define only `has_open_prs` but there are no open PRs), the engine returns an error. Always include an `always` fallback rule.
 
 ---
 
@@ -121,13 +164,26 @@ iterations = -1
 log_level = "info"
 stop_on_failure = false
 max_retries = 2
-retry_backoff_ms = 1000
+retry_backoff_ms = 500
+retry_backoff_multiplier = 2.0
 on_complete = "echo 'Loop finished' | tee -a loop.log"
 
 [orchestration]
 enabled = true
 repo_owner = "acme"
 repo_name = "my-project"
+
+[[orchestration.policies]]
+condition = "has_open_prs"
+workflow = "pr-review"
+
+[[orchestration.policies]]
+condition = "has_open_issues"
+workflow = "issue-execution"
+
+[[orchestration.policies]]
+condition = "always"
+workflow = "backlog-discovery"
 
 [issue_tracking]
 mode = "github"

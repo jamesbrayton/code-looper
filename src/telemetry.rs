@@ -36,6 +36,16 @@ impl IterationOutcome {
         matches!(self, IterationOutcome::SpawnFailure { .. })
     }
 
+    /// Returns `true` when a retry attempt may recover from this failure.
+    ///
+    /// Non-zero exits are considered transient (e.g. API rate limit, flaky
+    /// network) and are retried by default.  Signal terminations, unknown
+    /// exit states, and policy guard blocks are treated as non-retryable
+    /// because a retry is unlikely to change the outcome.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, IterationOutcome::NonZeroExit { .. } | IterationOutcome::Timeout)
+    }
+
     /// Classify an exit code into an outcome.
     pub fn from_exit_code(code: Option<i32>) -> Self {
         match code {
@@ -392,6 +402,23 @@ mod tests {
         let o = IterationOutcome::SpawnFailure { message: "not found".to_string() };
         assert!(o.is_fatal());
         assert!(!o.is_success());
+    }
+
+    #[test]
+    fn retryable_outcomes() {
+        assert!(IterationOutcome::NonZeroExit { exit_code: 1 }.is_retryable());
+        assert!(IterationOutcome::Timeout.is_retryable());
+    }
+
+    #[test]
+    fn non_retryable_outcomes() {
+        assert!(!IterationOutcome::Success.is_retryable());
+        assert!(!IterationOutcome::Signal.is_retryable());
+        assert!(!IterationOutcome::Unknown.is_retryable());
+        assert!(!IterationOutcome::SpawnFailure { message: String::new() }.is_retryable());
+        assert!(
+            !IterationOutcome::PolicyGuardBlock { message: String::new() }.is_retryable()
+        );
     }
 
     #[test]
