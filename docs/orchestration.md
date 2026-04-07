@@ -14,6 +14,49 @@ Each iteration the orchestration policy engine evaluates the current repository 
 
 The engine resolves repository context once per iteration before selecting a branch.
 
+## Issue lifecycle
+
+When orchestration is enabled, the engine expects agents to actively manage GitHub Issues throughout the run.
+
+### Standard labels
+
+At startup (GitHub mode only) the engine ensures the following labels exist on the repository, creating any that are absent:
+
+| Label | Purpose |
+|-------|---------|
+| `bug` | Defects found during iteration |
+| `enhancement` | Feature requests or improvements |
+| `tech-debt` | Technical debt identified during work |
+| `discovered-during-loop` | New scope discovered while working on a different issue |
+
+The set is configurable via `issue_tracking.standard_labels` in `looper.toml`.
+
+### Issue creation (out-of-scope discovery)
+
+When the agent discovers work that falls outside the current issue's scope it should:
+
+1. Create a new issue via GitHub MCP with a descriptive title, body, and one or more standard labels.
+2. Add `discovered-during-loop` to the new issue.
+3. Leave a comment on the current issue linking to the newly created one.
+
+This keeps the current iteration focused and makes discovered work discoverable.
+
+### Issue closure
+
+When the agent has completed the current issue's checklist *and* the work is committed (or a PR is open), it should close the issue with a summary comment via GitHub MCP.
+
+The engine performs an end-of-run verification: after the loop finishes it checks whether the owned issue is still open.  Behaviour depends on the `auto_close_owned_issues` configuration flag:
+
+| Setting | Behaviour |
+|---------|-----------|
+| `false` *(default)* | Log a warning and leave the issue open for human review |
+| `true` | Close the issue automatically with `state_reason: completed` |
+
+### Linking
+
+- When a PR is opened for issue work, the PR body includes `Closes #<issue>` and the issue receives a back-reference comment.
+- New issues created during a run include a link back to the originating issue in their body.
+
 ## Shippable signal protocol
 
 The loop engine watches each iteration's stdout for a *shippable signal* — a marker the agent emits when it believes the current branch contains review-ready work.  When detected the engine opens (or updates) a pull request via the `gh` CLI.
