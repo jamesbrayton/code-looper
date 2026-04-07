@@ -1,11 +1,40 @@
 use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode, Provider};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+
+/// Subcommands available in addition to the default loop run.
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// Initialise or patch workspace prerequisites so a repository is ready
+    /// to run code-looper.
+    ///
+    /// Checks the same prerequisites as the startup validator and, for each
+    /// gap, produces a minimal, idempotent fix:
+    ///
+    /// - No instruction file → creates `CLAUDE.md` with a Code Looper section.
+    /// - Instruction file lacks a Code Looper section → appends a delimited block.
+    /// - `.mcp.json` missing → creates a minimal stub with the GitHub server entry.
+    /// - `.mcp.json` lacks a `"github"` key → merges the entry in.
+    Bootstrap {
+        /// Directory to treat as the workspace root.  Defaults to the current
+        /// working directory.
+        #[arg(long)]
+        workspace_dir: Option<PathBuf>,
+
+        /// Print what would be created or modified without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
 
 /// Pluggable loop engine for coding-agent CLIs.
 #[derive(Debug, Parser)]
 #[command(name = "code-looper", version, about)]
 pub struct Cli {
+    /// Subcommand (optional; omit to run the default loop).
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
     /// Provider to use for loop execution.
     #[arg(long)]
     pub provider: Option<Provider>,
@@ -252,6 +281,7 @@ mod tests {
 
     fn blank_cli() -> Cli {
         Cli {
+            command: None,
             provider: None,
             iterations: None,
             prompt_inline: None,

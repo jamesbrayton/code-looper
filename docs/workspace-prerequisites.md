@@ -126,3 +126,48 @@ code-looper --workspace-dir /path/to/repo ...
 ```
 
 This is useful when Code Looper is invoked from a directory other than the repository root.
+
+---
+
+## Bootstrap subcommand
+
+Instead of manually creating the required files, use the `bootstrap` subcommand
+to let Code Looper create or patch them automatically:
+
+```bash
+code-looper bootstrap
+```
+
+Bootstrap is idempotent — running it on an already-configured repository
+produces no changes and exits 0.
+
+### What bootstrap does
+
+| Prerequisite | Action |
+|---|---|
+| No instruction file found | Creates `CLAUDE.md` with a Code Looper section |
+| Instruction file lacks a Code Looper section | Appends a delimited block |
+| `.mcp.json` missing | Creates a minimal stub with the GitHub server entry |
+| `.mcp.json` lacks a `"github"` key | Merges the entry into the existing file |
+
+### Dry-run mode
+
+Preview changes without writing anything:
+
+```bash
+code-looper bootstrap --dry-run
+```
+
+### Custom workspace directory
+
+```bash
+code-looper bootstrap --workspace-dir /path/to/repo
+```
+
+### Safety guarantees
+
+- Existing content is never removed or overwritten.
+- The Code Looper section in instruction files is delimited by
+  `<!-- code-looper begin -->` and `<!-- code-looper end -->` markers, making
+  it easy to identify and remove if needed.
+- `.mcp.json` keys outside the `github` entry are not modified.
