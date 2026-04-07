@@ -518,6 +518,17 @@ pub struct LoopConfig {
     /// metacharacters are not interpreted.
     #[serde(default)]
     pub provider_extra_args: Vec<String>,
+    /// Exit codes that are treated as permanent failures and never retried,
+    /// even when `max_retries > 0`.
+    ///
+    /// Use this to short-circuit retries for codes that indicate a
+    /// configuration or argument error rather than a transient fault.
+    /// Example values: `2` (bad CLI args), `126` (permission denied),
+    /// `127` (command not found from a shell wrapper).
+    ///
+    /// Default: empty — all non-zero exits are retried up to `max_retries`.
+    #[serde(default)]
+    pub non_retryable_exit_codes: Vec<i32>,
 }
 
 fn default_retry_backoff_ms() -> u64 {
@@ -551,6 +562,7 @@ impl Default for LoopConfig {
             telemetry: TelemetryConfig::default(),
             multi_repo: Vec::new(),
             provider_extra_args: Vec::new(),
+            non_retryable_exit_codes: Vec::new(),
         }
     }
 }
@@ -1556,9 +1568,41 @@ provider_extra_args = ["--model", "claude-opus-4-5"]
             "provider: codex\niterations: 1\nlog_level: info\nprovider_extra_args:\n  - --approval-mode\n  - full-auto\n",
         );
         let config = LoopConfig::from_yaml_file(file.path()).unwrap();
-        assert_eq!(
-            config.provider_extra_args,
-            ["--approval-mode", "full-auto"]
+        assert_eq!(config.provider_extra_args, ["--approval-mode", "full-auto"]);
+    }
+
+    // ── non_retryable_exit_codes ──────────────────────────────────────────────
+
+    #[test]
+    fn default_non_retryable_exit_codes_is_empty() {
+        let config = LoopConfig::default();
+        assert!(config.non_retryable_exit_codes.is_empty());
+    }
+
+    #[test]
+    fn parse_toml_non_retryable_exit_codes() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+non_retryable_exit_codes = [2, 126, 127]
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.non_retryable_exit_codes, [2, 126, 127]);
+    }
+
+    #[test]
+    fn parse_yaml_non_retryable_exit_codes() {
+        let file = write_temp_file(
+            ".yaml",
+            "provider: claude\niterations: 1\nlog_level: info\nnon_retryable_exit_codes:\n  - 2\n  - 127\n",
         );
+        let config = LoopConfig::from_yaml_file(file.path()).unwrap();
+        assert_eq!(config.non_retryable_exit_codes, [2, 127]);
     }
 }

@@ -665,7 +665,22 @@ impl LoopEngine {
                             break;
                         } else {
                             let outcome = IterationOutcome::from_exit_code(result.exit_code);
-                            if attempt < self.config.max_retries && outcome.is_retryable() {
+                            let is_permanent = result
+                                .exit_code
+                                .map(|c| self.config.non_retryable_exit_codes.contains(&c))
+                                .unwrap_or(false);
+                            if is_permanent {
+                                warn!(
+                                    iteration = i,
+                                    provider = self.adapter.name(),
+                                    exit_code = result.exit_code,
+                                    "Iteration failed with a non-retryable exit code; skipping retries"
+                                );
+                            }
+                            if !is_permanent
+                                && attempt < self.config.max_retries
+                                && outcome.is_retryable()
+                            {
                                 summary.retries += 1;
                                 let delay_ms = compute_backoff_ms(
                                     self.config.retry_backoff_ms,
@@ -1368,6 +1383,75 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.retries, 0);
         assert_eq!(summary.failures, 2);
+    }
+
+    #[test]
+    fn non_retryable_exit_code_skips_retries() {
+        use crate::provider::tests::FakeAdapter;
+
+        // max_retries = 3, but exit code 2 is in non_retryable_exit_codes.
+        // The engine should record 0 retries and 1 failure.
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 3,
+            retry_backoff_ms: 0,
+            non_retryable_exit_codes: vec![2],
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::with_exit_code("fake", 2);
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert_eq!(
+            summary.retries, 0,
+            "non-retryable code should not be retried"
+        );
+    }
+
+    #[test]
+    fn retryable_exit_code_not_in_list_still_retries() {
+        use crate::provider::tests::FakeAdapter;
+
+        // Exit code 1 is not in non_retryable_exit_codes (only 2 is).
+        // With max_retries = 2 it should retry twice before giving up.
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 2,
+            retry_backoff_ms: 0,
+            non_retryable_exit_codes: vec![2],
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::with_exit_code("fake", 1);
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.retries, 2, "exit code 1 should still be retried");
+    }
+
+    #[test]
+    fn non_retryable_exit_codes_empty_retries_normally() {
+        use crate::provider::tests::FakeAdapter;
+
+        // When non_retryable_exit_codes is empty (default), all non-zero exits retry.
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 1,
+            retry_backoff_ms: 0,
+            non_retryable_exit_codes: vec![],
+            ..Default::default()
+        };
+        let adapter = FakeAdapter::with_exit_code("fake", 99);
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.retries, 1);
     }
 
     #[test]

@@ -224,6 +224,15 @@ pub struct Cli {
     /// Example: `--provider-extra-arg --model --provider-extra-arg claude-opus-4-5`
     #[arg(long, action = clap::ArgAction::Append)]
     pub provider_extra_arg: Vec<String>,
+
+    /// Exit code that should be treated as a permanent failure and never
+    /// retried, even when `--max-retries` is set.  Can be repeated.
+    ///
+    /// Use this to short-circuit retries for codes that indicate a
+    /// configuration or argument error rather than a transient fault.
+    /// Example: `--non-retryable-exit-code 2 --non-retryable-exit-code 127`
+    #[arg(long, action = clap::ArgAction::Append)]
+    pub non_retryable_exit_code: Vec<i32>,
 }
 
 impl Cli {
@@ -335,6 +344,9 @@ impl Cli {
         if !self.provider_extra_arg.is_empty() {
             base.provider_extra_args = self.provider_extra_arg;
         }
+        if !self.non_retryable_exit_code.is_empty() {
+            base.non_retryable_exit_codes = self.non_retryable_exit_code;
+        }
         base
     }
 }
@@ -385,6 +397,7 @@ mod tests {
             branch_prefix: None,
             require_human_review: None,
             provider_extra_arg: vec![],
+            non_retryable_exit_code: vec![],
         }
     }
 
@@ -757,5 +770,32 @@ mod tests {
     fn cli_provider_extra_arg_default_empty() {
         let config = blank_cli().apply_overrides(default_config());
         assert!(config.provider_extra_args.is_empty());
+    }
+
+    // ── non_retryable_exit_code ───────────────────────────────────────────────
+
+    #[test]
+    fn cli_non_retryable_exit_code_propagates() {
+        let cli = Cli {
+            non_retryable_exit_code: vec![2, 127],
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.non_retryable_exit_codes, [2, 127]);
+    }
+
+    #[test]
+    fn cli_non_retryable_exit_code_default_empty() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(config.non_retryable_exit_codes.is_empty());
+    }
+
+    #[test]
+    fn cli_non_retryable_exit_code_empty_does_not_override_base() {
+        let mut base = default_config();
+        base.non_retryable_exit_codes = vec![2];
+        let config = blank_cli().apply_overrides(base);
+        // Empty CLI vec should NOT overwrite config-file-provided codes.
+        assert_eq!(config.non_retryable_exit_codes, [2]);
     }
 }

@@ -410,6 +410,19 @@ pub mod tests {
                 }),
             }
         }
+
+        /// Construct a fake adapter that exits with a specific exit code.
+        pub fn with_exit_code(name: &str, code: i32) -> Self {
+            Self {
+                name: name.to_string(),
+                result: Ok(ExecutionResult {
+                    exit_code: Some(code),
+                    stdout: String::new(),
+                    stderr: format!("exit {code}"),
+                    duration: Duration::from_millis(5),
+                }),
+            }
+        }
     }
 
     impl ProviderAdapter for FakeAdapter {

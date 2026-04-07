@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::time::Instant;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 // ── Request / response types ──────────────────────────────────────────────────
 
