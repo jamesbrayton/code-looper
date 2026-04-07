@@ -126,6 +126,12 @@ pub struct Cli {
     #[arg(long)]
     pub retry_backoff_ms: Option<u64>,
 
+    /// Exponential backoff multiplier applied per retry attempt.
+    /// Delay for attempt N = retry_backoff_ms × multiplier^(N-1).
+    /// `1.0` (default) gives flat backoff; `2.0` doubles the delay each retry.
+    #[arg(long)]
+    pub retry_backoff_multiplier: Option<f64>,
+
     /// Shell command to run once after the loop finishes (run via `sh -c`).
     #[arg(long)]
     pub on_complete: Option<String>,
@@ -163,6 +169,13 @@ pub struct Cli {
     /// One of: `milestones` (default), `every-iteration`, `off-engine`.
     #[arg(long)]
     pub comment_cadence: Option<CommentCadence>,
+
+    /// Close the linked issue at end-of-run if the agent left it open after
+    /// completing all checklist items.  When not set (default), the engine
+    /// only logs a warning.  Requires --issue-tracking-mode=github and
+    /// --comment-issue.
+    #[arg(long)]
+    pub auto_close_owned_issues: bool,
 
     /// Stream provider stdout/stderr to the terminal in real time (default: on).
     /// Use --no-stream-output to disable.
@@ -252,6 +265,9 @@ impl Cli {
         if let Some(ms) = self.retry_backoff_ms {
             base.retry_backoff_ms = ms;
         }
+        if let Some(m) = self.retry_backoff_multiplier {
+            base.retry_backoff_multiplier = m;
+        }
         if let Some(cmd) = self.on_complete {
             base.on_complete = Some(cmd);
         }
@@ -277,6 +293,9 @@ impl Cli {
         }
         if let Some(cadence) = self.comment_cadence {
             base.issue_tracking.comment_cadence = cadence;
+        }
+        if self.auto_close_owned_issues {
+            base.issue_tracking.auto_close_owned_issues = true;
         }
         if let Some(s) = self.stream_output {
             base.telemetry.stream_output = s;
@@ -333,6 +352,7 @@ mod tests {
             stop_on_failure: false,
             max_retries: None,
             retry_backoff_ms: None,
+            retry_backoff_multiplier: None,
             on_complete: None,
             iteration_timeout_secs: None,
             issue_tracking_mode: None,
@@ -341,6 +361,7 @@ mod tests {
             local_promise_path: None,
             comment_issue: None,
             comment_cadence: None,
+            auto_close_owned_issues: false,
             stream_output: None,
             artifacts_dir: None,
             keep_runs: None,
@@ -661,5 +682,38 @@ mod tests {
         assert_eq!(config.pr_management.base_branch, "main");
         assert_eq!(config.pr_management.branch_prefix, "loop/");
         assert!(config.pr_management.require_human_review);
+    }
+
+    #[test]
+    fn cli_retry_backoff_multiplier_propagates() {
+        let cli = Cli {
+            retry_backoff_multiplier: Some(2.0),
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.retry_backoff_multiplier, 2.0);
+    }
+
+    #[test]
+    fn cli_retry_backoff_multiplier_default_is_flat() {
+        // When not set via CLI, the TOML/config default (1.0 = flat) is preserved.
+        let config = blank_cli().apply_overrides(default_config());
+        assert_eq!(config.retry_backoff_multiplier, 1.0);
+    }
+
+    #[test]
+    fn cli_auto_close_owned_issues_sets_flag() {
+        let cli = Cli {
+            auto_close_owned_issues: true,
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert!(config.issue_tracking.auto_close_owned_issues);
+    }
+
+    #[test]
+    fn cli_auto_close_owned_issues_default_false() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert!(!config.issue_tracking.auto_close_owned_issues);
     }
 }

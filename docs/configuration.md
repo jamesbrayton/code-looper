@@ -29,7 +29,7 @@ Pass `--config path/to/config.toml` to load a base configuration. Any CLI flag e
 | `stop_on_failure` | `--stop-on-failure` | bool | `false` | Stop the loop after the first iteration that fails after all retries |
 | `max_retries` | `--max-retries` | integer | `0` | Additional retry attempts per iteration on non-zero exit |
 | `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
-| `retry_backoff_multiplier` | — | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
+| `retry_backoff_multiplier` | `--retry-backoff-multiplier` | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
 | `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`) |
 
 ### Prompt validation
@@ -105,7 +105,7 @@ Controls issue tracking and run-lifecycle commenting.
 | `issue_tracking.local_promise_path` | `--local-promise-path` | path | `.code-looper/promise.md` | Path to local promise file when mode is `local` |
 | `issue_tracking.comment_issue_number` | `--comment-issue` | integer | — | GitHub issue number to post run-lifecycle comments on |
 | `issue_tracking.comment_cadence` | `--comment-cadence` | `milestones`\|`every-iteration`\|`off-engine` | `milestones` | How often the engine posts issue comments |
-| `issue_tracking.auto_close_owned_issues` | — | bool | `false` | Close the linked issue at end-of-run if the agent left it open |
+| `issue_tracking.auto_close_owned_issues` | `--auto-close-owned-issues` | bool | `false` | Close the linked issue at end-of-run if the agent left it open |
 | `issue_tracking.standard_labels` | — | string array | `["bug","enhancement","tech-debt","discovered-during-loop"]` | Labels the engine ensures exist on the repo at startup (GitHub mode only) |
 
 ### Comment cadence values
