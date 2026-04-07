@@ -3,6 +3,7 @@ mod branch;
 mod cli;
 mod config;
 mod error;
+mod security;
 mod issue_tracker;
 mod loop_engine;
 mod orchestration;

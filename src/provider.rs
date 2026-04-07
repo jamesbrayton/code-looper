@@ -1,5 +1,6 @@
 use crate::config::Provider as ProviderKind;
 use crate::error::LooperError;
+use crate::security::redact_secrets;
 use std::time::Duration;
 use tracing::trace;
 
@@ -140,6 +141,7 @@ fn run_provider_process(
             let reader = BufReader::new(stdout_pipe);
             let mut captured = String::new();
             for line in reader.lines().flatten() {
+                let line = redact_secrets(&line);
                 println!("[stdout] {}", line);
                 trace!(stream = "stdout", "{}", line);
                 captured.push_str(&line);
@@ -151,6 +153,7 @@ fn run_provider_process(
         let mut stderr_captured = String::new();
         let stderr_reader = BufReader::new(stderr_pipe);
         for line in stderr_reader.lines().flatten() {
+            let line = redact_secrets(&line);
             eprintln!("[stderr] {}", line);
             trace!(stream = "stderr", "{}", line);
             stderr_captured.push_str(&line);
@@ -182,8 +185,8 @@ fn run_provider_process(
 
         Ok(ExecutionResult {
             exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout: redact_secrets(&String::from_utf8_lossy(&output.stdout)),
+            stderr: redact_secrets(&String::from_utf8_lossy(&output.stderr)),
             duration,
         })
     }
