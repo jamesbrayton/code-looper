@@ -186,6 +186,15 @@ impl LoopEngine {
         }
     }
 
+    /// Builder that replaces the engine's internal interrupt flag with an externally-supplied
+    /// one.  Use this when multiple engines must share a single SIGINT signal: create one
+    /// `Arc<AtomicBool>`, install **one** `ctrlc` handler that sets it, then pass the same
+    /// `Arc` to every engine so they all stop when the signal fires.
+    pub fn with_shared_interrupt(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.interrupted = flag;
+        self
+    }
+
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
     #[allow(dead_code)]
     pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {

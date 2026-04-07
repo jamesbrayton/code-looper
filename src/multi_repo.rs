@@ -1,7 +1,9 @@
 use crate::config::{LoopConfig, RepoTarget};
 use crate::loop_engine::{LoopEngine, SessionSummary};
 use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
-use tracing::info;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tracing::{info, warn};
 
 /// Result for a single repo target in a multi-repo run.
 #[allow(dead_code)]
@@ -21,11 +23,27 @@ pub struct RepoRunResult {
 /// - `prompt_inline` replaced by `target.prompt_override` when present
 /// - `prompt_file` cleared when `prompt_override` is set
 ///
-/// Returns one `RepoRunResult` per target in the same order as `targets`.
+/// A single SIGINT / Ctrl+C handler is installed for the whole multi-repo
+/// session.  When the signal fires the current repo's iteration runs to
+/// completion, then the outer loop stops before starting the next repo.
+///
+/// Returns one `RepoRunResult` per target in the same order as `targets`
+/// (fewer entries when interrupted early).
 pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<RepoRunResult> {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    install_signal_handler(Arc::clone(&interrupted));
+
     let mut results = Vec::with_capacity(targets.len());
 
     for target in targets {
+        if interrupted.load(Ordering::SeqCst) {
+            info!(
+                repo = %target.display_name(),
+                "Multi-repo run interrupted — skipping remaining targets"
+            );
+            break;
+        }
+
         let name = target.display_name();
         info!(repo = %name, path = %target.path.display(), "Starting multi-repo run");
 
@@ -41,7 +59,8 @@ pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<R
             allow_direct_github: base_config.allow_direct_github,
         };
         let guard = PolicyGuard::new(overrides);
-        let engine = LoopEngine::new(repo_config, guard);
+        let engine =
+            LoopEngine::new(repo_config, guard).with_shared_interrupt(Arc::clone(&interrupted));
         let summary = engine.run();
 
         results.push(RepoRunResult {
@@ -52,6 +71,18 @@ pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<R
     }
 
     results
+}
+
+/// Install a process-level SIGINT / Ctrl+C handler that sets `flag` to `true`.
+///
+/// Logs a warning if the handler cannot be installed (e.g. already registered
+/// by a caller further up the stack), but does not panic.
+fn install_signal_handler(flag: Arc<AtomicBool>) {
+    ctrlc::set_handler(move || {
+        flag.store(true, Ordering::SeqCst);
+        eprintln!("\nInterrupt received — finishing current repo and stopping…");
+    })
+    .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler for multi-repo run: {e}"));
 }
 
 /// Print a human-readable summary of all repo run results.
@@ -98,7 +129,7 @@ pub fn print_multi_repo_summary(results: &[RepoRunResult]) {
 mod tests {
     use super::*;
     use crate::config::LoopConfig;
-    use crate::loop_engine::LoopEngine;
+    use crate::loop_engine::{LoopEngine, TerminationReason};
     use crate::provider::tests::FakeAdapter;
 
     fn make_target(path: &str, name: Option<&str>, prompt_override: Option<&str>) -> RepoTarget {
@@ -176,5 +207,71 @@ mod tests {
     #[test]
     fn print_multi_repo_summary_does_not_panic_on_empty() {
         print_multi_repo_summary(&[]);
+    }
+
+    // ── Shared interrupt flag tests ───────────────────────────────────────────
+
+    #[test]
+    fn with_shared_interrupt_pre_set_stops_immediately() {
+        // When the shared flag is already true, the engine should report 0
+        // successful iterations (the loop exits before the first iteration).
+        let flag = Arc::new(AtomicBool::new(true));
+        let config = LoopConfig {
+            iterations: 5,
+            prompt_inline: Some("task".to_string()),
+            ..LoopConfig::default()
+        };
+        let summary = LoopEngine::with_adapter(config, Box::new(FakeAdapter::success("out")))
+            .with_shared_interrupt(Arc::clone(&flag))
+            .run();
+
+        assert_eq!(
+            summary.iterations_run, 0,
+            "pre-set interrupt should skip all iterations"
+        );
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Interrupted),
+            "termination reason should be Interrupted"
+        );
+    }
+
+    #[test]
+    fn interrupted_flag_prevents_next_repo_from_starting() {
+        // Simulate what run_multi_repo does: a pre-set interrupted flag means
+        // the second repo never starts.
+        let interrupted = Arc::new(AtomicBool::new(false));
+
+        // First repo runs normally.
+        let config_a = LoopConfig {
+            iterations: 1,
+            prompt_inline: Some("task".to_string()),
+            workspace_dir: Some("/tmp/repo-a".into()),
+            ..LoopConfig::default()
+        };
+        let summary_a = LoopEngine::with_adapter(config_a, Box::new(FakeAdapter::success("out")))
+            .with_shared_interrupt(Arc::clone(&interrupted))
+            .run();
+        assert_eq!(summary_a.successes, 1);
+
+        // Simulate interrupt arriving between repos.
+        interrupted.store(true, Ordering::SeqCst);
+
+        // Second repo should be skipped (the outer loop would break here).
+        let config_b = LoopConfig {
+            iterations: 3,
+            prompt_inline: Some("task".to_string()),
+            workspace_dir: Some("/tmp/repo-b".into()),
+            ..LoopConfig::default()
+        };
+        let summary_b = LoopEngine::with_adapter(config_b, Box::new(FakeAdapter::success("out")))
+            .with_shared_interrupt(Arc::clone(&interrupted))
+            .run();
+
+        // The engine itself should see the flag and exit immediately.
+        assert_eq!(
+            summary_b.iterations_run, 0,
+            "interrupted engine should run 0 iterations"
+        );
     }
 }
