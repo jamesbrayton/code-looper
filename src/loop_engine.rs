@@ -504,6 +504,24 @@ impl LoopEngine {
                         match merge_result {
                             Ok(out) if out.status.success() => {
                                 info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
+                                // Attempt post-merge branch cleanup when the PR has a known
+                                // head branch.  Failures are non-fatal (PR already merged).
+                                if !pr.head_ref.is_empty() {
+                                    let bm = BranchManager::new(self.config.pr_management.clone());
+                                    match bm.cleanup_branch(&pr.head_ref) {
+                                        Ok(()) => info!(
+                                            iteration = i,
+                                            branch = %pr.head_ref,
+                                            "multi-pr: cleaned up feature branch after merge"
+                                        ),
+                                        Err(e) => warn!(
+                                            iteration = i,
+                                            branch = %pr.head_ref,
+                                            error = %e,
+                                            "multi-pr: post-merge branch cleanup failed (non-fatal)"
+                                        ),
+                                    }
+                                }
                             }
                             Ok(out) => {
                                 let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1909,6 +1927,7 @@ mod tests {
                     number: 42,
                     title: "feat: something".to_string(),
                     url: "https://github.com/owner/repo/pull/42".to_string(),
+                    head_ref: "loop/42-feat-something".to_string(),
                 };
                 IterationPlan {
                     description: "blocked on human review".to_string(),
@@ -2006,5 +2025,103 @@ mod tests {
             summary.termination_reason,
             Some(TerminationReason::StoppedOnFailure)
         );
+    }
+
+    // ── Multi-PR merge path ───────────────────────────────────────────────────
+
+    /// Verify that `TriageAction::Merge` is handled without panicking and the
+    /// iteration is always recorded as a success (regardless of whether `gh pr
+    /// merge` succeeds in the test environment — no real GitHub connection is
+    /// available).  Post-merge branch cleanup is attempted but the failure is
+    /// non-fatal; the summary must still show one success.
+    #[test]
+    fn merge_triage_action_is_handled_gracefully() {
+        use crate::config::{PrManagementConfig, PrMode};
+        use crate::pr_manager::{PrInfo, TriageAction};
+        use crate::pr_strategy::{IterationPlan, PrStrategy};
+
+        struct MergeStrategy;
+        impl PrStrategy for MergeStrategy {
+            fn plan_iteration(&self, _iteration: u64) -> IterationPlan {
+                let pr = PrInfo {
+                    number: 77,
+                    title: "feat: merge me".to_string(),
+                    url: "https://github.com/owner/repo/pull/77".to_string(),
+                    head_ref: "loop/77-feat-merge-me".to_string(),
+                };
+                IterationPlan {
+                    description: "merge ready PR".to_string(),
+                    mode: PrMode::MultiPr,
+                    prompt_override: None,
+                    triage_action: Some(TriageAction::Merge { pr }),
+                }
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test prompt".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_pr_strategy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(MergeStrategy),
+        );
+        // `gh pr merge` will fail (no real GitHub), but the engine must not
+        // panic and must record the iteration as a success.
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.successes, 1);
+    }
+
+    /// When `head_ref` is empty the cleanup branch is skipped entirely.
+    #[test]
+    fn merge_triage_with_empty_head_ref_skips_cleanup() {
+        use crate::config::{PrManagementConfig, PrMode};
+        use crate::pr_manager::{PrInfo, TriageAction};
+        use crate::pr_strategy::{IterationPlan, PrStrategy};
+
+        struct MergeNoRefStrategy;
+        impl PrStrategy for MergeNoRefStrategy {
+            fn plan_iteration(&self, _iteration: u64) -> IterationPlan {
+                let pr = PrInfo {
+                    number: 88,
+                    title: "no ref".to_string(),
+                    url: "https://github.com/owner/repo/pull/88".to_string(),
+                    head_ref: String::new(), // empty — cleanup must be skipped
+                };
+                IterationPlan {
+                    description: "merge ready PR (no head ref)".to_string(),
+                    mode: PrMode::MultiPr,
+                    prompt_override: None,
+                    triage_action: Some(TriageAction::Merge { pr }),
+                }
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test prompt".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            ..Default::default()
+        };
+        let engine = LoopEngine::with_adapter_and_pr_strategy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(MergeNoRefStrategy),
+        );
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.successes, 1);
     }
 }

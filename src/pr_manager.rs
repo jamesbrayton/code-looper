@@ -106,6 +106,8 @@ pub struct PrInfo {
     pub number: u32,
     pub url: String,
     pub title: String,
+    /// Head branch name (e.g. `loop/42-fix-bug`).  Empty string when unknown.
+    pub head_ref: String,
 }
 
 /// Input for opening a new pull request.
@@ -187,7 +189,7 @@ impl PrLifecycle for GhPrLifecycle {
                 "--state",
                 "open",
                 "--json",
-                "number,url,title",
+                "number,url,title,headRefName",
                 "--limit",
                 "1",
             ])
@@ -215,7 +217,13 @@ impl PrLifecycle for GhPrLifecycle {
                 .as_str()
                 .ok_or_else(|| PrError::ParseError("missing 'title' field".into()))?
                 .to_string();
-            Ok(Some(PrInfo { number, url, title }))
+            let head_ref = pr["headRefName"].as_str().unwrap_or(branch).to_string();
+            Ok(Some(PrInfo {
+                number,
+                url,
+                title,
+                head_ref,
+            }))
         } else {
             Ok(None)
         }
@@ -271,6 +279,7 @@ impl PrLifecycle for GhPrLifecycle {
             number,
             url,
             title: draft.title.clone(),
+            head_ref: draft.branch.clone(),
         })
     }
 
@@ -336,6 +345,7 @@ impl MockPrLifecycle {
                 number: 42,
                 url: "https://github.com/owner/repo/pull/42".into(),
                 title: "[LOOPER] Test PR".into(),
+                head_ref: "loop/42-test-pr".into(),
             },
             calls: std::sync::Mutex::new(Vec::new()),
         }
@@ -601,7 +611,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
                 "--state",
                 "open",
                 "--json",
-                "number,url,title",
+                "number,url,title,headRefName",
                 "--limit",
                 "100",
             ])
@@ -631,7 +641,13 @@ impl PrLifecycleTriage for GhPrLifecycle {
                     .as_str()
                     .ok_or_else(|| PrError::ParseError("missing title".into()))?
                     .to_string();
-                Ok(PrInfo { number, url, title })
+                let head_ref = v["headRefName"].as_str().unwrap_or("").to_string();
+                Ok(PrInfo {
+                    number,
+                    url,
+                    title,
+                    head_ref,
+                })
             })
             .collect()
     }
@@ -644,7 +660,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
                 "view",
                 &pr_ref,
                 "--json",
-                "number,url,title,labels,statusCheckRollup,reviewDecision,createdAt",
+                "number,url,title,headRefName,labels,statusCheckRollup,reviewDecision,createdAt",
             ])
             .output()
             .map_err(|e| PrError::GhCommand(format!("failed to spawn gh: {e}")))?;
@@ -661,9 +677,15 @@ impl PrLifecycleTriage for GhPrLifecycle {
         let number = v["number"].as_u64().unwrap_or(pr_number as u64) as u32;
         let url = v["url"].as_str().unwrap_or("").to_string();
         let title = v["title"].as_str().unwrap_or("").to_string();
+        let head_ref = v["headRefName"].as_str().unwrap_or("").to_string();
         let created_at = v["createdAt"].as_str().unwrap_or("").to_string();
 
-        let pr = PrInfo { number, url, title };
+        let pr = PrInfo {
+            number,
+            url,
+            title,
+            head_ref,
+        };
 
         // Check skip labels.
         if let Some(labels) = v["labels"].as_array() {
@@ -1043,6 +1065,7 @@ mod tests {
             number: 10,
             url: "https://github.com/o/r/pull/10".into(),
             title: "[LOOPER] #1: feat".into(),
+            head_ref: "loop/1-feat".into(),
         };
         let mock = MockPrLifecycle::new().with_existing_pr(existing);
         let mut cfg = default_config();
@@ -1065,6 +1088,7 @@ mod tests {
             number: 10,
             url: "https://github.com/o/r/pull/10".into(),
             title: "[LOOPER] #1: feat".into(),
+            head_ref: "loop/1-feat".into(),
         };
         let mock = MockPrLifecycle::new().with_existing_pr(existing);
         let mut cfg = default_config();
@@ -1135,6 +1159,7 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             title: format!("PR {number}"),
+            head_ref: format!("loop/{number}-pr"),
         }
     }
 
@@ -1315,5 +1340,33 @@ mod tests {
             label: "code-looper".into()
         }));
         assert!(calls.contains(&TriageCall::GetPrState { pr_number: 30 }));
+    }
+
+    // ── PrInfo::head_ref ──────────────────────────────────────────────────────
+
+    #[test]
+    fn pr_info_head_ref_is_set_by_make_pr_helper() {
+        let pr = make_pr(5);
+        assert_eq!(pr.head_ref, "loop/5-pr");
+    }
+
+    #[test]
+    fn merge_triage_action_carries_head_ref() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(99);
+        mock.open_prs = vec![pr.clone()];
+        mock.states
+            .insert(99, make_state(pr, PrTriageState::ReadyToMerge));
+        let mut cfg = default_config();
+        cfg.require_human_review = false;
+        let triage = PrTriage::new(cfg, mock);
+        if let TriageAction::Merge { pr } = triage.select_action() {
+            assert_eq!(
+                pr.head_ref, "loop/99-pr",
+                "Merge action must preserve head_ref for post-merge cleanup"
+            );
+        } else {
+            panic!("expected TriageAction::Merge");
+        }
     }
 }

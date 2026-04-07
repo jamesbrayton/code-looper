@@ -297,6 +297,7 @@ mod tests {
             number: 7,
             url: "https://example.com/pull/7".into(),
             title: "Fix foo".into(),
+            head_ref: "loop/7-fix-foo".into(),
         };
         let mut mock = MockPrLifecycleTriage::new();
         mock.open_prs = vec![pr.clone()];
@@ -325,6 +326,7 @@ mod tests {
             number: 8,
             url: "https://example.com/pull/8".into(),
             title: "Add bar".into(),
+            head_ref: "loop/8-add-bar".into(),
         };
         let mut mock = MockPrLifecycleTriage::new();
         mock.open_prs = vec![pr.clone()];
@@ -354,6 +356,7 @@ mod tests {
             number: 9,
             url: "https://example.com/pull/9".into(),
             title: "Ship it".into(),
+            head_ref: "loop/9-ship-it".into(),
         };
         let mut mock = MockPrLifecycleTriage::new();
         mock.open_prs = vec![pr.clone()];
@@ -383,6 +386,7 @@ mod tests {
             number: 10,
             url: "https://example.com/pull/10".into(),
             title: "WIP".into(),
+            head_ref: "loop/10-wip".into(),
         };
         let mut mock = MockPrLifecycleTriage::new();
         mock.open_prs = vec![pr.clone()];
