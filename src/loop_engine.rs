@@ -2,6 +2,7 @@ use crate::config::{IssueTrackingMode, LoopConfig};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
+use crate::pr_strategy::{PrStrategy, build_strategy};
 use crate::provider::{build_adapter, ProviderAdapter};
 use crate::telemetry::{
     IterationOutcome, IterationRecord, RunArtifacts, RunManifest, unix_now,
@@ -109,6 +110,8 @@ pub struct LoopEngine {
     /// active use (start/milestone/end comments) lands in a follow-up issue.
     #[allow(dead_code)]
     tracker: Box<dyn IssueTracker>,
+    /// PR strategy: consulted once per iteration before the provider is invoked.
+    pr_strategy: Box<dyn PrStrategy>,
     /// Shared flag set to `true` when SIGINT is received.
     interrupted: Arc<AtomicBool>,
 }
@@ -124,8 +127,9 @@ impl LoopEngine {
             None
         };
         let tracker = build_tracker(&config);
+        let pr_strategy = build_strategy(config.pr_management.clone());
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine, guard, tracker, interrupted }
+        Self { config, adapter, policy_engine, guard, tracker, pr_strategy, interrupted }
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
@@ -134,7 +138,8 @@ impl LoopEngine {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
-        Self { config, adapter, policy_engine: None, guard, tracker, interrupted }
+        let pr_strategy = build_strategy(config.pr_management.clone());
+        Self { config, adapter, policy_engine: None, guard, tracker, pr_strategy, interrupted }
     }
 
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
@@ -147,7 +152,8 @@ impl LoopEngine {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
-        Self { config, adapter, policy_engine: Some(policy_engine), guard, tracker, interrupted }
+        let pr_strategy = build_strategy(config.pr_management.clone());
+        Self { config, adapter, policy_engine: Some(policy_engine), guard, tracker, pr_strategy, interrupted }
     }
 
     /// Install a Ctrl+C handler that sets the interrupted flag.
@@ -271,6 +277,15 @@ impl LoopEngine {
 
             let iter_started_at = unix_now();
             let iter_start = Instant::now();
+
+            // Consult the PR strategy before the provider is invoked.
+            let pr_plan = self.pr_strategy.plan_iteration(i);
+            info!(
+                iteration = i,
+                pr_mode = %pr_plan.mode,
+                pr_plan = %pr_plan.description,
+                "PR strategy plan"
+            );
 
             // If orchestration is enabled, select a workflow branch and use its prompt.
             let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {

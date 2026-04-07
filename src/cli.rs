@@ -1,4 +1,4 @@
-use crate::config::{IssueTrackingMode, LoopConfig, Provider};
+use crate::config::{IssueTrackingMode, LoopConfig, PrMode, Provider};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -113,6 +113,23 @@ pub struct Cli {
     /// at the end of each run.  Useful for scripted / CI use.
     #[arg(long)]
     pub no_summary: bool,
+
+    /// PR iteration mode: `no-pr` (default), `single-pr`, or `multi-pr`.
+    #[arg(long)]
+    pub pr_mode: Option<PrMode>,
+
+    /// Branch to open PRs into (default: `main`).
+    #[arg(long)]
+    pub base_branch: Option<String>,
+
+    /// Prefix for feature branches created by the loop (default: `loop/`).
+    #[arg(long)]
+    pub branch_prefix: Option<String>,
+
+    /// Require human review before the loop merges a PR (default: on).
+    /// Pass `--no-require-human-review` to allow automated merges.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    pub require_human_review: Option<bool>,
 }
 
 impl Cli {
@@ -192,6 +209,18 @@ impl Cli {
         if self.no_summary {
             base.telemetry.no_summary = true;
         }
+        if let Some(mode) = self.pr_mode {
+            base.pr_management.mode = mode;
+        }
+        if let Some(branch) = self.base_branch {
+            base.pr_management.base_branch = branch;
+        }
+        if let Some(prefix) = self.branch_prefix {
+            base.pr_management.branch_prefix = prefix;
+        }
+        if let Some(review) = self.require_human_review {
+            base.pr_management.require_human_review = review;
+        }
         base
     }
 }
@@ -231,6 +260,10 @@ mod tests {
             artifacts_dir: None,
             keep_runs: None,
             no_summary: false,
+            pr_mode: None,
+            base_branch: None,
+            branch_prefix: None,
+            require_human_review: None,
         }
     }
 
@@ -428,5 +461,44 @@ mod tests {
         assert!(config.telemetry.stream_output);
         assert_eq!(config.telemetry.keep_runs, 10);
         assert!(!config.telemetry.no_summary);
+    }
+
+    #[test]
+    fn cli_pr_mode_propagates() {
+        use crate::config::PrMode;
+        let cli = Cli { pr_mode: Some(PrMode::SinglePr), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.pr_management.mode, PrMode::SinglePr);
+    }
+
+    #[test]
+    fn cli_base_branch_propagates() {
+        let cli = Cli { base_branch: Some("develop".to_string()), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.pr_management.base_branch, "develop");
+    }
+
+    #[test]
+    fn cli_branch_prefix_propagates() {
+        let cli = Cli { branch_prefix: Some("feat/".to_string()), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.pr_management.branch_prefix, "feat/");
+    }
+
+    #[test]
+    fn cli_require_human_review_false_propagates() {
+        let cli = Cli { require_human_review: Some(false), ..blank_cli() };
+        let config = cli.apply_overrides(default_config());
+        assert!(!config.pr_management.require_human_review);
+    }
+
+    #[test]
+    fn cli_pr_management_defaults() {
+        use crate::config::PrMode;
+        let config = blank_cli().apply_overrides(default_config());
+        assert_eq!(config.pr_management.mode, PrMode::NoPr);
+        assert_eq!(config.pr_management.base_branch, "main");
+        assert_eq!(config.pr_management.branch_prefix, "loop/");
+        assert!(config.pr_management.require_human_review);
     }
 }

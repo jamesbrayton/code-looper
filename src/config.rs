@@ -57,6 +57,77 @@ impl Default for IssueTrackingConfig {
     }
 }
 
+// ── PR management ────────────────────────────────────────────────────────────
+
+/// PR iteration mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrMode {
+    /// Commit and push to a feature branch only; never open a PR.
+    NoPr,
+    /// Work on one feature branch; open a PR when work is shippable, then
+    /// continue pushing to that branch until merged.
+    SinglePr,
+    /// On each iteration, triage open PRs first (review, fix, merge); open new
+    /// feature branches for issue work only when no PR can be advanced.
+    MultiPr,
+}
+
+impl std::fmt::Display for PrMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PrMode::NoPr => write!(f, "no-pr"),
+            PrMode::SinglePr => write!(f, "single-pr"),
+            PrMode::MultiPr => write!(f, "multi-pr"),
+        }
+    }
+}
+
+fn default_pr_mode() -> PrMode {
+    PrMode::NoPr
+}
+
+fn default_base_branch() -> String {
+    "main".to_string()
+}
+
+fn default_branch_prefix() -> String {
+    "loop/".to_string()
+}
+
+fn default_require_human_review() -> bool {
+    true
+}
+
+/// Pull-request management configuration (`[pr_management]` TOML section).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrManagementConfig {
+    /// PR strategy mode.  Default: `no-pr`.
+    #[serde(default = "default_pr_mode")]
+    pub mode: PrMode,
+    /// Branch to open PRs into.  Default: `main`.
+    #[serde(default = "default_base_branch")]
+    pub base_branch: String,
+    /// Prefix for feature branches created by the loop.  Default: `loop/`.
+    #[serde(default = "default_branch_prefix")]
+    pub branch_prefix: String,
+    /// When `true` the loop never merges a PR itself — human review is the
+    /// gate.  Default: `true`.
+    #[serde(default = "default_require_human_review")]
+    pub require_human_review: bool,
+}
+
+impl Default for PrManagementConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_pr_mode(),
+            base_branch: default_base_branch(),
+            branch_prefix: default_branch_prefix(),
+            require_human_review: default_require_human_review(),
+        }
+    }
+}
+
 // ── Orchestration ─────────────────────────────────────────────────────────────
 
 // ── Telemetry ─────────────────────────────────────────────────────────────────
@@ -177,6 +248,9 @@ pub struct LoopConfig {
     /// Issue tracking configuration.
     #[serde(default)]
     pub issue_tracking: IssueTrackingConfig,
+    /// Pull-request management configuration.
+    #[serde(default)]
+    pub pr_management: PrManagementConfig,
     /// Telemetry / artifact collection configuration.
     #[serde(default)]
     pub telemetry: TelemetryConfig,
@@ -203,6 +277,7 @@ impl Default for LoopConfig {
             retry_backoff_ms: default_retry_backoff_ms(),
             on_complete: None,
             issue_tracking: IssueTrackingConfig::default(),
+            pr_management: PrManagementConfig::default(),
             telemetry: TelemetryConfig::default(),
         }
     }
@@ -246,6 +321,15 @@ impl LoopConfig {
                     "--on-complete must not be an empty string".to_string(),
                 ));
             }
+        }
+        // multi-pr mode requires GitHub issue tracking (local mode can't track PRs).
+        if self.pr_management.mode == PrMode::MultiPr
+            && self.issue_tracking.mode != IssueTrackingMode::Github
+        {
+            return Err(LooperError::InvalidArgument(
+                "pr_management.mode=\"multi-pr\" requires issue_tracking.mode=\"github\""
+                    .to_string(),
+            ));
         }
         // When github mode is active, owner and repo must be resolvable.
         if self.issue_tracking.mode == IssueTrackingMode::Github {
@@ -622,5 +706,91 @@ local_promise_path = ".code-looper/dev.md"
             Some(PathBuf::from(".code-looper/dev.md"))
         );
         assert!(config.validate().is_ok());
+    }
+
+    // ── PR management config tests ─────────────────────────────────────────────
+
+    #[test]
+    fn pr_management_defaults() {
+        let config = LoopConfig::default();
+        assert_eq!(config.pr_management.mode, PrMode::NoPr);
+        assert_eq!(config.pr_management.base_branch, "main");
+        assert_eq!(config.pr_management.branch_prefix, "loop/");
+        assert!(config.pr_management.require_human_review);
+    }
+
+    #[test]
+    fn multi_pr_requires_github_issue_tracking() {
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Local,
+                ..IssueTrackingConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("multi-pr"));
+        assert!(err.to_string().contains("github"));
+    }
+
+    #[test]
+    fn multi_pr_with_github_issue_tracking_is_valid() {
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                local_promise_path: None,
+            },
+            ..LoopConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn no_pr_and_single_pr_work_with_local_issue_tracking() {
+        for mode in [PrMode::NoPr, PrMode::SinglePr] {
+            let config = LoopConfig {
+                pr_management: PrManagementConfig {
+                    mode,
+                    ..PrManagementConfig::default()
+                },
+                ..LoopConfig::default()
+            };
+            assert!(config.validate().is_ok());
+        }
+    }
+
+    #[test]
+    fn parse_toml_with_pr_management() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[pr_management]
+mode = "single-pr"
+base_branch = "develop"
+branch_prefix = "feat/"
+require_human_review = false
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.pr_management.mode, PrMode::SinglePr);
+        assert_eq!(config.pr_management.base_branch, "develop");
+        assert_eq!(config.pr_management.branch_prefix, "feat/");
+        assert!(!config.pr_management.require_human_review);
     }
 }
