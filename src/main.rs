@@ -1,6 +1,7 @@
 mod cli;
 mod config;
 mod error;
+mod issue_tracker;
 mod loop_engine;
 mod orchestration;
 mod policy_guard;
