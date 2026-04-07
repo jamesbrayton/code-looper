@@ -156,6 +156,77 @@ Controls artifact collection and run summaries.
 
 ---
 
+## `[[multi_repo]]`
+
+When one or more `[[multi_repo]]` entries are present, Code Looper runs the
+configured loop for each target repository in sequence instead of the default
+single-repo mode. Each entry is a separate TOML array item.
+
+| TOML key | Type | Required | Description |
+|----------|------|----------|-------------|
+| `path` | path | yes | Filesystem path to the repository root. Relative paths are resolved from the working directory at startup. |
+| `name` | string | no | Human-readable label used in run logs and the aggregate summary. Defaults to the last path component of `path`. |
+| `prompt_override` | string | no | Per-repo prompt that replaces the top-level `prompt_inline` / `prompt_file` value for this specific target. |
+
+**Example:**
+
+```toml
+[[multi_repo]]
+path = "/home/dev/repos/service-a"
+name = "service-a"
+
+[[multi_repo]]
+path = "/home/dev/repos/service-b"
+prompt_override = "Run security audit only — do not change any code."
+```
+
+When `multi_repo` is non-empty the standard single-repo loop engine is skipped.
+A per-repo summary and an aggregate total are printed after all targets finish.
+
+---
+
+## `serve` subcommand
+
+`code-looper serve` starts a long-running TCP listener that accepts loop-run
+requests over a newline-delimited JSON (JSON-lines) protocol. This is the v2.0
+service / embedding mode.
+
+```
+code-looper serve [--port N] [--bind-addr ADDR]
+```
+
+| CLI flag | Default | Description |
+|----------|---------|-------------|
+| `--port` | `7979` | TCP port to listen on |
+| `--bind-addr` | `127.0.0.1` | Address to bind to (loopback-only by default) |
+
+The base `LoopConfig` is loaded from `--config` (or defaults) before the
+listener starts. Per-request overrides are accepted in the request body.
+
+### Protocol
+
+Each connection sends one JSON request followed by a newline; the service
+replies with one JSON response followed by a newline, then closes the
+connection.
+
+**Supported commands:**
+
+| Request | Response |
+|---------|---------|
+| `{"cmd":"run","prompt":"…","provider":"…"}` | `{"ok":true,"exit_code":0,"stdout":"…","stderr":"…","duration_ms":123}` |
+| `{"cmd":"status"}` | `{"ok":true,"uptime_secs":42,"run_count":7}` |
+| `{"cmd":"shutdown"}` | `{"ok":true}` — service exits after sending this |
+| _(unknown)_ | `{"ok":false,"error":"unknown command"}` |
+
+**Example session (netcat):**
+
+```bash
+echo '{"cmd":"status"}' | nc 127.0.0.1 7979
+# → {"ok":true,"uptime_secs":5,"run_count":0}
+```
+
+---
+
 ## Example TOML config
 
 ```toml
@@ -202,4 +273,14 @@ require_human_review = true
 [telemetry]
 stream_output = true
 keep_runs = 20
+
+# Optional: run against multiple repositories in sequence.
+# When present, the single-repo path is skipped entirely.
+[[multi_repo]]
+path = "/home/dev/repos/service-a"
+name = "service-a"
+
+[[multi_repo]]
+path = "/home/dev/repos/service-b"
+prompt_override = "Apply the same lint fixes as service-a."
 ```
