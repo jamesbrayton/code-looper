@@ -7,6 +7,27 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::trace;
 
+/// Approved provider executables.
+///
+/// Only binaries in this list may be spawned by the loop engine.  This
+/// allowlist is enforced at runtime in non-test builds by
+/// [`check_allowed_binary`] to prevent arbitrary command injection in case of
+/// future refactors that relax the hardcoded binary names inside adapters.
+pub const ALLOWED_PROVIDER_BINARIES: &[&str] = &["claude", "gh", "codex"];
+
+/// Return `Ok(())` if `binary` is in [`ALLOWED_PROVIDER_BINARIES`], or a
+/// [`LooperError::DisallowedExecutable`] if it is not.
+pub fn check_allowed_binary(binary: &str) -> Result<(), LooperError> {
+    if ALLOWED_PROVIDER_BINARIES.contains(&binary) {
+        Ok(())
+    } else {
+        Err(LooperError::DisallowedExecutable {
+            binary: binary.to_string(),
+            allowed: ALLOWED_PROVIDER_BINARIES.join(", "),
+        })
+    }
+}
+
 /// Outcome of a single provider execution.
 #[derive(Debug, Clone)]
 pub struct ExecutionResult {
@@ -171,6 +192,12 @@ fn run_provider_process(
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::time::Instant;
+
+    // Enforce the executable allowlist in non-test builds.  Test builds bypass
+    // this so unit tests can spawn utilities like `sleep` or `echo` to exercise
+    // timeout/streaming behaviour without requiring real provider CLIs.
+    #[cfg(not(test))]
+    check_allowed_binary(binary)?;
 
     let start = Instant::now();
 
@@ -444,6 +471,62 @@ pub mod tests {
                 timeout_secs: 1,
             })
         }
+    }
+
+    // ── check_allowed_binary ──────────────────────────────────────────────────
+
+    #[test]
+    fn allowlist_accepts_claude() {
+        assert!(super::check_allowed_binary("claude").is_ok());
+    }
+
+    #[test]
+    fn allowlist_accepts_gh() {
+        assert!(super::check_allowed_binary("gh").is_ok());
+    }
+
+    #[test]
+    fn allowlist_accepts_codex() {
+        assert!(super::check_allowed_binary("codex").is_ok());
+    }
+
+    #[test]
+    fn allowlist_rejects_disallowed_binary() {
+        let err = super::check_allowed_binary("rm").unwrap_err();
+        assert!(
+            matches!(err, LooperError::DisallowedExecutable { ref binary, .. } if binary == "rm")
+        );
+    }
+
+    #[test]
+    fn allowlist_rejects_arbitrary_path() {
+        let err = super::check_allowed_binary("/usr/bin/bash").unwrap_err();
+        assert!(matches!(err, LooperError::DisallowedExecutable { .. }));
+    }
+
+    #[test]
+    fn disallowed_executable_error_message_lists_permitted_binaries() {
+        let err = super::check_allowed_binary("bad-binary").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bad-binary"));
+        assert!(msg.contains("claude"));
+        assert!(msg.contains("gh"));
+        assert!(msg.contains("codex"));
+    }
+
+    #[test]
+    fn all_adapter_binaries_are_in_allowlist() {
+        // Ensure every binary used by the three concrete adapters is covered.
+        // This test will fail if a new adapter is added without updating the allowlist.
+        assert!(
+            super::check_allowed_binary("claude").is_ok(),
+            "claude missing"
+        );
+        assert!(super::check_allowed_binary("gh").is_ok(), "gh missing");
+        assert!(
+            super::check_allowed_binary("codex").is_ok(),
+            "codex missing"
+        );
     }
 
     // ── run_provider_process timeout (real subprocess) ────────────────────────
