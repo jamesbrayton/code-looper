@@ -12,6 +12,7 @@ mod policy_guard;
 mod pr_manager;
 mod pr_strategy;
 mod provider;
+mod service;
 mod telemetry;
 mod workspace;
 
@@ -22,31 +23,56 @@ use tracing::info;
 fn main() -> anyhow::Result<()> {
     let cli_args = cli::Cli::parse();
 
-    // Dispatch to the bootstrap subcommand when requested.
-    if let Some(cli::Commands::Bootstrap { workspace_dir, dry_run }) = cli_args.command {
-        let ws_dir = workspace::resolve_workspace_dir(workspace_dir.as_deref());
-        let prefix = if dry_run { "[dry-run]" } else { "[bootstrap]" };
-        let actions = bootstrap::run_bootstrap(&ws_dir, dry_run)
-            .context("bootstrap failed")?;
-        for action in &actions {
-            // Replace the "[bootstrap]" prefix with "[dry-run]" when applicable.
-            let msg = action.to_string();
-            let display = if dry_run {
-                msg.replacen("[bootstrap]", prefix, 1)
+    // Dispatch subcommands before config resolution so they can run without a
+    // full loop configuration.
+    match cli_args.command {
+        Some(cli::Commands::Bootstrap { workspace_dir, dry_run }) => {
+            let ws_dir = workspace::resolve_workspace_dir(workspace_dir.as_deref());
+            let prefix = if dry_run { "[dry-run]" } else { "[bootstrap]" };
+            let actions = bootstrap::run_bootstrap(&ws_dir, dry_run)
+                .context("bootstrap failed")?;
+            for action in &actions {
+                let msg = action.to_string();
+                let display = if dry_run { msg.replacen("[bootstrap]", prefix, 1) } else { msg };
+                println!("{display}");
+            }
+            let all_satisfied =
+                actions.iter().all(|a| matches!(a, bootstrap::BootstrapAction::AlreadySatisfied(_)));
+            if all_satisfied {
+                println!("{prefix} workspace prerequisites already satisfied — nothing to do.");
+            } else if !dry_run {
+                println!(
+                    "[bootstrap] Done — workspace prerequisites satisfied. \
+                     Run \"code-looper --help\" to get started."
+                );
+            }
+            return Ok(());
+        }
+
+        Some(cli::Commands::Serve { port, ref bind_addr }) => {
+            let bind_addr = bind_addr.clone();
+            // Build config from file / CLI overrides, then hand off to service mode.
+            let base = if let Some(ref path) = cli_args.config {
+                config::LoopConfig::from_toml_file(path)
+                    .with_context(|| format!("failed to load config from {}", path.display()))?
             } else {
-                msg
+                config::LoopConfig::default()
             };
-            println!("{display}");
+            let resolved = cli_args.apply_overrides(base);
+
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&resolved.log_level)),
+                )
+                .init();
+
+            info!(port = port, bind_addr = %bind_addr, "Starting service mode");
+            let svc = service::ServiceMode::new(resolved, bind_addr, port);
+            return svc.run();
         }
-        let all_satisfied = actions.iter().all(|a| {
-            matches!(a, bootstrap::BootstrapAction::AlreadySatisfied(_))
-        });
-        if all_satisfied {
-            println!("{prefix} workspace prerequisites already satisfied — nothing to do.");
-        } else if !dry_run {
-            println!("[bootstrap] Done — workspace prerequisites satisfied. Run \"code-looper --help\" to get started.");
-        }
-        return Ok(());
+
+        None => {}
     }
 
 

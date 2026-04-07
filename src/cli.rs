@@ -25,6 +25,31 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Start Code Looper in service mode, listening for JSON-lines requests
+    /// over a local TCP socket.
+    ///
+    /// Clients connect and send one request per line (newline-delimited JSON).
+    /// The server responds with one JSON object per line.
+    ///
+    /// Supported commands:
+    ///
+    ///   {"cmd":"run","prompt":"<text>"}           — execute one provider iteration
+    ///   {"cmd":"run","prompt":"<text>","provider":"codex"} — override provider
+    ///   {"cmd":"status"}                          — service uptime and run counts
+    ///   {"cmd":"shutdown"}                        — stop the service
+    ///
+    /// Example (using netcat):
+    ///   echo '{"cmd":"status"}' | nc 127.0.0.1 7979
+    Serve {
+        /// TCP port to listen on.  Defaults to 7979.
+        #[arg(long, default_value_t = 7979)]
+        port: u16,
+
+        /// Address to bind to.  Defaults to 127.0.0.1 (loopback only).
+        #[arg(long, default_value = "127.0.0.1")]
+        bind_addr: String,
+    },
 }
 
 /// Pluggable loop engine for coding-agent CLIs.
