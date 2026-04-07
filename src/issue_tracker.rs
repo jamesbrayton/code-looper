@@ -361,6 +361,172 @@ impl IssueTracker for GitHubIssueTracker {
     }
 }
 
+// ── LocalPromiseTracker ───────────────────────────────────────────────────────
+
+/// Dev/debug-only tracker that writes to a single markdown file.
+///
+/// Each "issue" is a heading (`## #<number> <title>`) with a body block and
+/// an appended log of timestamped comments.  Intended for offline
+/// experimentation — **not** for production use.
+///
+/// The file is created (including parent directories) on first write if it
+/// does not already exist.
+pub struct LocalPromiseTracker {
+    pub path: std::path::PathBuf,
+    inner: Mutex<LocalStore>,
+}
+
+struct LocalStore {
+    /// In-memory issues indexed by number.
+    issues: std::collections::HashMap<u32, Issue>,
+    /// Monotonically increasing counter for new issue numbers.
+    next_number: u32,
+}
+
+impl LocalPromiseTracker {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            inner: Mutex::new(LocalStore {
+                issues: std::collections::HashMap::new(),
+                next_number: 1,
+            }),
+        }
+    }
+
+    /// Persist the entire store to the markdown file.
+    fn flush(&self, store: &LocalStore) -> Result<(), IssueTrackerError> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| IssueTrackerError::Transport(format!("create_dir_all: {e}")))?;
+        }
+        let mut out = String::new();
+        out.push_str("<!-- LocalPromiseTracker — dev/debug only -->\n\n");
+        let mut numbers: Vec<u32> = store.issues.keys().copied().collect();
+        numbers.sort_unstable();
+        for n in numbers {
+            let issue = &store.issues[&n];
+            let state_tag = if issue.state == IssueState::Open { "OPEN" } else { "CLOSED" };
+            out.push_str(&format!("## #{n} {title} [{state_tag}]\n\n", title = issue.title));
+            if !issue.body.is_empty() {
+                out.push_str(&issue.body);
+                out.push_str("\n\n");
+            }
+        }
+        std::fs::write(&self.path, out)
+            .map_err(|e| IssueTrackerError::Transport(format!("write promise file: {e}")))?;
+        Ok(())
+    }
+}
+
+impl IssueTracker for LocalPromiseTracker {
+    fn list_open_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>, IssueTrackerError> {
+        let store = self.inner.lock().unwrap();
+        let issues: Vec<Issue> = store
+            .issues
+            .values()
+            .filter(|i| i.state == IssueState::Open)
+            .filter(|i| {
+                filter.labels.is_empty()
+                    || filter.labels.iter().any(|l| i.labels.contains(l))
+            })
+            .filter(|i| {
+                filter
+                    .assignee
+                    .as_deref()
+                    .map_or(true, |a| i.assignees.contains(&a.to_string()))
+            })
+            .filter(|i| {
+                filter
+                    .search
+                    .as_deref()
+                    .map_or(true, |q| i.title.contains(q) || i.body.contains(q))
+            })
+            .cloned()
+            .collect();
+        Ok(issues)
+    }
+
+    fn get_issue(&self, number: u32) -> Result<Issue, IssueTrackerError> {
+        let store = self.inner.lock().unwrap();
+        store
+            .issues
+            .get(&number)
+            .cloned()
+            .ok_or_else(|| IssueTrackerError::NotFound(format!("issue #{number} not found")))
+    }
+
+    fn create_issue(&self, draft: IssueDraft) -> Result<Issue, IssueTrackerError> {
+        if draft.title.trim().is_empty() {
+            return Err(IssueTrackerError::Validation(
+                "issue title must not be empty".to_string(),
+            ));
+        }
+        let mut store = self.inner.lock().unwrap();
+        let number = store.next_number;
+        store.next_number += 1;
+        let issue = Issue {
+            id: number as u64,
+            number,
+            title: draft.title,
+            body: draft.body,
+            state: IssueState::Open,
+            labels: draft.labels,
+            assignees: draft.assignees,
+            url: format!("local://issues/{number}"),
+        };
+        store.issues.insert(number, issue.clone());
+        self.flush(&store)?;
+        Ok(issue)
+    }
+
+    fn update_issue_body(&self, number: u32, body: &str) -> Result<(), IssueTrackerError> {
+        let mut store = self.inner.lock().unwrap();
+        let issue = store
+            .issues
+            .get_mut(&number)
+            .ok_or_else(|| IssueTrackerError::NotFound(format!("issue #{number} not found")))?;
+        issue.body = body.to_string();
+        self.flush(&store)
+    }
+
+    fn add_comment(&self, number: u32, body: &str) -> Result<(), IssueTrackerError> {
+        let mut store = self.inner.lock().unwrap();
+        let issue = store
+            .issues
+            .get_mut(&number)
+            .ok_or_else(|| IssueTrackerError::NotFound(format!("issue #{number} not found")))?;
+        // Append comment as a timestamped log entry in the body.
+        let entry = format!("\n---\n> {body}\n");
+        issue.body.push_str(&entry);
+        self.flush(&store)
+    }
+
+    fn close_issue(&self, number: u32, _reason: CloseReason) -> Result<(), IssueTrackerError> {
+        let mut store = self.inner.lock().unwrap();
+        let issue = store
+            .issues
+            .get_mut(&number)
+            .ok_or_else(|| IssueTrackerError::NotFound(format!("issue #{number} not found")))?;
+        issue.state = IssueState::Closed;
+        self.flush(&store)
+    }
+
+    fn reopen_issue(&self, number: u32) -> Result<(), IssueTrackerError> {
+        let mut store = self.inner.lock().unwrap();
+        let issue = store
+            .issues
+            .get_mut(&number)
+            .ok_or_else(|| IssueTrackerError::NotFound(format!("issue #{number} not found")))?;
+        issue.state = IssueState::Open;
+        self.flush(&store)
+    }
+
+    fn link_issue_to_pr(&self, issue_number: u32, pr_number: u32) -> Result<(), IssueTrackerError> {
+        self.add_comment(issue_number, &format!("Linked to pull request #{pr_number}."))
+    }
+}
+
 // ── MockIssueTracker ──────────────────────────────────────────────────────────
 
 /// Test double that records every call made to it.
@@ -744,5 +910,137 @@ mod tests {
         assert!(f.labels.is_empty());
         assert!(f.assignee.is_none());
         assert!(f.search.is_none());
+    }
+
+    // ── LocalPromiseTracker tests ─────────────────────────────────────────────
+
+    fn temp_tracker() -> LocalPromiseTracker {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("promise.md");
+        // Leak the TempDir so the file persists for the test.
+        std::mem::forget(dir);
+        LocalPromiseTracker::new(path)
+    }
+
+    #[test]
+    fn local_tracker_create_and_get() {
+        let tracker = temp_tracker();
+        let issue = tracker
+            .create_issue(IssueDraft {
+                title: "My task".to_string(),
+                body: "details".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(issue.number, 1);
+        assert_eq!(issue.title, "My task");
+        assert_eq!(issue.state, IssueState::Open);
+
+        let fetched = tracker.get_issue(1).unwrap();
+        assert_eq!(fetched.title, "My task");
+    }
+
+    #[test]
+    fn local_tracker_not_found() {
+        let tracker = temp_tracker();
+        let err = tracker.get_issue(99).unwrap_err();
+        assert!(matches!(err, IssueTrackerError::NotFound(_)));
+    }
+
+    #[test]
+    fn local_tracker_list_open() {
+        let tracker = temp_tracker();
+        tracker
+            .create_issue(IssueDraft { title: "A".to_string(), ..Default::default() })
+            .unwrap();
+        tracker
+            .create_issue(IssueDraft { title: "B".to_string(), ..Default::default() })
+            .unwrap();
+        tracker.close_issue(1, CloseReason::Completed).unwrap();
+
+        let open = tracker.list_open_issues(&IssueFilter::default()).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].title, "B");
+    }
+
+    #[test]
+    fn local_tracker_update_body() {
+        let tracker = temp_tracker();
+        tracker
+            .create_issue(IssueDraft { title: "T".to_string(), ..Default::default() })
+            .unwrap();
+        tracker.update_issue_body(1, "updated body").unwrap();
+        let issue = tracker.get_issue(1).unwrap();
+        assert_eq!(issue.body, "updated body");
+    }
+
+    #[test]
+    fn local_tracker_add_comment_appends_to_body() {
+        let tracker = temp_tracker();
+        tracker
+            .create_issue(IssueDraft { title: "T".to_string(), body: "original".to_string(), ..Default::default() })
+            .unwrap();
+        tracker.add_comment(1, "a comment").unwrap();
+        let issue = tracker.get_issue(1).unwrap();
+        assert!(issue.body.contains("a comment"));
+    }
+
+    #[test]
+    fn local_tracker_close_and_reopen() {
+        let tracker = temp_tracker();
+        tracker
+            .create_issue(IssueDraft { title: "T".to_string(), ..Default::default() })
+            .unwrap();
+        tracker.close_issue(1, CloseReason::Completed).unwrap();
+        assert_eq!(tracker.get_issue(1).unwrap().state, IssueState::Closed);
+        tracker.reopen_issue(1).unwrap();
+        assert_eq!(tracker.get_issue(1).unwrap().state, IssueState::Open);
+    }
+
+    #[test]
+    fn local_tracker_link_pr_adds_comment() {
+        let tracker = temp_tracker();
+        tracker
+            .create_issue(IssueDraft { title: "T".to_string(), ..Default::default() })
+            .unwrap();
+        tracker.link_issue_to_pr(1, 42).unwrap();
+        let issue = tracker.get_issue(1).unwrap();
+        assert!(issue.body.contains("42"));
+    }
+
+    #[test]
+    fn local_tracker_empty_title_rejected() {
+        let tracker = temp_tracker();
+        let err = tracker
+            .create_issue(IssueDraft { title: "".to_string(), ..Default::default() })
+            .unwrap_err();
+        assert!(matches!(err, IssueTrackerError::Validation(_)));
+    }
+
+    #[test]
+    fn local_tracker_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("promise.md");
+        let tracker = LocalPromiseTracker::new(&path);
+        tracker
+            .create_issue(IssueDraft { title: "dir test".to_string(), ..Default::default() })
+            .unwrap();
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn local_tracker_search_filter() {
+        let tracker = temp_tracker();
+        tracker
+            .create_issue(IssueDraft { title: "fix login bug".to_string(), ..Default::default() })
+            .unwrap();
+        tracker
+            .create_issue(IssueDraft { title: "update docs".to_string(), ..Default::default() })
+            .unwrap();
+        let results = tracker
+            .list_open_issues(&IssueFilter { search: Some("login".to_string()), ..Default::default() })
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "fix login bug");
     }
 }

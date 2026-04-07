@@ -1,4 +1,5 @@
-use crate::config::LoopConfig;
+use crate::config::{IssueTrackingMode, LoopConfig};
+use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
 use crate::provider::{build_adapter, ProviderAdapter};
@@ -64,6 +65,35 @@ impl SessionSummary {
     }
 }
 
+/// Construct the appropriate `IssueTracker` from the resolved config.
+fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
+    match config.issue_tracking.mode {
+        IssueTrackingMode::Github => {
+            let owner = config
+                .issue_tracking
+                .repo_owner
+                .clone()
+                .or_else(|| config.orchestration.repo_owner.clone())
+                .unwrap_or_default();
+            let repo = config
+                .issue_tracking
+                .repo_name
+                .clone()
+                .or_else(|| config.orchestration.repo_name.clone())
+                .unwrap_or_default();
+            Box::new(GitHubIssueTracker::new(owner, repo))
+        }
+        IssueTrackingMode::Local => {
+            let path = config
+                .issue_tracking
+                .local_promise_path
+                .clone()
+                .unwrap_or_else(|| std::path::PathBuf::from(".code-looper/promise.md"));
+            Box::new(LocalPromiseTracker::new(path))
+        }
+    }
+}
+
 /// Drives the main iteration loop.
 pub struct LoopEngine {
     config: LoopConfig,
@@ -72,6 +102,10 @@ pub struct LoopEngine {
     policy_engine: Option<PolicyEngine>,
     /// Policy guard used to augment prompts with MCP-use requirements.
     guard: PolicyGuard,
+    /// Issue tracker for this run.  Not yet actively called by the engine;
+    /// active use (start/milestone/end comments) lands in a follow-up issue.
+    #[allow(dead_code)]
+    tracker: Box<dyn IssueTracker>,
     /// Shared flag set to `true` when SIGINT is received.
     interrupted: Arc<AtomicBool>,
 }
@@ -86,8 +120,9 @@ impl LoopEngine {
         } else {
             None
         };
+        let tracker = build_tracker(&config);
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine, guard, interrupted }
+        Self { config, adapter, policy_engine, guard, tracker, interrupted }
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
@@ -95,7 +130,8 @@ impl LoopEngine {
     pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
-        Self { config, adapter, policy_engine: None, guard, interrupted }
+        let tracker = build_tracker(&config);
+        Self { config, adapter, policy_engine: None, guard, tracker, interrupted }
     }
 
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
@@ -107,7 +143,8 @@ impl LoopEngine {
     ) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
-        Self { config, adapter, policy_engine: Some(policy_engine), guard, interrupted }
+        let tracker = build_tracker(&config);
+        Self { config, adapter, policy_engine: Some(policy_engine), guard, tracker, interrupted }
     }
 
     /// Install a Ctrl+C handler that sets the interrupted flag.
@@ -160,6 +197,38 @@ impl LoopEngine {
 
         let mut summary = SessionSummary::default();
         let session_start = Instant::now();
+
+        // Log issue tracking mode; warn loudly when running in local/dev mode.
+        match self.config.issue_tracking.mode {
+            IssueTrackingMode::Local => {
+                warn!(
+                    issue_tracking_mode = "local",
+                    "Issue tracking is in LOCAL mode — run state is not durably tracked. \
+                     Set issue_tracking.mode=\"github\" for production use."
+                );
+            }
+            IssueTrackingMode::Github => {
+                let owner = self
+                    .config
+                    .issue_tracking
+                    .repo_owner
+                    .as_deref()
+                    .or(self.config.orchestration.repo_owner.as_deref())
+                    .unwrap_or("(unknown)");
+                let repo = self
+                    .config
+                    .issue_tracking
+                    .repo_name
+                    .as_deref()
+                    .or(self.config.orchestration.repo_name.as_deref())
+                    .unwrap_or("(unknown)");
+                info!(
+                    issue_tracking_mode = "github",
+                    repo = %format!("{owner}/{repo}"),
+                    "Issue tracking active"
+                );
+            }
+        }
 
         info!(
             provider = self.adapter.name(),

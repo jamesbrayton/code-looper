@@ -2,6 +2,63 @@ use crate::error::LooperError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// ── Issue tracking ────────────────────────────────────────────────────────────
+
+/// Issue tracking backend mode.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum IssueTrackingMode {
+    /// GitHub Issues via the `gh` CLI (default for production use).
+    Github,
+    /// Local markdown file — dev/debug only.
+    Local,
+}
+
+impl std::fmt::Display for IssueTrackingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IssueTrackingMode::Github => write!(f, "github"),
+            IssueTrackingMode::Local => write!(f, "local"),
+        }
+    }
+}
+
+/// Issue tracking configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueTrackingConfig {
+    /// Backend mode (`github` or `local`).  Defaults to `local` so that
+    /// existing configs work without changes — but production use should
+    /// always set `github`.
+    #[serde(default = "default_issue_tracking_mode")]
+    pub mode: IssueTrackingMode,
+    /// GitHub repository owner (required when `mode = "github"`, unless
+    /// inherited from `[orchestration].repo_owner`).
+    pub repo_owner: Option<String>,
+    /// GitHub repository name (required when `mode = "github"`, unless
+    /// inherited from `[orchestration].repo_name`).
+    pub repo_name: Option<String>,
+    /// Path to the local promise markdown file (when `mode = "local"`).
+    /// Defaults to `.code-looper/promise.md`.
+    pub local_promise_path: Option<PathBuf>,
+}
+
+fn default_issue_tracking_mode() -> IssueTrackingMode {
+    IssueTrackingMode::Local
+}
+
+impl Default for IssueTrackingConfig {
+    fn default() -> Self {
+        Self {
+            mode: IssueTrackingMode::Local,
+            repo_owner: None,
+            repo_name: None,
+            local_promise_path: None,
+        }
+    }
+}
+
+// ── Orchestration ─────────────────────────────────────────────────────────────
+
 /// Orchestration policy engine configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrchestrationConfig {
@@ -75,6 +132,9 @@ pub struct LoopConfig {
     /// The command is run via the system shell (`sh -c` on Unix).
     #[serde(default)]
     pub on_complete: Option<String>,
+    /// Issue tracking configuration.
+    #[serde(default)]
+    pub issue_tracking: IssueTrackingConfig,
 }
 
 fn default_retry_backoff_ms() -> u64 {
@@ -97,6 +157,7 @@ impl Default for LoopConfig {
             max_retries: 0,
             retry_backoff_ms: default_retry_backoff_ms(),
             on_complete: None,
+            issue_tracking: IssueTrackingConfig::default(),
         }
     }
 }
@@ -137,6 +198,33 @@ impl LoopConfig {
             if cmd.trim().is_empty() {
                 return Err(LooperError::InvalidArgument(
                     "--on-complete must not be an empty string".to_string(),
+                ));
+            }
+        }
+        // When github mode is active, owner and repo must be resolvable.
+        if self.issue_tracking.mode == IssueTrackingMode::Github {
+            let owner = self
+                .issue_tracking
+                .repo_owner
+                .as_deref()
+                .or(self.orchestration.repo_owner.as_deref());
+            let repo = self
+                .issue_tracking
+                .repo_name
+                .as_deref()
+                .or(self.orchestration.repo_name.as_deref());
+            if owner.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "issue_tracking.mode=\"github\" requires repo_owner \
+                     (set issue_tracking.repo_owner or orchestration.repo_owner)"
+                        .to_string(),
+                ));
+            }
+            if repo.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "issue_tracking.mode=\"github\" requires repo_name \
+                     (set issue_tracking.repo_name or orchestration.repo_name)"
+                        .to_string(),
                 ));
             }
         }
@@ -351,5 +439,142 @@ repo_name = "my-repo"
         assert!(config.orchestration.enabled);
         assert_eq!(config.orchestration.repo_owner.as_deref(), Some("acme"));
         assert_eq!(config.orchestration.repo_name.as_deref(), Some("my-repo"));
+    }
+
+    // ── Issue tracking config tests ───────────────────────────────────────────
+
+    #[test]
+    fn issue_tracking_defaults_to_local() {
+        let config = LoopConfig::default();
+        assert_eq!(config.issue_tracking.mode, IssueTrackingMode::Local);
+        assert!(config.issue_tracking.repo_owner.is_none());
+        assert!(config.issue_tracking.repo_name.is_none());
+        assert!(config.issue_tracking.local_promise_path.is_none());
+    }
+
+    #[test]
+    fn github_mode_without_credentials_is_invalid() {
+        let config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: None,
+                repo_name: None,
+                local_promise_path: None,
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("repo_owner"));
+    }
+
+    #[test]
+    fn github_mode_without_repo_name_is_invalid() {
+        let config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: None,
+                local_promise_path: None,
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("repo_name"));
+    }
+
+    #[test]
+    fn github_mode_with_credentials_is_valid() {
+        let config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                local_promise_path: None,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn github_mode_inherits_orchestration_credentials() {
+        let config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: None,
+                repo_name: None,
+                local_promise_path: None,
+            },
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                repo_owner: Some("org".to_string()),
+                repo_name: Some("project".to_string()),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn local_mode_is_always_valid() {
+        let config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Local,
+                repo_owner: None,
+                repo_name: None,
+                local_promise_path: None,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_toml_with_issue_tracking_github() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[issue_tracking]
+mode = "github"
+repo_owner = "acme"
+repo_name = "my-repo"
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.issue_tracking.mode, IssueTrackingMode::Github);
+        assert_eq!(config.issue_tracking.repo_owner.as_deref(), Some("acme"));
+        assert_eq!(config.issue_tracking.repo_name.as_deref(), Some("my-repo"));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn parse_toml_with_issue_tracking_local() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+provider = "claude"
+iterations = 1
+log_level = "info"
+
+[issue_tracking]
+mode = "local"
+local_promise_path = ".code-looper/dev.md"
+"#
+        )
+        .unwrap();
+        let config = LoopConfig::from_toml_file(file.path()).unwrap();
+        assert_eq!(config.issue_tracking.mode, IssueTrackingMode::Local);
+        assert_eq!(
+            config.issue_tracking.local_promise_path,
+            Some(PathBuf::from(".code-looper/dev.md"))
+        );
+        assert!(config.validate().is_ok());
     }
 }

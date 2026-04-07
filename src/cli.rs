@@ -1,4 +1,4 @@
-use crate::config::{LoopConfig, Provider};
+use crate::config::{IssueTrackingMode, LoopConfig, Provider};
 use clap::Parser;
 use std::path::PathBuf;
 
@@ -75,6 +75,24 @@ pub struct Cli {
     /// Shell command to run once after the loop finishes (run via `sh -c`).
     #[arg(long)]
     pub on_complete: Option<String>,
+
+    /// Issue tracking mode: `github` (production) or `local` (dev/debug).
+    #[arg(long)]
+    pub issue_tracking_mode: Option<IssueTrackingMode>,
+
+    /// GitHub repository owner for issue tracking (when --issue-tracking-mode=github).
+    /// Falls back to --repo-owner if not set.
+    #[arg(long)]
+    pub issue_tracking_owner: Option<String>,
+
+    /// GitHub repository name for issue tracking (when --issue-tracking-mode=github).
+    /// Falls back to --repo-name if not set.
+    #[arg(long)]
+    pub issue_tracking_repo: Option<String>,
+
+    /// Path to the local promise markdown file (when --issue-tracking-mode=local).
+    #[arg(long)]
+    pub local_promise_path: Option<PathBuf>,
 }
 
 impl Cli {
@@ -130,6 +148,18 @@ impl Cli {
         if let Some(cmd) = self.on_complete {
             base.on_complete = Some(cmd);
         }
+        if let Some(mode) = self.issue_tracking_mode {
+            base.issue_tracking.mode = mode;
+        }
+        if let Some(owner) = self.issue_tracking_owner {
+            base.issue_tracking.repo_owner = Some(owner);
+        }
+        if let Some(repo) = self.issue_tracking_repo {
+            base.issue_tracking.repo_name = Some(repo);
+        }
+        if let Some(path) = self.local_promise_path {
+            base.issue_tracking.local_promise_path = Some(path);
+        }
         base
     }
 }
@@ -161,6 +191,10 @@ mod tests {
             max_retries: None,
             retry_backoff_ms: None,
             on_complete: None,
+            issue_tracking_mode: None,
+            issue_tracking_owner: None,
+            issue_tracking_repo: None,
+            local_promise_path: None,
         }
     }
 
@@ -287,5 +321,40 @@ mod tests {
         assert_eq!(config.max_retries, 0);
         assert_eq!(config.retry_backoff_ms, 500);
         assert!(config.on_complete.is_none());
+    }
+
+    #[test]
+    fn cli_issue_tracking_mode_propagates() {
+        let cli = Cli {
+            issue_tracking_mode: Some(IssueTrackingMode::Github),
+            issue_tracking_owner: Some("acme".to_string()),
+            issue_tracking_repo: Some("proj".to_string()),
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(config.issue_tracking.mode, IssueTrackingMode::Github);
+        assert_eq!(config.issue_tracking.repo_owner.as_deref(), Some("acme"));
+        assert_eq!(config.issue_tracking.repo_name.as_deref(), Some("proj"));
+    }
+
+    #[test]
+    fn cli_local_promise_path_propagates() {
+        let cli = Cli {
+            local_promise_path: Some("/tmp/promise.md".into()),
+            ..blank_cli()
+        };
+        let config = cli.apply_overrides(default_config());
+        assert_eq!(
+            config.issue_tracking.local_promise_path,
+            Some(std::path::PathBuf::from("/tmp/promise.md"))
+        );
+    }
+
+    #[test]
+    fn cli_defaults_leave_issue_tracking_at_local() {
+        let config = blank_cli().apply_overrides(default_config());
+        assert_eq!(config.issue_tracking.mode, IssueTrackingMode::Local);
+        assert!(config.issue_tracking.repo_owner.is_none());
+        assert!(config.issue_tracking.repo_name.is_none());
     }
 }
