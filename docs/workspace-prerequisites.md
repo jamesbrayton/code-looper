@@ -62,7 +62,42 @@ cargo test
 
 ---
 
-### Check: `mcp-config`
+### Check: `instruction-section`
+
+**What it looks for**
+
+Once an instruction file is found, the checker verifies that it contains the Code Looper section begin marker:
+
+```
+<!-- code-looper begin -->
+```
+
+This marker delimits the block that `code-looper bootstrap` manages. Its presence confirms the file has been configured for Code Looper use.
+
+**Failure message**
+
+```
+[instruction-section] '<file>' does not contain the Code Looper section (expected marker: `<!-- code-looper begin -->`).
+  → Remediation: Run `code-looper bootstrap` to inject the required Code Looper section into the instruction file.
+```
+
+Note: this check is skipped when `instruction-file` also fails — it only runs when an instruction file was found.
+
+**Remediation**
+
+Run `code-looper bootstrap` to append the Code Looper section automatically, or add the markers manually:
+
+```markdown
+<!-- code-looper begin -->
+## Code Looper
+
+... Code Looper configuration here ...
+<!-- code-looper end -->
+```
+
+---
+
+### Check: `mcp-github-server`
 
 **What it looks for**
 
@@ -75,13 +110,13 @@ Code Looper enforces MCP-only GitHub mutation by default. If the GitHub MCP serv
 **Failure messages**
 
 ```
-[mcp-config] No .mcp.json found in '<dir>'
-  → Remediation: Create .mcp.json at the repository root with a "github" server entry. See docs/workspace-prerequisites.md for a minimal template.
+[mcp-github-server] No .mcp.json found in '<dir>'
+  → Remediation: Create a .mcp.json that includes a "github" MCP server entry. See https://docs.anthropic.com/en/docs/claude-code/mcp for details.
 ```
 
 ```
-[mcp-config] .mcp.json exists but does not contain a "github" key
-  → Remediation: Add a "github" entry to .mcp.json. See docs/workspace-prerequisites.md for a minimal template.
+[mcp-github-server] <file> does not contain a "github" MCP server entry
+  → Remediation: Add a GitHub MCP server block under the "mcpServers" key in .mcp.json so that orchestration flows can use GitHub tools.
 ```
 
 **Remediation**
