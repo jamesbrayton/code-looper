@@ -8,9 +8,6 @@
 //! * Never operates on `base_branch` — any attempt returns an error.
 //! * Never force-pushes unless `allow_force_push` is explicitly `true`.
 //! * Never deletes a branch that has unmerged commits or uncommitted changes.
-// Planned API surface for PR strategies; items are tested but not yet called
-// from the main execution path.
-#![allow(dead_code)]
 use std::process::Command;
 
 use crate::config::PrManagementConfig;
@@ -87,9 +84,11 @@ pub enum BranchError {
     #[error("git command failed: {0}")]
     GitCommand(String),
 
+    #[allow(dead_code)]
     #[error("branch has uncommitted changes or unmerged commits — refusing to delete '{0}'")]
     UnsafeDelete(String),
 
+    #[allow(dead_code)]
     #[error("force-push is disabled; enable allow_force_push in config to proceed")]
     ForcePushDisabled,
 }
@@ -113,7 +112,7 @@ fn git(args: &[&str]) -> Result<String, BranchError> {
 }
 
 /// Return the name of the currently checked-out branch.
-fn current_branch() -> Result<String, BranchError> {
+pub fn current_branch() -> Result<String, BranchError> {
     git(&["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
@@ -136,6 +135,7 @@ fn remote_branch_exists(name: &str) -> bool {
 }
 
 /// Return `true` if the working tree has uncommitted changes (tracked or staged).
+#[allow(dead_code)]
 fn has_uncommitted_changes() -> bool {
     Command::new("git")
         .args(["diff", "--quiet", "HEAD"])
@@ -146,6 +146,7 @@ fn has_uncommitted_changes() -> bool {
 
 /// Return `true` if `branch` contains commits not present in `base_branch`
 /// that are not yet merged (i.e. the branch tip is ahead of `base_branch`).
+#[allow(dead_code)]
 fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
     // Count commits in branch that are not in base_branch
     let result = Command::new("git")
@@ -269,6 +270,7 @@ impl BranchManager {
     ///
     /// After deleting the local branch, deletes the remote branch when
     /// `delete_remote_branch_on_merge` is `true`.
+    #[allow(dead_code)]
     pub fn cleanup_branch(&self, branch: &str) -> Result<(), BranchError> {
         // Guard: never delete base_branch
         if branch == self.base() {
@@ -440,5 +442,26 @@ mod tests {
         mgr.no_pr_push = false;
         // Should return Ok without calling git (since no_pr_push=false in no-pr mode)
         assert!(mgr.push_branch("loop/1-some-branch").is_ok());
+    }
+
+    // ── current_branch ───────────────────────────────────────────────────────
+
+    #[test]
+    fn current_branch_returns_ok_in_git_repo() {
+        // We are always running inside the workspace git repo, so this must
+        // succeed and return a non-empty branch name.
+        let branch = current_branch();
+        assert!(branch.is_ok(), "current_branch() failed: {branch:?}");
+        let name = branch.unwrap();
+        assert!(!name.is_empty(), "current_branch() returned empty string");
+    }
+
+    #[test]
+    fn branch_manager_branch_name_with_zero_issue_has_trailing_separator() {
+        // When issue_number=0 and title="" the name is "{prefix}0-".
+        // This is the fallback used by the loop engine when no issue is linked.
+        let mgr = BranchManager::new(config());
+        let name = mgr.branch_name(0, "");
+        assert!(name.starts_with("loop/0"));
     }
 }

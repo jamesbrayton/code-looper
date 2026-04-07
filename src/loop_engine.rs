@@ -1,3 +1,4 @@
+use crate::branch::BranchManager;
 use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
@@ -130,6 +131,9 @@ pub struct LoopEngine {
     /// PR manager for single-PR mode: scans iteration output for shippable
     /// signals and opens/updates PRs accordingly.
     pr_manager: Option<PrManager<GhPrLifecycle>>,
+    /// Branch manager for single-PR mode: ensures the feature branch exists
+    /// before iterations run and pushes commits when a shippable signal fires.
+    branch_manager: Option<BranchManager>,
     /// Shared flag set to `true` when SIGINT is received.
     interrupted: Arc<AtomicBool>,
 }
@@ -155,8 +159,13 @@ impl LoopEngine {
         } else {
             None
         };
+        let branch_manager = if config.pr_management.mode == PrMode::SinglePr {
+            Some(BranchManager::new(config.pr_management.clone()))
+        } else {
+            None
+        };
         let interrupted = Arc::new(AtomicBool::new(false));
-        Self { config, adapter, policy_engine, guard, tracker, pr_strategy, pr_manager, interrupted }
+        Self { config, adapter, policy_engine, guard, tracker, pr_strategy, pr_manager, branch_manager, interrupted }
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
@@ -174,6 +183,7 @@ impl LoopEngine {
             tracker,
             pr_strategy,
             pr_manager: None,
+            branch_manager: None,
             interrupted,
         }
     }
@@ -196,6 +206,7 @@ impl LoopEngine {
             tracker,
             pr_strategy,
             pr_manager: None,
+            branch_manager: None,
             interrupted,
         }
     }
@@ -219,6 +230,7 @@ impl LoopEngine {
             tracker,
             pr_strategy,
             pr_manager: None,
+            branch_manager: None,
             interrupted,
         }
     }
@@ -375,6 +387,34 @@ impl LoopEngine {
                 provider = self.adapter.name(),
             ));
         }
+
+        // Single-PR: ensure the feature branch exists before iterations start.
+        // The derived branch name is kept for use in the shippable-signal handler.
+        let single_pr_branch: String = if let Some(ref bm) = self.branch_manager {
+            let issue_number = self
+                .config
+                .issue_tracking
+                .comment_issue_number
+                .map(|n| n as u64)
+                .unwrap_or(0);
+            match bm.ensure_branch(issue_number, "") {
+                Ok(branch) => {
+                    info!(branch = %branch, "single-pr: checked out feature branch");
+                    branch
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "single-pr: could not ensure feature branch; will use current branch"
+                    );
+                    // Fall back to whatever branch the working directory is on.
+                    crate::branch::current_branch()
+                        .unwrap_or_else(|_| bm.branch_name(issue_number, ""))
+                }
+            }
+        } else {
+            String::new()
+        };
 
         // Tracks the body of the most recently posted failure comment for deduplication.
         let mut last_failure_comment: Option<String> = None;
@@ -627,18 +667,37 @@ impl LoopEngine {
             // shippable signal and open/update the PR if detected.
             if final_outcome.is_success() {
                 if let Some(ref manager) = self.pr_manager {
-                    let branch = self
-                        .config
-                        .pr_management
-                        .branch_prefix
-                        .trim_end_matches('/')
-                        .to_string();
+                    // Use the branch name established at loop startup (from
+                    // BranchManager::ensure_branch).  Fall back to current_branch()
+                    // so we never pass the bare prefix string to `gh pr create`.
+                    let branch = if !single_pr_branch.is_empty() {
+                        single_pr_branch.clone()
+                    } else {
+                        crate::branch::current_branch().unwrap_or_else(|_| {
+                            self.config
+                                .pr_management
+                                .branch_prefix
+                                .trim_end_matches('/')
+                                .to_string()
+                        })
+                    };
                     let issue_number = self
                         .config
                         .issue_tracking
                         .comment_issue_number
                         .map(|n| n as u64)
                         .unwrap_or(0);
+                    // Push the feature branch to origin so `gh pr create` can find it.
+                    if let Some(ref bm) = self.branch_manager {
+                        if let Err(e) = bm.push_branch(&branch) {
+                            warn!(
+                                iteration = i,
+                                branch = %branch,
+                                error = %e,
+                                "single-pr: push_branch failed; PR creation may fail"
+                            );
+                        }
+                    }
                     match manager.handle_milestone(
                         &branch,
                         issue_number,
@@ -1586,6 +1645,71 @@ mod tests {
         assert!(
             comment_bodies.iter().any(|b| b.contains("Blocker")),
             "expected a blocker comment; got: {comment_bodies:?}"
+        );
+    }
+
+    // ── Single-PR branch-name wiring ─────────────────────────────────────────
+
+    /// Verify that in single-PR mode, `branch_manager` is constructed and the
+    /// derived branch name is not the bare trimmed prefix ("loop") but a
+    /// well-formed feature-branch name.
+    #[test]
+    fn single_pr_branch_name_is_not_bare_prefix() {
+        use crate::config::{PrManagementConfig, PrMode};
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::SinglePr,
+                branch_prefix: "loop/".to_string(),
+                ..PrManagementConfig::default()
+            },
+            ..Default::default()
+        };
+        // Build a production engine; we check the branch_manager field directly.
+        // We can't run the loop (it would spawn 'claude'), so we just verify
+        // construction succeeds and branch_manager is present.
+        let guard = crate::policy_guard::PolicyGuard::new(
+            crate::policy_guard::UnsafeOverrides::default(),
+        );
+        let engine = LoopEngine::new(config, guard);
+        assert!(
+            engine.branch_manager.is_some(),
+            "branch_manager must be Some in single-PR mode"
+        );
+        // The derived branch name for issue 0 with empty title starts with "loop/0".
+        let bm = engine.branch_manager.as_ref().unwrap();
+        let name = bm.branch_name(0, "");
+        assert!(
+            name.starts_with("loop/0"),
+            "branch name '{name}' must start with 'loop/0', not the bare prefix"
+        );
+        assert_ne!(name, "loop", "branch name must not be the bare trimmed prefix");
+    }
+
+    /// Verify that in no-pr mode, `branch_manager` is None (we don't manage
+    /// branches when PR creation is disabled).
+    #[test]
+    fn no_pr_mode_has_no_branch_manager() {
+        use crate::config::{PrManagementConfig, PrMode};
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::NoPr,
+                ..PrManagementConfig::default()
+            },
+            ..Default::default()
+        };
+        let guard = crate::policy_guard::PolicyGuard::new(
+            crate::policy_guard::UnsafeOverrides::default(),
+        );
+        let engine = LoopEngine::new(config, guard);
+        assert!(
+            engine.branch_manager.is_none(),
+            "branch_manager must be None in no-pr mode"
         );
     }
 }
