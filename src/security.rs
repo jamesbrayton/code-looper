@@ -94,18 +94,25 @@ fn redact_auth_headers(s: String) -> String {
 
 fn redact_header_value(s: &str, scheme: &str) -> String {
     // Pattern: "Authorization:" (optional whitespace) scheme (whitespace) <value>
-    // We scan case-insensitively by lower-casing a working copy for position
-    // finding, then apply redaction to the original.
-    let needle = "authorization:".to_string();
-    let lower = s.to_lowercase();
-    let scheme_lower = scheme.to_lowercase();
+    //
+    // Matching is case-insensitive for the header name and scheme keyword, but
+    // only for ASCII characters.  We use `to_ascii_lowercase()` (not
+    // `to_lowercase()`) because it preserves byte length — general Unicode case
+    // folding does not (e.g. `ß` → `ss`, Turkish dotted-I), and we index back
+    // into the original byte-for-byte.  All character-class checks below use
+    // `is_ascii_whitespace()` on *bytes*, which is safe because ASCII whitespace
+    // bytes cannot appear inside a multi-byte UTF-8 sequence, so byte positions
+    // are always on character boundaries.
+    let needle = "authorization:";
+    let lower = s.to_ascii_lowercase();
+    let scheme_lower = scheme.to_ascii_lowercase();
 
     let mut result = String::with_capacity(s.len());
     let mut remaining_lower = lower.as_str();
     let mut remaining_orig = s;
 
     loop {
-        let Some(pos) = remaining_lower.find(needle.as_str()) else {
+        let Some(pos) = remaining_lower.find(needle) else {
             result.push_str(remaining_orig);
             break;
         };
@@ -117,11 +124,8 @@ fn redact_header_value(s: &str, scheme: &str) -> String {
         let after_colon_lower = &remaining_lower[header_end..];
         let after_colon_orig = &remaining_orig[header_end..];
 
-        // Skip optional whitespace.
-        let ws_len = after_colon_lower
-            .chars()
-            .take_while(|c| c.is_ascii_whitespace() && *c != '\n' && *c != '\r')
-            .count();
+        // Skip optional inline whitespace (spaces/tabs, not newlines).
+        let ws_len = count_inline_ws_bytes(after_colon_lower);
 
         let scheme_start = ws_len;
         let scheme_end = scheme_start + scheme_lower.len();
@@ -136,20 +140,22 @@ fn redact_header_value(s: &str, scheme: &str) -> String {
             let after_scheme_orig = &after_colon_orig[scheme_end..];
 
             // Skip whitespace between scheme and value.
-            let inner_ws = after_scheme_lower
-                .chars()
-                .take_while(|c| c.is_ascii_whitespace() && *c != '\n' && *c != '\r')
-                .count();
+            let inner_ws = count_inline_ws_bytes(after_scheme_lower);
 
             if inner_ws > 0 {
                 result.push_str(&after_scheme_orig[..inner_ws]);
             }
 
-            let value_str = &after_scheme_lower[inner_ws..];
-            let value_len = value_str
-                .chars()
-                .take_while(|c| !c.is_ascii_whitespace())
-                .count();
+            // Byte length of the value, measured up to the first whitespace
+            // byte.  `is_ascii_whitespace()` on a byte is safe here: ASCII
+            // whitespace bytes (< 0x80) cannot appear inside a UTF-8 multi-byte
+            // sequence, so the count always lands on a char boundary even if
+            // the value contains multi-byte UTF-8.
+            let value_bytes = &after_scheme_orig.as_bytes()[inner_ws..];
+            let value_len = value_bytes
+                .iter()
+                .position(u8::is_ascii_whitespace)
+                .unwrap_or(value_bytes.len());
 
             if value_len > 0 {
                 result.push_str(REDACTED);
@@ -168,6 +174,19 @@ fn redact_header_value(s: &str, scheme: &str) -> String {
     }
 
     result
+}
+
+/// Count the number of leading inline-whitespace bytes (space / tab) in `s`.
+///
+/// Stops at the first newline, carriage return, or non-whitespace byte.  Returns
+/// a byte count that is guaranteed to be on a UTF-8 character boundary because
+/// inline-whitespace bytes are all in the ASCII range and cannot appear inside
+/// a multi-byte UTF-8 sequence.
+fn count_inline_ws_bytes(s: &str) -> usize {
+    s.as_bytes()
+        .iter()
+        .take_while(|&&b| b.is_ascii_whitespace() && b != b'\n' && b != b'\r')
+        .count()
 }
 
 // ── Environment variable assignments ─────────────────────────────────────────
@@ -189,11 +208,16 @@ fn redact_env_var_value(s: String, var_name: &str) -> String {
     while let Some(pos) = remaining.find(needle.as_str()) {
         result.push_str(&remaining[..pos + needle.len()]);
         let after_eq = &remaining[pos + needle.len()..];
-        // Value ends at whitespace or end of string.
-        let value_len = after_eq
-            .chars()
-            .take_while(|c| !c.is_ascii_whitespace())
-            .count();
+        // Value ends at the first whitespace byte or end-of-string.  We measure
+        // the length in *bytes* (not chars) so the resulting split is a valid
+        // UTF-8 boundary even when the value contains multi-byte characters —
+        // ASCII whitespace bytes cannot appear inside a multi-byte UTF-8
+        // sequence, so the first such byte is always on a char boundary.
+        let after_bytes = after_eq.as_bytes();
+        let value_len = after_bytes
+            .iter()
+            .position(u8::is_ascii_whitespace)
+            .unwrap_or(after_bytes.len());
         if value_len > 0 {
             result.push_str(REDACTED);
             remaining = &after_eq[value_len..];
@@ -370,5 +394,68 @@ mod tests {
     fn non_ascii_content_is_preserved() {
         let input = "result: OK — no token here";
         assert_eq!(redact_secrets(input), input);
+    }
+
+    // ── UTF-8 edge cases (regression: #60) ────────────────────────────────────
+    //
+    // These inputs used to panic because the old implementation counted
+    // characters and then used the char count as a byte index.  Any multi-byte
+    // character in (or right before) the value region would land mid-codepoint.
+
+    #[test]
+    fn bearer_header_with_multibyte_value_does_not_panic() {
+        // Value contains a multi-byte character (`é`, 2 bytes in UTF-8).
+        let input = "Authorization: Bearer tokén_with_multibyte";
+        let output = redact_secrets(input);
+        assert!(output.contains("Bearer [REDACTED]"), "{output}");
+        assert!(!output.contains("tokén"), "{output}");
+    }
+
+    #[test]
+    fn bearer_header_with_multibyte_before_value_does_not_panic() {
+        // Multi-byte character appears *before* the header, so all byte offsets
+        // within the scan are shifted relative to what a char count would say.
+        let input = "résumé\nAuthorization: Bearer abc123def";
+        let output = redact_secrets(input);
+        assert!(output.contains("Bearer [REDACTED]"), "{output}");
+        assert!(!output.contains("abc123def"), "{output}");
+        assert!(output.contains("résumé"), "{output}");
+    }
+
+    #[test]
+    fn env_var_with_multibyte_value_does_not_panic() {
+        let input = "GITHUB_TOKEN=tokén_value next";
+        let output = redact_secrets(input);
+        assert!(output.contains("GITHUB_TOKEN=[REDACTED]"), "{output}");
+        assert!(output.contains("next"), "{output}");
+        assert!(!output.contains("tokén_value"), "{output}");
+    }
+
+    #[test]
+    fn bearer_header_with_mixed_case_scheme() {
+        let input = "Authorization: BeArEr mytoken123";
+        let output = redact_secrets(input);
+        assert!(!output.contains("mytoken123"), "{output}");
+    }
+
+    #[test]
+    fn case_insensitive_header_scan_survives_german_sharp_s() {
+        // `ß` in `to_lowercase()` expands to `ss` (2 bytes → 2 bytes in this
+        // case, but the general-case-folding path is what broke the old
+        // implementation).  Use `to_ascii_lowercase()` internally, which
+        // leaves non-ASCII untouched and preserves byte length.
+        let input = "straße\nAuthorization: Bearer secret\nend";
+        let output = redact_secrets(input);
+        assert!(output.contains("Bearer [REDACTED]"), "{output}");
+        assert!(!output.contains("secret"), "{output}");
+    }
+
+    #[test]
+    fn empty_bearer_value_is_not_replaced() {
+        // "Bearer" with nothing after it — no value to redact, should pass
+        // through without inserting `[REDACTED]`.
+        let input = "Authorization: Bearer ";
+        let output = redact_secrets(input);
+        assert!(!output.contains("[REDACTED]"), "{output}");
     }
 }
