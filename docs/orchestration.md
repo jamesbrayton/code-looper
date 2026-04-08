@@ -199,8 +199,15 @@ branch and PR.
 
 ## MCP-only policy
 
-All GitHub mutations (PR create, PR comment, issue comment) flow through the
-`gh` CLI, which is the Code Looper–approved mutation path enforced by the
-policy guard layer.  Direct REST API calls without the CLI are not supported.
-The policy guard blocks disallowed paths at startup unless `--allow-direct-github`
-is explicitly set (not recommended).
+All GitHub **write** operations (PR create, PR comment, issue comment, label
+edits, etc.) must flow through the configured GitHub MCP server tools.  This
+is the Code Looper–approved mutation path: the policy guard layer prepends an
+`MCP_ONLY_PREAMBLE` to every provider prompt that explicitly forbids direct
+`gh` CLI write commands and raw GitHub REST API calls.
+
+Read-only GitHub context (open issues, PR metadata, etc.) is gathered via the
+GitHub MCP server by default.  The unsafe `--allow-direct-github` flag flips
+the **read** path to use the `gh` CLI directly (via `GhCliContextResolver`)
+*and* disables the MCP-only preamble — at which point write enforcement is no
+longer applied to provider prompts.  Use only when you know the workspace has
+no MCP server available and you accept the loss of write-path enforcement.
