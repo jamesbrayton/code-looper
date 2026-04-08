@@ -767,8 +767,31 @@ impl LoopEngine {
                         break;
                     }
                     Err(e) => {
-                        error!(iteration = i, provider = self.adapter.name(), error = %e, "Iteration error");
-                        final_outcome = IterationOutcome::Unknown;
+                        // Fatal, non-transient errors: a bad binary or an
+                        // invalid argument will recur on every iteration.
+                        // Treat them the same as `ProviderSpawn` — set a
+                        // termination reason, post a blocker comment if
+                        // possible, and abort the outer loop.  Without this,
+                        // the loop used to silently iterate `iterations` times
+                        // with each marked `Unknown` and no `termination_reason`
+                        // in the summary (see #63).
+                        let msg = e.to_string();
+                        error!(
+                            iteration = i,
+                            provider = self.adapter.name(),
+                            error = %e,
+                            "Iteration error (fatal)"
+                        );
+                        final_outcome = IterationOutcome::SpawnFailure {
+                            message: msg.clone(),
+                        };
+                        if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
+                            self.post_comment(&format!(
+                                "**Blocker** — iteration {i} aborted: fatal error. `{msg}`"
+                            ));
+                        }
+                        summary.termination_reason = Some(TerminationReason::ProviderError(msg));
+                        abort_loop = true;
                         break;
                     }
                 }
