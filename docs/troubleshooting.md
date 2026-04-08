@@ -36,7 +36,7 @@ which claude    # or: gh copilot --help  or: codex --version
 **Symptom**
 
 ```
-[mcp-config] No .mcp.json found in '<dir>'
+[mcp-github-server] No .mcp.json found in '<dir>'
   → Remediation: Create .mcp.json at the repository root ...
 ```
 
@@ -48,7 +48,7 @@ Or the loop starts but GitHub orchestration calls fail mid-run.
 
 **Remediation**
 
-See [Workspace Prerequisites — mcp-config](workspace-prerequisites.md#check-mcp-config) for the minimal `.mcp.json` template and `GITHUB_TOKEN` setup.
+See [Workspace Prerequisites — mcp-github-server](workspace-prerequisites.md#check-mcp-github-server) for the minimal `.mcp.json` template and `GITHUB_TOKEN` setup.
 
 ---
 
@@ -120,7 +120,7 @@ The provider process exits non-zero on every attempt within an iteration. Common
 
 - Increase `--max-retries` and/or `--retry-backoff-ms` for transient failures.
 - Use `--stop-on-failure` if persistent failures mean the remaining iterations have no value.
-- Check the run transcript in `.code-looper/runs/<run-id>/transcript.txt` for the agent's output and error messages.
+- Check the per-iteration transcripts in `.code-looper/runs/<run-id>/iteration-<n>.log` for the agent's output and error messages (one log per iteration).
 - Review `--prompt-inline` / `--prompt-file` for ambiguities the agent might be interpreting as errors.
 
 ---
