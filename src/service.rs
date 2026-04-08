@@ -92,7 +92,11 @@ impl ServiceState {
 /// Embedded service mode: accepts JSON-lines requests over a local TCP socket.
 ///
 /// Each connection is processed sequentially.  The service shuts down cleanly
-/// when a `shutdown` command is received or when the process receives SIGINT.
+/// only when a client sends a `{"cmd":"shutdown"}` request.  SIGINT/Ctrl-C
+/// terminates the process via the default signal handler — there is currently
+/// no installed `ctrlc` handler in service mode, so any in-flight client
+/// connection is dropped without a closing reply.  Prefer the `shutdown`
+/// command for orderly stops.
 ///
 /// # Protocol
 ///
@@ -134,7 +138,10 @@ impl ServiceMode {
         let listener = TcpListener::bind(&addr)?;
         info!(addr = %addr, "Code Looper service listening");
         println!("Code Looper service listening on {addr}");
-        println!("Send JSON-lines requests (one per line).  Ctrl-C to stop.");
+        println!(
+            "Send JSON-lines requests (one per line).  \
+             Send {{\"cmd\":\"shutdown\"}} for a clean stop; Ctrl-C terminates the process."
+        );
 
         let mut state = ServiceState::new();
 
