@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_three_failures_when_file_exists_without_section_and_no_mcp() {
+    fn reports_two_failures_when_file_exists_without_section_and_no_mcp() {
         let dir = setup_dir();
         // Instruction file exists but has no section; no .mcp.json
         write_file(&dir, "CLAUDE.md", "# instructions");
