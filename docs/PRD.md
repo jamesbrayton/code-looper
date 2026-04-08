@@ -10,7 +10,7 @@
   - At least 3 providers (Claude Code CLI, GitHub Copilot CLI, Codex CLI) are supported by stable adapters in v1.0.
   - New provider adapter scaffold can be implemented and validated in <= 1 developer day using documented extension interfaces.
   - Teams report >= 20% reduction in manual repetitive orchestration steps (self-reported survey and run-log evidence) within 60 days of adoption.
-  - 100% of GitHub mutations (issue create/update/comment, PR review/comment/merge, branch actions) are executed through MCP server interfaces, with direct git-host CLI mutation disabled by default.
+  - 100% of **agent-initiated** GitHub mutations (issue create/update/comment, PR review/comment/merge, branch actions) are executed through MCP server interfaces, enforced via a policy-guard preamble on every provider prompt. Engine-initiated bookkeeping calls (opening/merging PRs, posting lifecycle comments, merge-cleanup branch ops) are explicitly permitted to use the `gh` CLI directly and are audited through structured logs and the per-run manifest. See ADR-001 for the scoping rationale.
 
 ## 2. User Experience & Functionality
 

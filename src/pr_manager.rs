@@ -24,11 +24,16 @@
 /// `require_human_review` is `true` (the default) the engine never merges the
 /// PR itself.
 ///
-/// # MCP-only policy
+/// # MCP-only policy and engine `gh` usage
 ///
-/// All GitHub mutations (PR creation, PR comments) are performed through the
-/// `gh` CLI, which is the approved mutation path in the Code Looper policy
-/// guard layer.  Direct REST API calls without the CLI are not used.
+/// Per the revised ADR-001, the MCP-only GitHub mutation policy is scoped to
+/// **agent prompts** — the `PolicyGuard` preamble instructs providers to use
+/// MCP server tools for any GitHub writes.  The **engine** (this module and
+/// [`crate::issue_tracker`]) is explicitly permitted to shell out to the `gh`
+/// CLI for its own PR and issue bookkeeping: engine actions are already
+/// audited through the structured logs, per-run manifest, and session
+/// summary.  See `docs/ADRs/ADR-001-mcp-only-github-mutations.md` for the
+/// full rationale and the list of non-goals this decision implies.
 use std::process::Command;
 
 use serde::Deserialize;
