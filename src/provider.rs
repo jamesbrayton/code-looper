@@ -116,16 +116,30 @@ pub struct ClaudeAdapter {
     pub extra_args: Vec<String>,
 }
 
+/// Build the argument vector passed to the `claude` binary.
+///
+/// Order is fixed: `-p`, `--dangerously-skip-permissions`, then any
+/// caller-supplied `extra_args`, then the prompt.  Extracted as a free
+/// function so unit tests can verify arg construction without spawning the
+/// real `claude` binary.
+pub(crate) fn build_claude_args(prompt: &str, extra_args: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-p".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+    ];
+    args.extend(extra_args.iter().cloned());
+    args.push(prompt.to_string());
+    args
+}
+
 impl ProviderAdapter for ClaudeAdapter {
     fn name(&self) -> &str {
         "claude"
     }
 
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
-        let mut args: Vec<&str> = vec!["-p", "--dangerously-skip-permissions"];
-        let extra: Vec<&str> = self.extra_args.iter().map(String::as_str).collect();
-        args.extend_from_slice(&extra);
-        args.push(prompt);
+        let owned = build_claude_args(prompt, &self.extra_args);
+        let args: Vec<&str> = owned.iter().map(String::as_str).collect();
         run_provider_process(
             "claude",
             &args,
@@ -330,9 +344,14 @@ fn run_provider_process(
             std::thread::spawn(move || {
                 std::thread::sleep(Duration::from_secs(secs));
                 if let Ok(mut c) = child_clone.lock() {
-                    let _ = c.kill();
+                    // Only mark as timed-out when kill() succeeds.  If the child
+                    // already exited and was reaped, kill() returns an error and
+                    // we leave `fired` false, avoiding a false-positive timeout
+                    // report when the process completed naturally at the deadline.
+                    if c.kill().is_ok() {
+                        fired.store(true, Ordering::Relaxed);
+                    }
                 }
-                fired.store(true, Ordering::Relaxed);
             });
         }
 
@@ -567,32 +586,39 @@ pub mod tests {
 
     // ── extra_args threading ──────────────────────────────────────────────────
 
-    /// Verify that extra_args are included in the subprocess invocation by
-    /// using `echo` to print all args and checking the output contains them.
+    /// Verify that `build_claude_args` threads `extra_args` through in the
+    /// required order: `-p`, `--dangerously-skip-permissions`, *extras*,
+    /// *prompt*.  Exercises the real arg-building helper used by
+    /// `ClaudeAdapter::execute`, without depending on the `claude` binary.
     #[test]
-    #[cfg(unix)]
     fn claude_adapter_includes_extra_args_in_invocation() {
-        // Use `echo` to print args rather than spawning real `claude`.
-        // We construct the adapter and verify arg order by calling run_provider_process
-        // directly with the expected expanded arg list.
         let extra = vec!["--extra-flag".to_string(), "extra-value".to_string()];
-        let expected_args = [
-            "-p",
-            "--dangerously-skip-permissions",
-            "--extra-flag",
-            "extra-value",
-            "my-prompt",
-        ];
-        let result =
-            super::run_provider_process("echo", &expected_args, false, None, None).unwrap();
-        let stdout = result.stdout.trim().to_string();
-        // echo prints all args space-separated; verify the extra args appear in order
-        assert!(
-            stdout.contains("--extra-flag extra-value"),
-            "extra args not found in echo output: {stdout}"
+        let args = super::build_claude_args("my-prompt", &extra);
+        assert_eq!(
+            args,
+            vec![
+                "-p".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "--extra-flag".to_string(),
+                "extra-value".to_string(),
+                "my-prompt".to_string(),
+            ]
         );
-        assert!(stdout.contains("my-prompt"), "prompt missing: {stdout}");
-        drop(extra); // suppress unused warning
+    }
+
+    /// Empty `extra_args` collapses to the canonical Claude invocation:
+    /// `-p --dangerously-skip-permissions <prompt>`.
+    #[test]
+    fn claude_adapter_no_extra_args_uses_canonical_arg_order() {
+        let args = super::build_claude_args("hello", &[]);
+        assert_eq!(
+            args,
+            vec![
+                "-p".to_string(),
+                "--dangerously-skip-permissions".to_string(),
+                "hello".to_string(),
+            ]
+        );
     }
 
     #[test]
