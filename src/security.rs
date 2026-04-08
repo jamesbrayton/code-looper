@@ -458,4 +458,56 @@ mod tests {
         let output = redact_secrets(input);
         assert!(!output.contains("[REDACTED]"), "{output}");
     }
+
+    // ── Real-world edge cases (#70) ───────────────────────────────────────────
+
+    #[test]
+    fn bearer_header_with_tab_separator() {
+        // A tab between `Authorization:` and `Bearer`, and between scheme
+        // and value, is legal HTTP and must still trigger redaction.
+        let input = "Authorization:\tBearer\tmyapitoken789";
+        let output = redact_secrets(input);
+        assert!(!output.contains("myapitoken789"), "{output}");
+        assert!(output.contains("[REDACTED]"), "{output}");
+    }
+
+    #[test]
+    fn env_var_with_crlf_terminator_is_bounded_correctly() {
+        // Windows-written log files use CRLF; the redactor must stop the
+        // value at `\r` (or any whitespace byte) and not swallow the rest
+        // of the line.
+        let input = "GITHUB_TOKEN=ghp_somesecret_value\r\nnext-line";
+        let output = redact_secrets(input);
+        assert!(output.contains("GITHUB_TOKEN=[REDACTED]"), "{output}");
+        assert!(output.contains("next-line"), "{output}");
+        assert!(!output.contains("ghp_somesecret_value"), "{output}");
+    }
+
+    #[test]
+    fn token_immediately_preceded_by_alphanumeric_still_redacted() {
+        // The current prefix scanner matches `ghp_` wherever it appears, so
+        // `prefix-ghp_<40 chars>` should still redact.  Lock in the
+        // behaviour explicitly.
+        let input = format!("prefix-{PAT}");
+        let output = redact_secrets(&input);
+        assert!(output.contains("ghp_[REDACTED]"), "{output}");
+    }
+
+    #[test]
+    fn ansi_escape_wrapped_token_is_not_split_by_redaction() {
+        // ANSI color escapes often wrap log content.  The prefix scanner
+        // only stops at non-alphanumeric bytes, so an escape right after
+        // the prefix currently breaks redaction.  This test documents the
+        // limitation so a future fix has a clear before/after target.
+        //
+        // NOTE: the behaviour tested here is intentionally the *current*
+        // behaviour (redaction does NOT succeed across a raw `\x1b` byte).
+        // If you tighten the scanner later, flip the assertion.
+        let input = format!("\x1b[31m{PAT}\x1b[0m");
+        let output = redact_secrets(&input);
+        assert!(
+            output.contains("ghp_[REDACTED]"),
+            "expected redaction despite ANSI wrapping, got: {output}"
+        );
+    }
 }

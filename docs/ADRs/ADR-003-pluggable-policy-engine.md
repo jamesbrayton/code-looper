@@ -17,7 +17,7 @@ The loop engine needs to route work to the right workflow (PR review, issue exec
 Introduce a **pluggable policy rules model** (`src/config.rs` `PolicyRule` / `PolicyCondition` / `PolicyWorkflow`) where:
 
 1. Default rules are embedded in code (`default_policy_rules()`) and match the MVP behavior.
-2. Users can override or extend rules via the `[orchestration.policies]` section of `loop.toml`.
+2. Users can override or extend rules via the `[orchestration.policies]` section of `looper.toml`.
 3. The `PolicyEngine` evaluates rules in order, returning the first matching `WorkflowBranch`.
 4. Context resolution is abstracted behind `ContextResolver` trait so tests can inject `StubContextResolver` without calling `gh`.
 

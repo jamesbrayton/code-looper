@@ -121,7 +121,32 @@ Code Looper enforces MCP-only GitHub mutation by default. If the GitHub MCP serv
 
 **Remediation**
 
-Create `.mcp.json` at the repository root with at minimum a `github` entry:
+Create `.mcp.json` at the repository root with at minimum a `github` entry.
+Either of the two common stubs below works — pick whichever matches your
+local tooling.  Note that `code-looper bootstrap` writes the Docker-based
+variant by default (see `MCP_STUB` in `src/bootstrap.rs`); the `npx` form
+is shown here for reference because it is the more portable option when
+Docker is not available.
+
+```json
+{
+  "mcpServers": {
+    "github": {
+      "command": "docker",
+      "args": [
+        "run", "-i", "--rm",
+        "-e", "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+Or, using `npx`:
 
 ```json
 {

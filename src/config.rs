@@ -8,9 +8,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum IssueTrackingMode {
-    /// GitHub Issues via the `gh` CLI (default for production use).
+    /// GitHub Issues via the `gh` CLI (recommended for production use —
+    /// not the type's `Default`; see [`default_issue_tracking_mode`], which
+    /// returns `Local` so existing configs keep working without changes).
     Github,
-    /// Local markdown file — dev/debug only.
+    /// Local markdown file — dev/debug only.  This is the type's `Default`.
     Local,
 }
 
@@ -32,7 +34,11 @@ pub enum CommentCadence {
     Milestones,
     /// Comment after every iteration regardless of outcome.
     EveryIteration,
-    /// Engine never posts comments; the agent is still prompted to do so.
+    /// Engine never posts comments.  The agent may still be instructed to
+    /// comment via the prompt (for example through the lifecycle guidance
+    /// injected by `code-looper bootstrap` into `CLAUDE.md`), but that is
+    /// independent of this cadence setting — switching to `OffEngine` does
+    /// not add any prompt content asking the agent to comment.
     OffEngine,
 }
 

@@ -3,16 +3,18 @@ use crate::error::LooperError;
 use crate::security::redact_secrets;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use tracing::trace;
+use tracing::{trace, warn};
 
 /// Approved provider executables.
 ///
-/// Only binaries in this list may be spawned by the loop engine.  This
-/// allowlist is enforced at runtime in non-test builds by
-/// [`check_allowed_binary`] to prevent arbitrary command injection in case of
-/// future refactors that relax the hardcoded binary names inside adapters.
+/// Defence-in-depth allowlist: today the binary name is a hardcoded string
+/// literal inside each adapter, so this check has no user-input surface to
+/// defend against.  It exists so that any future refactor which threads a
+/// caller-supplied binary name through [`run_provider_process`] (or a
+/// descendant of it) fails loudly at runtime rather than silently spawning an
+/// arbitrary command.  Enforcement lives in [`check_allowed_binary`].
 pub const ALLOWED_PROVIDER_BINARIES: &[&str] = &["claude", "gh", "codex"];
 
 /// Return `Ok(())` if `binary` is in [`ALLOWED_PROVIDER_BINARIES`], or a
@@ -146,6 +148,7 @@ impl ProviderAdapter for ClaudeAdapter {
             self.stream_output,
             self.working_dir.as_deref(),
             self.timeout_secs,
+            true,
         )
     }
 }
@@ -175,6 +178,7 @@ impl ProviderAdapter for CopilotAdapter {
             self.stream_output,
             self.working_dir.as_deref(),
             self.timeout_secs,
+            true,
         )
     }
 }
@@ -204,11 +208,59 @@ impl ProviderAdapter for CodexAdapter {
             self.stream_output,
             self.working_dir.as_deref(),
             self.timeout_secs,
+            true,
         )
     }
 }
 
 // ── Shared helper ─────────────────────────────────────────────────────────────
+
+/// Spawn a timeout watchdog that kills `child` after `secs` seconds, unless
+/// cancelled first via the returned [`mpsc::Sender`] (send `()` or drop it).
+///
+/// Using an mpsc channel with [`mpsc::Receiver::recv_timeout`] lets the
+/// caller cancel the watchdog as soon as `wait()` returns, instead of leaving
+/// a zombie thread sleeping for the full `secs` even though the child has
+/// already exited (see #66).
+///
+/// The `fired` flag is set only when the watchdog actually kills the child,
+/// so a natural exit that races with the deadline doesn't produce a
+/// false-positive `ProviderTimeout`.  A failing `kill()` is logged via
+/// `warn!` so the operator has something to debug if a timeout never fires
+/// (see #79).
+fn spawn_timeout_watchdog(
+    child: Arc<std::sync::Mutex<std::process::Child>>,
+    secs: u64,
+    fired: Arc<AtomicBool>,
+) -> mpsc::Sender<()> {
+    let (tx, rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        match rx.recv_timeout(Duration::from_secs(secs)) {
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Deadline expired — kill the child.
+                if let Ok(mut c) = child.lock() {
+                    match c.kill() {
+                        Ok(()) => fired.store(true, Ordering::Relaxed),
+                        Err(e) => warn!(
+                            error = %e,
+                            "provider timeout watchdog: kill() failed; \
+                             ProviderTimeout will not fire"
+                        ),
+                    }
+                } else {
+                    warn!(
+                        "provider timeout watchdog: child mutex poisoned; \
+                         cannot attempt kill"
+                    );
+                }
+            }
+            // Either an explicit cancel message or sender dropped — the
+            // parent has observed wait() return, so the watchdog can exit.
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        }
+    });
+    tx
+}
 
 /// Run a provider process, optionally streaming stdout/stderr to the terminal
 /// as tagged lines (`[stdout]` / `[stderr]`).
@@ -219,22 +271,29 @@ impl ProviderAdapter for CodexAdapter {
 /// `timeout_secs` sets a maximum wall-clock duration for the provider.  When
 /// the timeout fires the process is killed and `LooperError::ProviderTimeout`
 /// is returned.  `None` means no timeout.
+///
+/// When `enforce_allowlist` is `true`, the caller `binary` must be in
+/// [`ALLOWED_PROVIDER_BINARIES`] or the call returns
+/// [`LooperError::DisallowedExecutable`] without spawning.  Production call
+/// sites (the three adapters) pass `true`; test helpers that need to spawn
+/// `sleep` / `echo` pass `false`.  Extracting the flag as a parameter (rather
+/// than `#[cfg(not(test))]`-gating the check) is what lets the integration be
+/// exercised by a real test — see issue #64.
 fn run_provider_process(
     binary: &str,
     args: &[&str],
     stream: bool,
     working_dir: Option<&std::path::Path>,
     timeout_secs: Option<u64>,
+    enforce_allowlist: bool,
 ) -> Result<ExecutionResult, LooperError> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::time::Instant;
 
-    // Enforce the executable allowlist in non-test builds.  Test builds bypass
-    // this so unit tests can spawn utilities like `sleep` or `echo` to exercise
-    // timeout/streaming behaviour without requiring real provider CLIs.
-    #[cfg(not(test))]
-    check_allowed_binary(binary)?;
+    if enforce_allowlist {
+        check_allowed_binary(binary)?;
+    }
 
     let start = Instant::now();
 
@@ -256,55 +315,85 @@ fn run_provider_process(
         let child = std::sync::Arc::new(std::sync::Mutex::new(child));
         let timeout_fired = Arc::new(AtomicBool::new(false));
 
-        if let Some(secs) = timeout_secs {
-            let child_clone = Arc::clone(&child);
-            let fired = Arc::clone(&timeout_fired);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(secs));
-                if let Ok(mut c) = child_clone.lock() {
-                    // Only mark as timed-out when kill() succeeds.  If the child
-                    // already exited and was reaped, kill() returns an error and we
-                    // leave `fired` false, avoiding a false-positive timeout report.
-                    if c.kill().is_ok() {
-                        fired.store(true, Ordering::Relaxed);
-                    }
-                }
-            });
-        }
+        let watchdog_tx = timeout_secs.map(|secs| {
+            spawn_timeout_watchdog(Arc::clone(&child), secs, Arc::clone(&timeout_fired))
+        });
 
         // Read stdout on a background thread so we don't deadlock on stderr.
         let stdout_handle = std::thread::spawn(move || {
             let reader = BufReader::new(stdout_pipe);
             let mut captured = String::new();
-            for line in reader.lines().map_while(Result::ok) {
-                let line = redact_secrets(&line);
-                println!("[stdout] {}", line);
-                trace!(stream = "stdout", "{}", line);
-                captured.push_str(&line);
-                captured.push('\n');
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        let line = redact_secrets(&line);
+                        println!("[stdout] {}", line);
+                        trace!(stream = "stdout", "{}", line);
+                        captured.push_str(&line);
+                        captured.push('\n');
+                    }
+                    Err(e) => {
+                        // Used to be `map_while(Result::ok)` which silently
+                        // truncated on the first read error — see #67.  A
+                        // truncated stdout silently broke shippable-marker
+                        // detection in pr_manager.
+                        warn!(
+                            error = %e,
+                            "stdout read error; capture may be truncated"
+                        );
+                        break;
+                    }
+                }
             }
             captured
         });
 
         let mut stderr_captured = String::new();
         let stderr_reader = BufReader::new(stderr_pipe);
-        for line in stderr_reader.lines().map_while(Result::ok) {
-            let line = redact_secrets(&line);
-            eprintln!("[stderr] {}", line);
-            trace!(stream = "stderr", "{}", line);
-            stderr_captured.push_str(&line);
-            stderr_captured.push('\n');
+        for line_result in stderr_reader.lines() {
+            match line_result {
+                Ok(line) => {
+                    let line = redact_secrets(&line);
+                    eprintln!("[stderr] {}", line);
+                    trace!(stream = "stderr", "{}", line);
+                    stderr_captured.push_str(&line);
+                    stderr_captured.push('\n');
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "stderr read error; capture may be truncated"
+                    );
+                    break;
+                }
+            }
         }
 
-        let stdout_captured = stdout_handle.join().unwrap_or_default();
-        let status = child
-            .lock()
-            .unwrap()
-            .wait()
-            .map_err(|e| LooperError::ProviderSpawn {
+        let stdout_captured = match stdout_handle.join() {
+            Ok(s) => s,
+            Err(_) => {
+                warn!("stdout drain thread panicked; returning empty capture");
+                String::new()
+            }
+        };
+        let status = {
+            let mut guard = child.lock().map_err(|_| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("child mutex poisoned by watchdog"),
+            })?;
+            guard.wait().map_err(|e| LooperError::ProviderSpawn {
                 binary: binary.to_string(),
                 source: e,
-            })?;
+            })?
+        };
+
+        // Cancel the watchdog now that wait() has returned (no-op if there
+        // was no timeout).  See #66 — we used to leave the watchdog asleep
+        // for the full deadline even after early child exit.
+        if let Some(tx) = watchdog_tx {
+            let _ = tx.send(());
+        }
+
         let duration = start.elapsed();
 
         if timeout_fired.load(Ordering::Relaxed) {
@@ -338,42 +427,73 @@ fn run_provider_process(
         let child = Arc::new(std::sync::Mutex::new(child));
         let timeout_fired = Arc::new(AtomicBool::new(false));
 
-        if let Some(secs) = timeout_secs {
-            let child_clone = Arc::clone(&child);
-            let fired = Arc::clone(&timeout_fired);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(secs));
-                if let Ok(mut c) = child_clone.lock() {
-                    // Only mark as timed-out when kill() succeeds.  If the child
-                    // already exited and was reaped, kill() returns an error and
-                    // we leave `fired` false, avoiding a false-positive timeout
-                    // report when the process completed naturally at the deadline.
-                    if c.kill().is_ok() {
-                        fired.store(true, Ordering::Relaxed);
-                    }
-                }
-            });
-        }
+        let watchdog_tx = timeout_secs.map(|secs| {
+            spawn_timeout_watchdog(Arc::clone(&child), secs, Arc::clone(&timeout_fired))
+        });
 
         // Drain both pipes on background threads to prevent deadlock when the
         // child fills its pipe buffers.  The drain threads block until EOF,
         // which happens when the child exits or is killed by the watchdog.
+        // IO errors during drain are logged; we return whatever was read
+        // before the error so the caller still sees partial output, but the
+        // log line gives operators something to debug if marker detection
+        // downstream silently fails (see #67).
         let stdout_handle = std::thread::spawn(move || {
             use std::io::Read;
             let mut buf = Vec::new();
-            let _ = { stdout_pipe }.read_to_end(&mut buf);
+            if let Err(e) = { stdout_pipe }.read_to_end(&mut buf) {
+                warn!(
+                    error = %e,
+                    "non-streaming stdout drain error; capture may be truncated"
+                );
+            }
             buf
         });
         let stderr_handle = std::thread::spawn(move || {
             use std::io::Read;
             let mut buf = Vec::new();
-            let _ = { stderr_pipe }.read_to_end(&mut buf);
+            if let Err(e) = { stderr_pipe }.read_to_end(&mut buf) {
+                warn!(
+                    error = %e,
+                    "non-streaming stderr drain error; capture may be truncated"
+                );
+            }
             buf
         });
 
-        let stdout_bytes = stdout_handle.join().unwrap_or_default();
-        let stderr_bytes = stderr_handle.join().unwrap_or_default();
-        let exit_code = child.lock().unwrap().wait().ok().and_then(|s| s.code());
+        let stdout_bytes = match stdout_handle.join() {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("non-streaming stdout drain thread panicked");
+                Vec::new()
+            }
+        };
+        let stderr_bytes = match stderr_handle.join() {
+            Ok(b) => b,
+            Err(_) => {
+                warn!("non-streaming stderr drain thread panicked");
+                Vec::new()
+            }
+        };
+
+        // Align with the streaming path: fail with ProviderSpawn on wait()
+        // error instead of collapsing it into `None` (which IterationOutcome
+        // would then misclassify as Signal and treat as non-retryable — see
+        // #67).
+        let status = {
+            let mut guard = child.lock().map_err(|_| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("child mutex poisoned by watchdog"),
+            })?;
+            guard.wait().map_err(|e| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: e,
+            })?
+        };
+        if let Some(tx) = watchdog_tx {
+            let _ = tx.send(());
+        }
+        let exit_code = status.code();
         let duration = start.elapsed();
 
         if timeout_fired.load(Ordering::Relaxed) {
@@ -399,10 +519,19 @@ pub mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// A deterministic test adapter that always returns a preset result.
+    /// A deterministic test adapter that returns either a fixed result or a
+    /// pre-scripted sequence of exit codes on successive calls.
+    ///
+    /// `result` is the fallback used when `sequence` is empty.  When
+    /// `sequence` is non-empty, each call to `execute` pops the next code,
+    /// wraps it in an `ExecutionResult`, and returns it.  See
+    /// [`Self::sequence`] for the retry-recovery test pattern (#70).
     pub struct FakeAdapter {
         pub name: String,
         pub result: Result<ExecutionResult, LooperError>,
+        /// Pre-scripted exit codes for successive calls to `execute`.
+        /// Popped from the front on each call; empty means "use `result`".
+        pub sequence: std::sync::Mutex<std::collections::VecDeque<i32>>,
     }
 
     impl FakeAdapter {
@@ -415,6 +544,7 @@ pub mod tests {
                     stderr: String::new(),
                     duration: Duration::from_millis(5),
                 }),
+                sequence: std::sync::Mutex::new(std::collections::VecDeque::new()),
             }
         }
 
@@ -427,6 +557,7 @@ pub mod tests {
                     stderr: "error".to_string(),
                     duration: Duration::from_millis(5),
                 }),
+                sequence: std::sync::Mutex::new(std::collections::VecDeque::new()),
             }
         }
 
@@ -440,6 +571,37 @@ pub mod tests {
                     stderr: format!("exit {code}"),
                     duration: Duration::from_millis(5),
                 }),
+                sequence: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            }
+        }
+
+        /// Construct a fake adapter that returns each of the given exit
+        /// codes on successive calls to `execute`, in order.  Once the
+        /// sequence is exhausted the final code is returned for any
+        /// subsequent calls.
+        ///
+        /// Intended for retry-recovery tests (#70): a permanently-failing
+        /// adapter cannot distinguish "retried N times then gave up" from
+        /// "broken retry loop".  `sequence(vec![1, 0])` models a failure
+        /// followed by a successful retry.
+        pub fn sequence(name: &str, codes: Vec<i32>) -> Self {
+            assert!(
+                !codes.is_empty(),
+                "FakeAdapter::sequence requires at least one exit code"
+            );
+            let deque: std::collections::VecDeque<i32> = codes.into_iter().collect();
+            Self {
+                name: name.to_string(),
+                // `result` is only used when the sequence is drained — store
+                // a harmless placeholder; `execute` always consults the
+                // sequence first.
+                result: Ok(ExecutionResult {
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration: Duration::from_millis(5),
+                }),
+                sequence: std::sync::Mutex::new(deque),
             }
         }
     }
@@ -450,6 +612,35 @@ pub mod tests {
         }
 
         fn execute(&self, _prompt: &str) -> Result<ExecutionResult, LooperError> {
+            // Pop the next scripted exit code if any; fall back to the
+            // fixed `result` otherwise.  When the sequence has a single
+            // element left, it's *kept* so later calls reuse it (matches
+            // the doc comment's "final code is returned for any subsequent
+            // calls" contract).
+            {
+                let mut seq = self.sequence.lock().expect("sequence mutex poisoned");
+                if !seq.is_empty() {
+                    let code = if seq.len() == 1 {
+                        *seq.front().unwrap()
+                    } else {
+                        seq.pop_front().unwrap()
+                    };
+                    return Ok(ExecutionResult {
+                        exit_code: Some(code),
+                        stdout: if code == 0 {
+                            "ok".to_string()
+                        } else {
+                            String::new()
+                        },
+                        stderr: if code == 0 {
+                            String::new()
+                        } else {
+                            format!("exit {code}")
+                        },
+                        duration: Duration::from_millis(5),
+                    });
+                }
+            }
             match &self.result {
                 Ok(r) => Ok(r.clone()),
                 Err(e) => Err(LooperError::InvalidArgument(e.to_string())),
@@ -650,7 +841,7 @@ pub mod tests {
     #[cfg(unix)]
     fn non_streaming_process_is_killed_on_timeout() {
         // sleep for 60s, but timeout after 1s
-        let result = super::run_provider_process("sleep", &["60"], false, None, Some(1));
+        let result = super::run_provider_process("sleep", &["60"], false, None, Some(1), false);
         match result {
             Err(LooperError::ProviderTimeout { timeout_secs, .. }) => {
                 assert_eq!(timeout_secs, 1);
@@ -663,9 +854,42 @@ pub mod tests {
     #[test]
     #[cfg(unix)]
     fn non_streaming_fast_process_is_not_timed_out() {
-        let result = super::run_provider_process("echo", &["hello"], false, None, Some(5));
+        let result = super::run_provider_process("echo", &["hello"], false, None, Some(5), false);
         match result {
             Ok(r) => assert!(r.succeeded(), "expected success, got: {:?}", r.exit_code),
+            Err(e) => panic!("expected Ok, got: {e}"),
+        }
+    }
+
+    /// Regression test for #64: the allowlist enforcement must be wired into
+    /// `run_provider_process` and reachable from the test build.  Passing
+    /// `enforce_allowlist = true` with a disallowed binary must fail with
+    /// `DisallowedExecutable` *before* spawning anything — so even a
+    /// nonexistent path like `not-a-real-binary` reliably returns the
+    /// allowlist error rather than a spawn error.
+    #[test]
+    fn run_provider_process_enforces_allowlist_when_requested() {
+        let err = super::run_provider_process("not-a-real-binary", &[], false, None, None, true)
+            .expect_err("should be rejected by allowlist");
+        match err {
+            LooperError::DisallowedExecutable { binary, .. } => {
+                assert_eq!(binary, "not-a-real-binary");
+            }
+            other => panic!("expected DisallowedExecutable, got: {other:?}"),
+        }
+    }
+
+    /// When `enforce_allowlist = false`, the allowlist check is skipped and
+    /// the usual spawn path runs.  Spawning `/bin/true` is a cheap way to
+    /// confirm the non-enforced path still works end-to-end without the
+    /// check short-circuiting it.
+    #[test]
+    #[cfg(unix)]
+    fn run_provider_process_skips_allowlist_when_not_enforced() {
+        // /bin/true exits 0 immediately — used as a minimal real subprocess.
+        let result = super::run_provider_process("true", &[], false, None, None, false);
+        match result {
+            Ok(r) => assert_eq!(r.exit_code, Some(0)),
             Err(e) => panic!("expected Ok, got: {e}"),
         }
     }

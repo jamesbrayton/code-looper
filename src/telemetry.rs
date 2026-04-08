@@ -31,18 +31,21 @@ impl IterationOutcome {
         matches!(self, IterationOutcome::Success)
     }
 
-    /// Returns `true` when the loop should abort immediately (spawn failure).
-    #[allow(dead_code)]
-    pub fn is_fatal(&self) -> bool {
-        matches!(self, IterationOutcome::SpawnFailure { .. })
-    }
-
-    /// Returns `true` when a retry attempt may recover from this failure.
+    /// Returns `true` when a retry attempt **could** recover from this
+    /// failure *in isolation*, ignoring any user-configured exit-code
+    /// overrides.
     ///
-    /// Non-zero exits are considered transient (e.g. API rate limit, flaky
-    /// network) and are retried by default.  Signal terminations, unknown
-    /// exit states, and policy guard blocks are treated as non-retryable
-    /// because a retry is unlikely to change the outcome.
+    /// Non-zero exits and timeouts are considered transient (API rate
+    /// limit, flaky network, one slow provider call).  Signal terminations,
+    /// unknown exit states, and policy-guard blocks are treated as
+    /// non-retryable because a retry is unlikely to change the outcome.
+    ///
+    /// **This is not the full retry decision.**  The loop engine also
+    /// consults [`crate::config::LoopConfig::non_retryable_exit_codes`],
+    /// which can override `NonZeroExit` back to non-retryable for specific
+    /// codes.  Use [`RetryPolicy::should_retry`] at the actual decision
+    /// point — it combines this method with the config-driven deny list so
+    /// the two sources of truth can't drift apart (see #76).
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
@@ -90,6 +93,54 @@ impl std::fmt::Display for IterationOutcome {
             IterationOutcome::Timeout => write!(f, "timeout"),
             IterationOutcome::Unknown => write!(f, "unknown"),
         }
+    }
+}
+
+// ── RetryPolicy ───────────────────────────────────────────────────────────────
+
+/// Single source of truth for "should this iteration be retried?".
+///
+/// Before #76 the decision lived in two places:
+/// - [`IterationOutcome::is_retryable`] (the type method), which always
+///   treated `NonZeroExit` as retryable.
+/// - Inlined config reads in `loop_engine::run` against
+///   [`crate::config::LoopConfig::non_retryable_exit_codes`].
+///
+/// A future change to `is_retryable` could silently disagree with the
+/// config-driven path.  `RetryPolicy::should_retry` combines both so the
+/// loop engine makes one call and there is exactly one place to change
+/// when the rule evolves.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy<'a> {
+    /// Exit codes that must never be retried, even when
+    /// `IterationOutcome::is_retryable()` would otherwise say yes.  Borrowed
+    /// from `LoopConfig::non_retryable_exit_codes`.
+    non_retryable_exit_codes: &'a [i32],
+}
+
+impl<'a> RetryPolicy<'a> {
+    pub fn new(non_retryable_exit_codes: &'a [i32]) -> Self {
+        Self {
+            non_retryable_exit_codes,
+        }
+    }
+
+    /// Return `true` when the loop engine should schedule another attempt
+    /// for `outcome`.
+    ///
+    /// Rules, in order:
+    /// 1. `NonZeroExit { exit_code }` where `exit_code` is in the config's
+    ///    `non_retryable_exit_codes` → **no retry** (user said never).
+    /// 2. Otherwise defer to [`IterationOutcome::is_retryable`] — currently
+    ///    `true` for `NonZeroExit` and `Timeout`, `false` for everything
+    ///    else.
+    pub fn should_retry(&self, outcome: &IterationOutcome) -> bool {
+        if let IterationOutcome::NonZeroExit { exit_code } = outcome {
+            if self.non_retryable_exit_codes.contains(exit_code) {
+                return false;
+            }
+        }
+        outcome.is_retryable()
     }
 }
 
@@ -478,11 +529,10 @@ mod tests {
     }
 
     #[test]
-    fn spawn_failure_is_fatal() {
+    fn spawn_failure_is_not_success() {
         let o = IterationOutcome::SpawnFailure {
             message: "not found".to_string(),
         };
-        assert!(o.is_fatal());
         assert!(!o.is_success());
     }
 
@@ -505,6 +555,44 @@ mod tests {
             message: String::new()
         }
         .is_retryable());
+    }
+
+    // ── RetryPolicy (#76) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn retry_policy_empty_denylist_matches_is_retryable() {
+        let policy = RetryPolicy::new(&[]);
+        assert!(policy.should_retry(&IterationOutcome::NonZeroExit { exit_code: 1 }));
+        assert!(policy.should_retry(&IterationOutcome::Timeout));
+        assert!(!policy.should_retry(&IterationOutcome::Success));
+        assert!(!policy.should_retry(&IterationOutcome::Signal));
+    }
+
+    #[test]
+    fn retry_policy_denylist_blocks_matching_exit_code() {
+        let policy = RetryPolicy::new(&[2, 127]);
+        assert!(
+            !policy.should_retry(&IterationOutcome::NonZeroExit { exit_code: 2 }),
+            "exit code 2 is denylisted"
+        );
+        assert!(
+            !policy.should_retry(&IterationOutcome::NonZeroExit { exit_code: 127 }),
+            "exit code 127 is denylisted"
+        );
+    }
+
+    #[test]
+    fn retry_policy_denylist_does_not_block_other_exit_codes() {
+        let policy = RetryPolicy::new(&[2]);
+        assert!(policy.should_retry(&IterationOutcome::NonZeroExit { exit_code: 1 }));
+        assert!(policy.should_retry(&IterationOutcome::NonZeroExit { exit_code: 3 }));
+    }
+
+    #[test]
+    fn retry_policy_denylist_only_affects_non_zero_exit() {
+        // A denylisted exit code does not suddenly make Timeout non-retryable.
+        let policy = RetryPolicy::new(&[2]);
+        assert!(policy.should_retry(&IterationOutcome::Timeout));
     }
 
     #[test]

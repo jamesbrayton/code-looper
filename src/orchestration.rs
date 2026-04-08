@@ -210,11 +210,18 @@ fn count_gh_items(owner: &str, repo: &str, kind: &str) -> Result<u32, LooperErro
         )));
     }
 
-    // `gh ... --json number` returns a JSON array like `[{"number":1},{"number":2}]`.
-    // Count top-level `{` characters to get the item count without a JSON parser dep.
+    // `gh ... --json number` returns a JSON array like
+    // `[{"number":1},{"number":2}]`.  Parse it with serde_json instead of
+    // counting `{` characters — the old approach broke as soon as anyone
+    // added a field that contained a brace or pretty-printed the output
+    // (see #79).  `serde_json` is already a workspace dependency.
     let text = String::from_utf8_lossy(&output.stdout);
-    let count = text.chars().filter(|&c| c == '{').count() as u32;
-    Ok(count)
+    let items: Vec<serde_json::Value> = serde_json::from_str(&text).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "failed to parse `gh {kind} list` output as JSON array: {e}"
+        ))
+    })?;
+    Ok(items.len() as u32)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

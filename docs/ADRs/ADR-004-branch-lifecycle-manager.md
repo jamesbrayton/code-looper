@@ -19,7 +19,7 @@ Early iterations handled branch names inline in `loop_engine.rs` with `branch_pr
 Centralise all branch operations in `src/branch.rs` behind two surfaces:
 
 1. **`derive_branch_name(prefix, issue_number, title, max_slug)`** — pure function; produces `{prefix}{issue_number}-{slug}`. URL-safe, collapses dashes, strips leading/trailing punctuation.
-2. **`BranchManager`** — stateful struct wrapping `PrManagementConfig`; exposes `ensure_branch`, `push_branch`, and `cleanup_branch` with safety guards (refuse to operate on `base_branch`, refuse force-push unless `allow_force_push=true`, refuse to delete branches with unmerged commits).
+2. **`BranchManager`** — stateful struct wrapping `PrManagementConfig`; exposes `ensure_branch`, `push_branch`, and `cleanup_branch` with safety guards. Specifically: it refuses to operate on `base_branch`, it never adds `--force-with-lease` to `git push` unless `allow_force_push=true` (relying on git's default non-fast-forward rejection to prevent accidental overwrites — there is no separate refusal error path), and it refuses to delete branches with unmerged commits.
 
 `LoopEngine` constructs a `BranchManager` when `mode == SinglePr` and:
 - Calls `ensure_branch(issue_number, "")` before the iteration loop to checkout the feature branch.

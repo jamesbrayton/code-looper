@@ -6,7 +6,11 @@
 //!
 //! # Safety invariants
 //! * Never operates on `base_branch` — any attempt returns an error.
-//! * Never force-pushes unless `allow_force_push` is explicitly `true`.
+//! * Never passes `--force-with-lease` to `git push` unless `allow_force_push`
+//!   is explicitly `true`.  The manager relies on git's default
+//!   non-fast-forward rejection to prevent accidental overwrites — there is
+//!   no separate "refuse the force push" error path (the aspirational
+//!   `BranchError::ForcePushDisabled` variant was removed in #79).
 //! * Never deletes a branch that has unmerged commits or uncommitted changes.
 use std::process::Command;
 
@@ -88,13 +92,15 @@ pub enum BranchError {
     #[error("git command failed: {0}")]
     GitCommand(String),
 
-    #[allow(dead_code)]
+    /// Returned by [`BranchManager::cleanup_branch`] when it would have to
+    /// delete a branch that has uncommitted changes (current worktree) or
+    /// commits not yet in `base_branch`.
+    ///
+    /// Only the single-PR cleanup path reaches this; multi-PR mode uses
+    /// [`BranchManager::cleanup_merged_remote_branch`] and never touches
+    /// the local branch.
     #[error("branch has uncommitted changes or unmerged commits — refusing to delete '{0}'")]
     UnsafeDelete(String),
-
-    #[allow(dead_code)]
-    #[error("force-push is disabled; enable allow_force_push in config to proceed")]
-    ForcePushDisabled,
 }
 
 /// Run a git command and return trimmed stdout on success, or a `BranchError`
@@ -181,14 +187,19 @@ fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
 // ── BranchManager ─────────────────────────────────────────────────────────────
 
 /// Manages the lifecycle of a single feature branch tied to one issue.
+///
+/// Safety-affecting knobs (`no_pr_push`, `delete_remote_branch_on_merge`) are
+/// private and can only be changed at construction time via the `with_*`
+/// builder methods — the aim is that no consumer can flip a destructive flag
+/// *after* handing the manager to some inner component (see #73).
 pub struct BranchManager {
     config: PrManagementConfig,
     /// Maximum character length for the title slug portion of the branch name.
     max_slug_length: usize,
     /// Push to origin even in `no-pr` mode (default: `true`).
-    pub no_pr_push: bool,
+    no_pr_push: bool,
     /// Delete the remote branch after a PR merge (default: `true`).
-    pub delete_remote_branch_on_merge: bool,
+    delete_remote_branch_on_merge: bool,
 }
 
 impl BranchManager {
@@ -200,6 +211,30 @@ impl BranchManager {
             no_pr_push: true,
             delete_remote_branch_on_merge: true,
         }
+    }
+
+    /// Override the `no_pr_push` flag at construction time.
+    ///
+    /// When `false`, `push_branch` is a no-op in `no-pr` mode.  Meant for
+    /// tests and for rare configurations that explicitly want the loop to
+    /// keep work local.
+    #[allow(dead_code)]
+    pub fn with_no_pr_push(mut self, no_pr_push: bool) -> Self {
+        self.no_pr_push = no_pr_push;
+        self
+    }
+
+    /// Override the `delete_remote_branch_on_merge` flag at construction
+    /// time.
+    ///
+    /// When `false`, [`Self::cleanup_merged_remote_branch`] short-circuits
+    /// without touching the remote.  This field is destructive and must not
+    /// be mutable on a live `BranchManager` — use this builder on a fresh
+    /// instance instead.
+    #[allow(dead_code)]
+    pub fn with_delete_remote_branch_on_merge(mut self, enabled: bool) -> Self {
+        self.delete_remote_branch_on_merge = enabled;
+        self
     }
 
     /// The base branch name (e.g. `"main"`).
@@ -245,12 +280,39 @@ impl BranchManager {
             );
             git(&["checkout", "-b", &branch, &format!("origin/{branch}")])?;
         } else {
-            // New branch — create from latest base_branch
+            // New branch — create from latest base_branch.
+            //
+            // The fetch is still best-effort (we don't fail the iteration
+            // when `origin` is unreachable, since the user may be working
+            // offline), but we now *log loudly* when it fails or is skipped
+            // — a silent fetch failure followed by a checkout from a stale
+            // `origin/{base}` is the classic source of "why are my PRs full
+            // of conflicts" debugging sessions (see #68).
             tracing::debug!(branch, base = self.base(), "creating new feature branch");
-            // Fetch latest base branch state first (best-effort)
-            let _ = Command::new("git")
+            let fetch_status = Command::new("git")
                 .args(["fetch", "origin", self.base()])
                 .status();
+            match fetch_status {
+                Ok(status) if status.success() => {}
+                Ok(status) => {
+                    tracing::warn!(
+                        base = self.base(),
+                        exit_code = status.code(),
+                        "git fetch origin {base} failed; new branch will be created from \
+                         possibly-stale origin/{base} (expect merge conflicts)",
+                        base = self.base()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        base = self.base(),
+                        error = %e,
+                        "could not spawn `git fetch`; new branch will be created from \
+                         possibly-stale origin/{base} (expect merge conflicts)",
+                        base = self.base()
+                    );
+                }
+            }
             git(&[
                 "checkout",
                 "-b",
@@ -295,7 +357,9 @@ impl BranchManager {
         git(&args).map(|_| ())
     }
 
-    /// Delete a feature branch after its PR has been merged.
+    /// Delete a feature branch that the engine itself checked out locally
+    /// (used by the `single-pr` flow when a PR is merged from the loop's
+    /// own worktree).
     ///
     /// Safety checks:
     /// * Refuses to delete `base_branch`.
@@ -304,6 +368,11 @@ impl BranchManager {
     ///
     /// After deleting the local branch, deletes the remote branch when
     /// `delete_remote_branch_on_merge` is `true`.
+    ///
+    /// **Do not call this from multi-PR mode** — the engine never checks
+    /// out the PR's local branch there, so this method would operate on
+    /// whatever branch the engine's CWD happens to be on (see #65).  Use
+    /// [`Self::cleanup_merged_remote_branch`] instead for multi-PR merges.
     #[allow(dead_code)]
     pub fn cleanup_branch(&self, branch: &str) -> Result<(), BranchError> {
         // Guard: never delete base_branch
@@ -337,6 +406,46 @@ impl BranchManager {
         }
 
         Ok(())
+    }
+
+    /// Delete the *remote* feature branch for a PR the engine did not check
+    /// out locally.
+    ///
+    /// Used by the multi-PR triage flow after `gh pr merge` succeeds.  In
+    /// that flow the engine never created or checked out the local branch,
+    /// so the original [`Self::cleanup_branch`] (which runs `git branch -d`
+    /// against whatever the engine's CWD happens to be on) is actively
+    /// wrong — see #65.  This method is the remote-only alternative:
+    ///
+    /// * Refuses to delete `base_branch`.
+    /// * Skips silently when `delete_remote_branch_on_merge` is `false`.
+    /// * Skips silently when the remote branch no longer exists (another
+    ///   process may have deleted it already).
+    /// * Never touches the local worktree — no `git checkout`, no
+    ///   `git branch -d`.
+    pub fn cleanup_merged_remote_branch(&self, branch: &str) -> Result<(), BranchError> {
+        if branch == self.base() {
+            return Err(BranchError::BaseBranchProtected(branch.to_string()));
+        }
+        if !self.delete_remote_branch_on_merge {
+            tracing::debug!(
+                branch,
+                "delete_remote_branch_on_merge=false; skipping remote cleanup"
+            );
+            return Ok(());
+        }
+        if !remote_branch_exists(branch) {
+            tracing::debug!(
+                branch,
+                "remote branch no longer exists; skipping remote cleanup"
+            );
+            return Ok(());
+        }
+        tracing::info!(
+            branch,
+            "deleting remote feature branch after multi-PR merge"
+        );
+        git(&["push", "origin", "--delete", branch]).map(|_| ())
     }
 }
 
@@ -478,6 +587,28 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_merged_remote_branch_rejects_base_branch() {
+        let mgr = BranchManager::new(config());
+        let result = mgr.cleanup_merged_remote_branch("main");
+        assert!(matches!(result, Err(BranchError::BaseBranchProtected(_))));
+    }
+
+    #[test]
+    fn cleanup_merged_remote_branch_is_noop_when_disabled() {
+        // When `delete_remote_branch_on_merge=false`, the method must return
+        // Ok without shelling out to git at all — even the base-branch guard
+        // is the only early-exit before the disabled check.  We can't cheaply
+        // mock git from here, but this at least verifies the disabled path
+        // short-circuits for a non-base branch.
+        let mgr = BranchManager::new(config()).with_delete_remote_branch_on_merge(false);
+        let result = mgr.cleanup_merged_remote_branch("loop/1-some-feature");
+        assert!(
+            result.is_ok(),
+            "disabled flag should short-circuit without attempting git: {result:?}"
+        );
+    }
+
+    #[test]
     fn push_rejects_base_branch() {
         let mgr = BranchManager::new(config());
         let result = mgr.push_branch("main");
@@ -490,8 +621,7 @@ mod tests {
             mode: PrMode::NoPr,
             ..config()
         };
-        let mut mgr = BranchManager::new(cfg);
-        mgr.no_pr_push = false;
+        let mgr = BranchManager::new(cfg).with_no_pr_push(false);
         // Should return Ok without calling git (since no_pr_push=false in no-pr mode)
         assert!(mgr.push_branch("loop/1-some-branch").is_ok());
     }

@@ -111,8 +111,13 @@ pub struct PrInfo {
     pub number: u32,
     pub url: String,
     pub title: String,
-    /// Head branch name (e.g. `loop/42-fix-bug`).  Empty string when unknown.
-    pub head_ref: String,
+    /// Head branch name (e.g. `loop/42-fix-bug`).
+    ///
+    /// `None` when `gh` did not return a `headRefName` field for this PR —
+    /// post-merge remote cleanup and any other head-branch-dependent logic
+    /// must skip the PR in that case.  See #74 for the history of this
+    /// field (it used to be an empty-string sentinel).
+    pub head_ref: Option<String>,
 }
 
 /// Input for opening a new pull request.
@@ -140,10 +145,6 @@ pub enum PrError {
 
     #[error("failed to parse gh output: {0}")]
     ParseError(String),
-
-    #[error("PR already exists for branch '{0}'")]
-    #[allow(dead_code)]
-    AlreadyExists(String),
 }
 
 // ── PrLifecycle trait ─────────────────────────────────────────────────────────
@@ -222,12 +223,20 @@ impl PrLifecycle for GhPrLifecycle {
                 .as_str()
                 .ok_or_else(|| PrError::ParseError("missing 'title' field".into()))?
                 .to_string();
-            let head_ref = pr["headRefName"].as_str().unwrap_or(branch).to_string();
+            // Fail loud on a missing `headRefName` rather than silently
+            // falling back to the requested branch name — the latter masks
+            // a `gh` schema drift as a successful lookup (see #74).
+            let head_ref = pr["headRefName"]
+                .as_str()
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    PrError::ParseError("missing 'headRefName' field in gh pr list output".into())
+                })?;
             Ok(Some(PrInfo {
                 number,
                 url,
                 title,
-                head_ref,
+                head_ref: Some(head_ref),
             }))
         } else {
             Ok(None)
@@ -284,7 +293,7 @@ impl PrLifecycle for GhPrLifecycle {
             number,
             url,
             title: draft.title.clone(),
-            head_ref: draft.branch.clone(),
+            head_ref: Some(draft.branch.clone()),
         })
     }
 
@@ -350,7 +359,7 @@ impl MockPrLifecycle {
                 number: 42,
                 url: "https://github.com/owner/repo/pull/42".into(),
                 title: "[LOOPER] Test PR".into(),
-                head_ref: "loop/42-test-pr".into(),
+                head_ref: Some("loop/42-test-pr".into()),
             },
             calls: std::sync::Mutex::new(Vec::new()),
         }
@@ -568,9 +577,62 @@ pub struct PrWithState {
     pub state: PrTriageState,
     /// ISO-8601 creation timestamp (used for `oldest`/`newest` ordering).
     pub created_at: String,
-    /// GitHub merge-ability state: `"MERGEABLE"`, `"CONFLICTING"`, or `"UNKNOWN"`.
-    /// `None` when the field was not returned by the API (older `gh` versions).
-    pub mergeable: Option<String>,
+    /// GitHub merge-ability state.
+    ///
+    /// `None` when the field was not returned by the API (older `gh`
+    /// versions) *or* when `gh` reported a string value we don't recognise.
+    /// Unknown-string parsing logs a warning at the parse site so we notice
+    /// GitHub schema drift — see [`Mergeable::from_gh_str`] and #77.
+    pub mergeable: Option<Mergeable>,
+}
+
+/// GitHub merge-ability state, parsed from the `mergeable` field returned by
+/// `gh pr view --json mergeable`.
+///
+/// The field is documented to take one of three values, but a stringly-typed
+/// `Option<String>` used to silently degrade on unknown values in
+/// `mergeable_sort_key` (see #77) — `BLOCKED` or a typo would map to the
+/// "missing" bucket and silently change the `least-conflicts` triage order.
+/// Parsing at the `gh` boundary centralises the value set and lets us log a
+/// warning when something unexpected comes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub enum Mergeable {
+    Mergeable,
+    Unknown,
+    Conflicting,
+}
+
+impl Mergeable {
+    /// Parse a raw `gh` mergeable string, returning `None` for values we
+    /// do not recognise (and logging a warning at `warn!` level so schema
+    /// drift is visible to operators).
+    pub fn from_gh_str(s: &str) -> Option<Self> {
+        match s {
+            "MERGEABLE" => Some(Mergeable::Mergeable),
+            "UNKNOWN" => Some(Mergeable::Unknown),
+            "CONFLICTING" => Some(Mergeable::Conflicting),
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "gh pr view returned unrecognised `mergeable` value; \
+                     treating as missing. This may silently change \
+                     least-conflicts triage order if it becomes common."
+                );
+                None
+            }
+        }
+    }
+
+    /// Sort key for the `LeastConflicts` triage priority: lower sorts first.
+    fn sort_key(m: Option<Self>) -> u8 {
+        match m {
+            Some(Mergeable::Mergeable) => 0,
+            Some(Mergeable::Unknown) => 1,
+            Some(Mergeable::Conflicting) => 2,
+            None => 3,
+        }
+    }
 }
 
 /// Outcome of a `PrTriage::select_action` call.
@@ -649,12 +711,15 @@ impl PrLifecycleTriage for GhPrLifecycle {
                     .as_str()
                     .ok_or_else(|| PrError::ParseError("missing title".into()))?
                     .to_string();
-                let head_ref = v["headRefName"].as_str().unwrap_or("").to_string();
+                let head_ref = v["headRefName"]
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| PrError::ParseError("missing 'headRefName' field".into()))?;
                 Ok(PrInfo {
                     number,
                     url,
                     title,
-                    head_ref,
+                    head_ref: Some(head_ref),
                 })
             })
             .collect()
@@ -682,18 +747,34 @@ impl PrLifecycleTriage for GhPrLifecycle {
         let v: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|e| PrError::ParseError(e.to_string()))?;
 
-        let number = v["number"].as_u64().unwrap_or(pr_number as u64) as u32;
-        let url = v["url"].as_str().unwrap_or("").to_string();
-        let title = v["title"].as_str().unwrap_or("").to_string();
-        let head_ref = v["headRefName"].as_str().unwrap_or("").to_string();
+        // Fail loud on missing required fields rather than substituting
+        // empty-string sentinels (#74).  `created_at` and `mergeable` are
+        // allowed to be missing because downstream consumers already
+        // tolerate `None` for them.
+        let number = v["number"]
+            .as_u64()
+            .ok_or_else(|| PrError::ParseError("missing 'number' field".into()))?
+            as u32;
+        let url = v["url"]
+            .as_str()
+            .ok_or_else(|| PrError::ParseError("missing 'url' field".into()))?
+            .to_string();
+        let title = v["title"]
+            .as_str()
+            .ok_or_else(|| PrError::ParseError("missing 'title' field".into()))?
+            .to_string();
+        let head_ref = v["headRefName"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| PrError::ParseError("missing 'headRefName' field".into()))?;
         let created_at = v["createdAt"].as_str().unwrap_or("").to_string();
-        let mergeable = v["mergeable"].as_str().map(|s| s.to_string());
+        let mergeable = v["mergeable"].as_str().and_then(Mergeable::from_gh_str);
 
         let pr = PrInfo {
             number,
             url,
             title,
-            head_ref,
+            head_ref: Some(head_ref),
         };
 
         // Check skip labels.
@@ -707,7 +788,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
                                 reason: name.to_string(),
                             },
                             created_at,
-                            mergeable: mergeable.clone(),
+                            mergeable,
                         });
                     }
                 }
@@ -898,7 +979,7 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
             .collect();
 
         // Sort: MERGEABLE (0) < UNKNOWN (1) < CONFLICTING (2) < missing (3).
-        states.sort_by_key(|ws| mergeable_sort_key(ws.mergeable.as_deref()));
+        states.sort_by_key(|ws| Mergeable::sort_key(ws.mergeable));
 
         tracing::debug!(
             count = states.len(),
@@ -921,22 +1002,8 @@ pub fn build_pr_triage(config: PrManagementConfig) -> PrTriage<GhPrLifecycle> {
     PrTriage::new(config, GhPrLifecycle::new())
 }
 
-/// Numeric sort key for the `LeastConflicts` priority.
-///
-/// | GitHub value   | key |
-/// |----------------|-----|
-/// | `"MERGEABLE"`  | 0   |
-/// | `"UNKNOWN"`    | 1   |
-/// | `"CONFLICTING"`| 2   |
-/// | `None`         | 3   |
-fn mergeable_sort_key(mergeable: Option<&str>) -> u8 {
-    match mergeable {
-        Some("MERGEABLE") => 0,
-        Some("UNKNOWN") => 1,
-        Some("CONFLICTING") => 2,
-        _ => 3,
-    }
-}
+// `mergeable_sort_key` has moved to `Mergeable::sort_key` — the enum is the
+// single source of truth for both parsing and ordering (see #77).
 
 // ── MockPrLifecycleTriage (test double) ───────────────────────────────────────
 
@@ -1153,7 +1220,7 @@ mod tests {
             number: 10,
             url: "https://github.com/o/r/pull/10".into(),
             title: "[LOOPER] #1: feat".into(),
-            head_ref: "loop/1-feat".into(),
+            head_ref: Some("loop/1-feat".into()),
         };
         let mock = MockPrLifecycle::new().with_existing_pr(existing);
         let mut cfg = default_config();
@@ -1176,7 +1243,7 @@ mod tests {
             number: 10,
             url: "https://github.com/o/r/pull/10".into(),
             title: "[LOOPER] #1: feat".into(),
-            head_ref: "loop/1-feat".into(),
+            head_ref: Some("loop/1-feat".into()),
         };
         let mock = MockPrLifecycle::new().with_existing_pr(existing);
         let mut cfg = default_config();
@@ -1247,7 +1314,7 @@ mod tests {
             number,
             url: format!("https://github.com/o/r/pull/{number}"),
             title: format!("PR {number}"),
-            head_ref: format!("loop/{number}-pr"),
+            head_ref: Some(format!("loop/{number}-pr")),
         }
     }
 
@@ -1256,7 +1323,7 @@ mod tests {
             pr,
             state,
             created_at: "2026-01-01T00:00:00Z".into(),
-            mergeable: Some("MERGEABLE".into()),
+            mergeable: Some(Mergeable::Mergeable),
         }
     }
 
@@ -1269,7 +1336,7 @@ mod tests {
             pr,
             state,
             created_at: "2026-01-01T00:00:00Z".into(),
-            mergeable: mergeable.map(|s| s.to_string()),
+            mergeable: mergeable.and_then(Mergeable::from_gh_str),
         }
     }
 
@@ -1449,7 +1516,7 @@ mod tests {
     #[test]
     fn pr_info_head_ref_is_set_by_make_pr_helper() {
         let pr = make_pr(5);
-        assert_eq!(pr.head_ref, "loop/5-pr");
+        assert_eq!(pr.head_ref.as_deref(), Some("loop/5-pr"));
     }
 
     #[test]
@@ -1464,7 +1531,8 @@ mod tests {
         let triage = PrTriage::new(cfg, mock);
         if let TriageAction::Merge { pr } = triage.select_action() {
             assert_eq!(
-                pr.head_ref, "loop/99-pr",
+                pr.head_ref.as_deref(),
+                Some("loop/99-pr"),
                 "Merge action must preserve head_ref for post-merge cleanup"
             );
         } else {
@@ -1607,10 +1675,36 @@ mod tests {
 
     #[test]
     fn mergeable_sort_key_values() {
-        assert_eq!(mergeable_sort_key(Some("MERGEABLE")), 0);
-        assert_eq!(mergeable_sort_key(Some("UNKNOWN")), 1);
-        assert_eq!(mergeable_sort_key(Some("CONFLICTING")), 2);
-        assert_eq!(mergeable_sort_key(None), 3);
-        assert_eq!(mergeable_sort_key(Some("something-else")), 3);
+        assert_eq!(Mergeable::sort_key(Some(Mergeable::Mergeable)), 0);
+        assert_eq!(Mergeable::sort_key(Some(Mergeable::Unknown)), 1);
+        assert_eq!(Mergeable::sort_key(Some(Mergeable::Conflicting)), 2);
+        assert_eq!(Mergeable::sort_key(None), 3);
+    }
+
+    #[test]
+    fn mergeable_from_gh_str_happy_path() {
+        assert_eq!(
+            Mergeable::from_gh_str("MERGEABLE"),
+            Some(Mergeable::Mergeable)
+        );
+        assert_eq!(Mergeable::from_gh_str("UNKNOWN"), Some(Mergeable::Unknown));
+        assert_eq!(
+            Mergeable::from_gh_str("CONFLICTING"),
+            Some(Mergeable::Conflicting)
+        );
+    }
+
+    /// Regression test for #77: a GitHub schema change that introduced a
+    /// new mergeable state (`BLOCKED`, a typo, or a lowercase variant) used
+    /// to silently degrade the `least-conflicts` triage order by mapping
+    /// every unknown value to the "missing" sort bucket.  Now those values
+    /// are treated as `None` at parse time *with a warning log*, and the
+    /// unit test locks the behaviour.
+    #[test]
+    fn mergeable_from_gh_str_unknown_value_returns_none() {
+        assert_eq!(Mergeable::from_gh_str("BLOCKED"), None);
+        assert_eq!(Mergeable::from_gh_str("mergeable"), None); // wrong case
+        assert_eq!(Mergeable::from_gh_str(""), None);
+        assert_eq!(Mergeable::from_gh_str("something-else"), None);
     }
 }

@@ -53,7 +53,7 @@ log_level: info
 | `max_retries` | `--max-retries` | integer | `0` | Additional retry attempts per iteration on non-zero exit |
 | `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
 | `retry_backoff_multiplier` | `--retry-backoff-multiplier` | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
-| `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`) |
+| `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`). **Security note:** the value is passed verbatim to `sh -c`, so any config-file or CLI source that can set this field can execute arbitrary shell on the host. Treat TOML/YAML config files the same way you would treat a shell script committed to the repo. |
 | `provider_extra_args` | `--provider-extra-arg` (repeatable) | list of strings | `[]` | Extra arguments appended to the provider CLI invocation, after the adapter's hardcoded flags and before the prompt. Each element is a separate arg (no shell expansion). |
 
 ### Prompt validation

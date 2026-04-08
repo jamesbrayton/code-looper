@@ -7,7 +7,8 @@ use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrManager, TriageAction
 use crate::pr_strategy::{build_strategy, PrStrategy};
 use crate::provider::{build_adapter, ProviderAdapter};
 use crate::telemetry::{
-    resolve_operator, unix_now, IterationOutcome, IterationRecord, RunArtifacts, RunManifest,
+    resolve_operator, unix_now, IterationOutcome, IterationRecord, RetryPolicy, RunArtifacts,
+    RunManifest,
 };
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -505,23 +506,38 @@ impl LoopEngine {
                         match merge_result {
                             Ok(out) if out.status.success() => {
                                 info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
-                                // Attempt post-merge branch cleanup when the PR has a known
-                                // head branch.  Failures are non-fatal (PR already merged).
-                                if !pr.head_ref.is_empty() {
+                                // Attempt post-merge **remote-only** branch
+                                // cleanup when the PR has a known head
+                                // branch.  The engine never checks out the
+                                // PR's local branch in multi-PR mode, so
+                                // `cleanup_branch` (which tries to delete a
+                                // local branch) would operate on whatever
+                                // the engine's CWD happens to be on — see
+                                // #65.  `cleanup_merged_remote_branch` only
+                                // touches the remote.  Failures are
+                                // non-fatal (PR is already merged).
+                                if let Some(head_ref) = pr.head_ref.as_deref() {
                                     let bm = BranchManager::new(self.config.pr_management.clone());
-                                    match bm.cleanup_branch(&pr.head_ref) {
+                                    match bm.cleanup_merged_remote_branch(head_ref) {
                                         Ok(()) => info!(
                                             iteration = i,
-                                            branch = %pr.head_ref,
-                                            "multi-pr: cleaned up feature branch after merge"
+                                            branch = %head_ref,
+                                            "multi-pr: cleaned up remote feature branch after merge"
                                         ),
                                         Err(e) => warn!(
                                             iteration = i,
-                                            branch = %pr.head_ref,
+                                            branch = %head_ref,
                                             error = %e,
-                                            "multi-pr: post-merge branch cleanup failed (non-fatal)"
+                                            "multi-pr: post-merge remote cleanup failed (non-fatal)"
                                         ),
                                     }
+                                } else {
+                                    warn!(
+                                        iteration = i,
+                                        pr = pr.number,
+                                        "multi-pr: merged PR has no head_ref; \
+                                         skipping remote branch cleanup"
+                                    );
                                 }
                             }
                             Ok(out) => {
@@ -665,22 +681,26 @@ impl LoopEngine {
                             break;
                         } else {
                             let outcome = IterationOutcome::from_exit_code(result.exit_code);
-                            let is_permanent = result
-                                .exit_code
-                                .map(|c| self.config.non_retryable_exit_codes.contains(&c))
-                                .unwrap_or(false);
-                            if is_permanent {
+                            let policy = RetryPolicy::new(&self.config.non_retryable_exit_codes);
+                            let policy_allows = policy.should_retry(&outcome);
+                            // Log the "permanent" case specifically so
+                            // operators can see *why* retries were skipped
+                            // when max_retries > 0.
+                            if !policy_allows
+                                && matches!(outcome, IterationOutcome::NonZeroExit { .. })
+                                && result.exit_code.is_some_and(|c| {
+                                    self.config.non_retryable_exit_codes.contains(&c)
+                                })
+                            {
                                 warn!(
                                     iteration = i,
                                     provider = self.adapter.name(),
                                     exit_code = result.exit_code,
-                                    "Iteration failed with a non-retryable exit code; skipping retries"
+                                    "Iteration failed with a non-retryable exit code; \
+                                     skipping retries"
                                 );
                             }
-                            if !is_permanent
-                                && attempt < self.config.max_retries
-                                && outcome.is_retryable()
-                            {
+                            if policy_allows && attempt < self.config.max_retries {
                                 summary.retries += 1;
                                 let delay_ms = compute_backoff_ms(
                                     self.config.retry_backoff_ms,
@@ -884,7 +904,22 @@ impl LoopEngine {
                         }
                         Ok(crate::pr_manager::PrAction::NoSignal) => {}
                         Err(e) => {
-                            warn!(iteration = i, error = %e, "single-pr: PrManager error");
+                            // Mirror the blocker-comment pattern used by the
+                            // ProviderSpawn arm above: a PR create/update
+                            // failure after a shippable signal means no PR
+                            // exists, the operator needs to know, and the
+                            // linked issue needs an audit trail (see #69).
+                            let msg = format!("single-pr: PrManager error on iteration {i}: {e}");
+                            warn!(iteration = i, error = %e, "{msg}");
+                            if self.config.issue_tracking.comment_cadence
+                                != CommentCadence::OffEngine
+                            {
+                                self.post_comment(&format!(
+                                    "**Blocker** — shippable signal fired on iteration \
+                                     {i} but PR create/update failed: `{e}`. \
+                                     No pull request was opened for this iteration."
+                                ));
+                            }
                         }
                     }
                 }
@@ -1013,7 +1048,21 @@ impl LoopEngine {
                                  (`auto_close_owned_issues=true`).",
                                 run_id = artifacts.run_id
                             );
-                            let _ = self.tracker.add_comment(issue_number, &close_comment);
+                            // If the explanatory comment fails to post, warn
+                            // but still proceed with the close — the close
+                            // result is the load-bearing audit event, and the
+                            // very next call checks its Err.  What we used to
+                            // do (`let _ = ...`) silently discarded the comment
+                            // error (see #69); now an operator reading the
+                            // logs at least sees why no comment appeared.
+                            if let Err(e) = self.tracker.add_comment(issue_number, &close_comment) {
+                                warn!(
+                                    issue = issue_number,
+                                    error = %e,
+                                    "auto_close_owned_issues: failed to post closing \
+                                     comment; closing issue anyway"
+                                );
+                            }
                             if let Err(e) = self.tracker.close_issue(
                                 issue_number,
                                 crate::issue_tracker::CloseReason::Completed,
@@ -1475,6 +1524,37 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.failures, 1);
         assert_eq!(summary.retries, 1);
+    }
+
+    /// Regression test for #70: without a way to distinguish "retried then
+    /// recovered" from "retried forever", the existing retry tests all
+    /// used permanently-failing adapters.  `FakeAdapter::sequence(vec![1,
+    /// 0])` models a transient failure that succeeds on retry.
+    #[test]
+    fn retry_recovery_with_sequenced_exit_codes() {
+        use crate::provider::tests::FakeAdapter;
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            max_retries: 2,
+            retry_backoff_ms: 0,
+            ..Default::default()
+        };
+        // First call: exit 1 (transient) → retried. Second call: exit 0 → success.
+        let adapter = FakeAdapter::sequence("fake", vec![1, 0]);
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(
+            summary.successes, 1,
+            "iteration should end in success after one retry"
+        );
+        assert_eq!(summary.failures, 0);
+        assert_eq!(
+            summary.retries, 1,
+            "exactly one retry should have been recorded"
+        );
     }
 
     #[test]
@@ -2035,7 +2115,7 @@ mod tests {
                     number: 42,
                     title: "feat: something".to_string(),
                     url: "https://github.com/owner/repo/pull/42".to_string(),
-                    head_ref: "loop/42-feat-something".to_string(),
+                    head_ref: Some("loop/42-feat-something".to_string()),
                 };
                 IterationPlan {
                     description: "blocked on human review".to_string(),
@@ -2155,7 +2235,7 @@ mod tests {
                     number: 77,
                     title: "feat: merge me".to_string(),
                     url: "https://github.com/owner/repo/pull/77".to_string(),
-                    head_ref: "loop/77-feat-merge-me".to_string(),
+                    head_ref: Some("loop/77-feat-merge-me".to_string()),
                 };
                 IterationPlan {
                     description: "merge ready PR".to_string(),
@@ -2202,7 +2282,7 @@ mod tests {
                     number: 88,
                     title: "no ref".to_string(),
                     url: "https://github.com/owner/repo/pull/88".to_string(),
-                    head_ref: String::new(), // empty — cleanup must be skipped
+                    head_ref: None, // empty — cleanup must be skipped
                 };
                 IterationPlan {
                     description: "merge ready PR (no head ref)".to_string(),
