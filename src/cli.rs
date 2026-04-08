@@ -61,7 +61,7 @@ pub struct Cli {
     pub command: Option<Commands>,
 
     /// Provider to use for loop execution.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub provider: Option<Provider>,
 
     /// Number of iterations (-1 for infinite looping).
@@ -79,11 +79,14 @@ pub struct Cli {
     /// Path to a config file to load as a base configuration.
     /// Supports TOML (`.toml`, default) and YAML (`.yaml` / `.yml`).
     /// Format is detected automatically from the file extension.
-    #[arg(long)]
+    /// Marked `global` so it can appear before *or* after a subcommand:
+    /// `code-looper --config foo.toml serve` and `code-looper serve --config foo.toml`
+    /// are equivalent.
+    #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
     /// Log level: trace, debug, info, warn, or error.
-    #[arg(long)]
+    #[arg(long, global = true)]
     pub log_level: Option<String>,
 
     /// Enable orchestration policy engine (auto-selects workflow branch from repo context).
@@ -433,6 +436,45 @@ mod tests {
         let config = cli.apply_overrides(base);
         assert_eq!(config.prompt_inline.as_deref(), Some("new prompt"));
         assert!(config.prompt_file.is_none());
+    }
+
+    /// `--config`, `--provider`, and `--log-level` are marked `global = true`
+    /// so they may appear *before* or *after* a subcommand.  Lock both
+    /// orderings in so a future regression in clap-attribute placement is
+    /// caught immediately.
+    #[test]
+    fn config_flag_works_before_subcommand() {
+        let cli = Cli::try_parse_from(["code-looper", "--config", "looper.toml", "serve"]).unwrap();
+        assert_eq!(
+            cli.config.as_deref().and_then(|p| p.to_str()),
+            Some("looper.toml")
+        );
+        assert!(matches!(cli.command, Some(Commands::Serve { .. })));
+    }
+
+    #[test]
+    fn config_flag_works_after_subcommand() {
+        let cli = Cli::try_parse_from(["code-looper", "serve", "--config", "looper.toml"]).unwrap();
+        assert_eq!(
+            cli.config.as_deref().and_then(|p| p.to_str()),
+            Some("looper.toml")
+        );
+        assert!(matches!(cli.command, Some(Commands::Serve { .. })));
+    }
+
+    #[test]
+    fn provider_and_log_level_flags_work_after_subcommand() {
+        let cli = Cli::try_parse_from([
+            "code-looper",
+            "serve",
+            "--provider",
+            "codex",
+            "--log-level",
+            "debug",
+        ])
+        .unwrap();
+        assert_eq!(cli.provider, Some(Provider::Codex));
+        assert_eq!(cli.log_level.as_deref(), Some("debug"));
     }
 
     #[test]
