@@ -263,12 +263,17 @@ impl RunArtifacts {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Generate a run ID from the current timestamp (sortable, filesystem-safe).
+///
+/// Uses nanosecond precision so that two runs starting in the same wall-clock
+/// second do not collide and overwrite each other's artifacts directory.
+/// Padded to 20 digits so the IDs sort lexicographically as well as
+/// chronologically (epoch nanos currently fit in 19 digits, with headroom).
 fn run_id_now() -> String {
-    let secs = SystemTime::now()
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
-        .as_secs();
-    format!("{secs:020}")
+        .as_nanos();
+    format!("{nanos:020}")
 }
 
 /// Resolve the operator identity from the environment.
@@ -420,6 +425,33 @@ fn print_terminal_summary(markdown: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run_id_now()` must produce distinct IDs for back-to-back calls so that
+    /// concurrent runs starting in the same second don't share an artifact
+    /// directory.  Verifies the nanosecond-precision fix for issue #58.
+    #[test]
+    fn run_id_now_is_unique_for_back_to_back_calls() {
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..1000 {
+            let id = run_id_now();
+            assert!(
+                ids.insert(id.clone()),
+                "duplicate run_id observed within a tight loop: {id}"
+            );
+        }
+    }
+
+    /// Run IDs must be 20-digit zero-padded strings so they sort
+    /// lexicographically as well as chronologically.
+    #[test]
+    fn run_id_now_is_20_digit_zero_padded() {
+        let id = run_id_now();
+        assert_eq!(id.len(), 20, "expected 20-digit ID, got {id}");
+        assert!(
+            id.chars().all(|c| c.is_ascii_digit()),
+            "expected all digits, got {id}"
+        );
+    }
 
     #[test]
     fn outcome_from_exit_code_zero_is_success() {
