@@ -202,4 +202,4 @@ The process was killed (Ctrl-C, OOM, signal) before the end-of-run artifacts wer
 
 **Remediation**
 
-The transcript (`transcript.txt`) is written per-iteration and is safe to read after an interrupted run. The manifest and summary are written only at clean run exit. Re-run the loop to get a complete artifact set for the next run.
+Per-iteration transcripts are written as `.code-looper/runs/<run-id>/iteration-<n>.log` and are safe to read after an interrupted run. The manifest and summary are written only at clean run exit. Re-run the loop to get a complete artifact set for the next run.
