@@ -41,7 +41,7 @@ Create `CLAUDE.md` at the repository root. At a minimum, include:
 - Any conventions the agent should follow (commit style, branch naming, etc.)
 
 Example:
-```markdown
+~~~markdown
 # CLAUDE.md
 
 ## Project
@@ -58,7 +58,7 @@ cargo test
 ## Conventions
 
 - Commit messages: `<type>: <summary> (#<issue>)`
-```
+~~~
 
 ---
 
