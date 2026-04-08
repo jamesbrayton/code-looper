@@ -229,24 +229,31 @@ listener starts. Per-request overrides are accepted in the request body.
 
 ### Protocol
 
-Each connection sends one JSON request followed by a newline; the service
-replies with one JSON response followed by a newline, then closes the
-connection.
+The service speaks newline-delimited JSON (JSON Lines).  A client may send
+multiple JSON requests over the same connection, one per line, and the
+service replies with one JSON response per request, also one per line.  The
+connection stays open until the client closes it or the service shuts down.
+
+All responses use a consistent envelope:
+
+- Success: `{"ok":true,"data":{...}}`
+- Error:   `{"ok":false,"error":"..."}`
 
 **Supported commands:**
 
 | Request | Response |
 |---------|---------|
-| `{"cmd":"run","prompt":"…","provider":"…"}` | `{"ok":true,"exit_code":0,"stdout":"…","stderr":"…","duration_ms":123}` |
-| `{"cmd":"status"}` | `{"ok":true,"uptime_secs":42,"run_count":7}` |
-| `{"cmd":"shutdown"}` | `{"ok":true}` — service exits after sending this |
-| _(unknown)_ | `{"ok":false,"error":"unknown command"}` |
+| `{"cmd":"run","prompt":"…","provider":"…"}` | `{"ok":true,"data":{"ok":true,"exit_code":0,"stdout":"…","stderr":"…","duration_ms":123}}` |
+| `{"cmd":"status"}` | `{"ok":true,"data":{"uptime_secs":42,"run_count":7,"success_count":6,"failure_count":1,"provider":"claude"}}` |
+| `{"cmd":"shutdown"}` | `{"ok":true,"data":{"message":"shutting down"}}` — service exits after sending this |
+| _(unknown / parse error)_ | `{"ok":false,"error":"…"}` |
 
 **Example session (netcat):**
 
 ```bash
-echo '{"cmd":"status"}' | nc 127.0.0.1 7979
-# → {"ok":true,"uptime_secs":5,"run_count":0}
+printf '%s\n%s\n' '{"cmd":"status"}' '{"cmd":"status"}' | nc 127.0.0.1 7979
+# → {"ok":true,"data":{"uptime_secs":5,"run_count":0,"success_count":0,"failure_count":0,"provider":"claude"}}
+# → {"ok":true,"data":{"uptime_secs":6,"run_count":0,"success_count":0,"failure_count":0,"provider":"claude"}}
 ```
 
 ---
