@@ -374,8 +374,12 @@ impl IssueTracker for GitHubIssueTracker {
     fn ensure_labels(&self, labels: &[String]) -> Result<(), IssueTrackerError> {
         let slug = self.repo_slug();
         for label in labels {
-            // `gh label create --force` is idempotent — it creates the label
-            // if absent and updates it if present (no error on conflict).
+            // `gh label create --force` is idempotent on modern gh versions —
+            // it creates the label if absent and updates it if present.  Older
+            // versions exit non-zero when the label already exists; for those,
+            // allow only an "already exists" stderr through.  Every other
+            // non-zero exit (auth, 404, rate-limit, validation, transport) is
+            // surfaced via `classify_gh_error` so the caller can react.
             let args = vec![
                 "label".to_string(),
                 "create".to_string(),
@@ -385,12 +389,42 @@ impl IssueTracker for GitHubIssueTracker {
                 "--force".to_string(),
             ];
             let output = self.run_gh(&args)?;
-            // Label create may exit non-zero on an already-existing label with
-            // some older gh versions; treat that as success.
-            let _ = output;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr_lower = stderr.to_lowercase();
+                if stderr_lower.contains("already exists") {
+                    // Benign: concurrent creator, or old gh version without
+                    // `--force` semantics.  Treat as success.
+                    continue;
+                }
+                return Err(classify_gh_error(
+                    &stderr,
+                    &format!("ensure_labels({label})"),
+                ));
+            }
         }
         Ok(())
     }
+}
+
+/// Scan an existing promise-markdown file for issue-number headings and return
+/// the numbers found.
+///
+/// Headings are written by `flush()` as `## #<number> <title> [STATE]`.  We
+/// parse just the numeric portion; any line that does not match the format is
+/// ignored.  Missing files return an empty vector.
+fn scan_existing_issue_numbers(path: &std::path::Path) -> Vec<u32> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    contents
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix("## #")?;
+            let end = rest.find(|c: char| !c.is_ascii_digit())?;
+            rest[..end].parse::<u32>().ok()
+        })
+        .collect()
 }
 
 // ── LocalPromiseTracker ───────────────────────────────────────────────────────
@@ -413,17 +447,30 @@ struct LocalStore {
     /// In-memory issues indexed by number.
     issues: std::collections::HashMap<u32, Issue>,
     /// Monotonically increasing counter for new issue numbers.
-    #[allow(dead_code)]
+    ///
+    /// Initialised on construction to `max(issue_numbers_on_disk) + 1` so that
+    /// issue numbers remain unique across process restarts.  See #75 for the
+    /// collision bug this prevents.
     next_number: u32,
 }
 
 impl LocalPromiseTracker {
     pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        let path = path.into();
+        // Seed `next_number` from whatever issue numbers are already present
+        // on disk, so a restart cannot collide with existing issues.  We only
+        // look at the headings — full body round-tripping is intentionally out
+        // of scope for this dev/debug tracker.
+        let next_number = scan_existing_issue_numbers(&path)
+            .into_iter()
+            .max()
+            .map(|n| n + 1)
+            .unwrap_or(1);
         Self {
-            path: path.into(),
+            path,
             inner: Mutex::new(LocalStore {
                 issues: std::collections::HashMap::new(),
-                next_number: 1,
+                next_number,
             }),
         }
     }
