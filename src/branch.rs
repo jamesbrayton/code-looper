@@ -500,8 +500,22 @@ mod tests {
 
     #[test]
     fn current_branch_returns_ok_in_git_repo() {
-        // We are always running inside the workspace git repo, so this must
-        // succeed and return a non-empty branch name.
+        // Skip when the test process is not running inside a git checkout
+        // (e.g., source-archive packaging contexts without VCS metadata).
+        // We deliberately don't `git init` a temp dir and `set_current_dir`
+        // into it: cargo runs unit tests in parallel by default, and
+        // `set_current_dir` is process-global, so doing so would race with
+        // any other test that observes CWD.
+        let in_git_repo = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !in_git_repo {
+            eprintln!("skipping current_branch_returns_ok_in_git_repo: not inside a git repo");
+            return;
+        }
+
         let branch = current_branch();
         assert!(branch.is_ok(), "current_branch() failed: {branch:?}");
         let name = branch.unwrap();
