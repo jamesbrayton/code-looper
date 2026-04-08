@@ -47,8 +47,26 @@ pub enum Commands {
         port: u16,
 
         /// Address to bind to.  Defaults to 127.0.0.1 (loopback only).
+        ///
+        /// By default, any bind address outside the loopback range
+        /// (`127.0.0.0/8` / `::1`) is refused — the service has no built-in
+        /// authentication and exposes a `run` command that executes arbitrary
+        /// prompts through the configured provider with
+        /// `--dangerously-skip-permissions`.  To deliberately expose the
+        /// service on a LAN or container-external interface, also pass
+        /// `--unsafe-bind` and put the deployment behind its own auth layer.
         #[arg(long, default_value = "127.0.0.1")]
         bind_addr: String,
+
+        /// [UNSAFE] Allow binding to a non-loopback address.
+        ///
+        /// Service mode has no auth, no TLS, and no peer check; anyone who can
+        /// reach the socket can trigger provider runs with
+        /// `--dangerously-skip-permissions`.  Only enable this when the
+        /// service is already behind an external auth/firewall boundary you
+        /// control.
+        #[arg(long)]
+        unsafe_bind: bool,
     },
 }
 

@@ -59,6 +59,7 @@ fn main() -> anyhow::Result<()> {
         Some(cli::Commands::Serve {
             port,
             ref bind_addr,
+            unsafe_bind,
         }) => {
             let bind_addr = bind_addr.clone();
             // Build config from file / CLI overrides, then hand off to service mode.
@@ -78,8 +79,13 @@ fn main() -> anyhow::Result<()> {
                 )
                 .init();
 
-            info!(port = port, bind_addr = %bind_addr, "Starting service mode");
-            let svc = service::ServiceMode::new(resolved, bind_addr, port);
+            info!(
+                port = port,
+                bind_addr = %bind_addr,
+                unsafe_bind = unsafe_bind,
+                "Starting service mode"
+            );
+            let svc = service::ServiceMode::new(resolved, bind_addr, port, unsafe_bind);
             return svc.run();
         }
 
@@ -129,7 +135,7 @@ fn main() -> anyhow::Result<()> {
     let guard = policy_guard::PolicyGuard::new(policy_guard::UnsafeOverrides {
         allow_direct_github: resolved.allow_direct_github,
     });
-    let violations = guard.validate_orchestration(resolved.orchestration.enabled);
+    let violations = guard.check_startup(resolved.orchestration.enabled);
     if !violations.is_empty() {
         for v in &violations {
             eprintln!("{v}");

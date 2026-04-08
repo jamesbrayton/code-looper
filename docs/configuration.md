@@ -216,16 +216,35 @@ requests over a newline-delimited JSON (JSON-lines) protocol. This is the v2.0
 service / embedding mode.
 
 ```
-code-looper serve [--port N] [--bind-addr ADDR]
+code-looper serve [--port N] [--bind-addr ADDR] [--unsafe-bind]
 ```
 
 | CLI flag | Default | Description |
 |----------|---------|-------------|
 | `--port` | `7979` | TCP port to listen on |
 | `--bind-addr` | `127.0.0.1` | Address to bind to (loopback-only by default) |
+| `--unsafe-bind` | _off_ | Allow binding to a non-loopback address (see below) |
 
 The base `LoopConfig` is loaded from `--config` (or defaults) before the
 listener starts. Per-request overrides are accepted in the request body.
+
+### Security model
+
+**Service mode has no built-in authentication.** The `run` command
+executes arbitrary prompts through the configured provider with
+`--dangerously-skip-permissions`, so any caller that can reach the TCP
+socket can trigger provider runs against the host filesystem.
+
+As a result, the service will **refuse to start** if `--bind-addr` resolves
+to anything outside the loopback range (`127.0.0.0/8`, `::1`, `localhost`)
+unless you also pass `--unsafe-bind`. When `--unsafe-bind` is set the
+service logs a prominent warning and starts anyway — you are expected to
+have put the deployment behind your own auth/firewall layer (reverse
+proxy with mTLS, SSH tunnel, VPN, container network policy, etc.).
+
+If you just want to expose the service to another process on the same
+host, prefer the default `127.0.0.1` bind and do **not** pass
+`--unsafe-bind`.
 
 ### Protocol
 
