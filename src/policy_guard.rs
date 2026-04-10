@@ -1,12 +1,28 @@
+//! Policy guard — agent-prompt enforcement of the MCP-only GitHub mutation
+//! path.
+//!
+//! Per ADR-001 (revised), MCP-only is scoped to **agent prompts**:
+//! [`PolicyGuard::augment_prompt`] prepends a preamble telling the provider
+//! to use only MCP server tools for GitHub writes.  The engine itself is
+//! explicitly permitted to shell out to `gh` for its own bookkeeping (PR
+//! creation, issue comments, merge-cleanup branch ops) — see the module
+//! docs in `pr_manager.rs` and `issue_tracker.rs`.
+//!
+//! This module does **not** enforce anything at the process level; enforcement
+//! is prompt-level and trusts the agent to honour the preamble.  A stronger
+//! sandbox would require removing `gh` from the provider's `PATH`, which is
+//! out of scope for this ADR.
+
 /// Configuration for unsafe bypass overrides.
 ///
 /// All overrides are opt-in and disabled by default.  Enabling any of them
-/// weakens the safety guarantees described in the PRD.
+/// weakens the safety guarantees described in ADR-001.
 #[derive(Debug, Clone, Default)]
 pub struct UnsafeOverrides {
-    /// When `true`, the system allows orchestration context to be resolved via
-    /// direct `gh` CLI calls rather than requiring a GitHub MCP server.
-    /// Caution: this bypasses the MCP-only GitHub integration path.
+    /// When `true`, the agent-prompt MCP-only preamble is suppressed, so
+    /// providers are free to use `gh` CLI or raw REST calls for GitHub
+    /// writes.  Engine-side `gh` usage is unaffected by this flag — it is
+    /// already permitted by ADR-001.
     pub allow_direct_github: bool,
 }
 
@@ -31,11 +47,14 @@ impl std::fmt::Display for PolicyViolation {
     }
 }
 
-/// Enforces the MCP-only GitHub mutation path and validates execution config.
+/// Agent-prompt enforcement of the MCP-only GitHub mutation path.
 ///
-/// The guard runs at startup, before any loop iteration, and raises
-/// `PolicyViolation`s for any configuration that would allow GitHub mutations
-/// outside the approved MCP server path.
+/// The guard has a single real responsibility: prepend a preamble to every
+/// provider prompt telling the agent to use MCP server tools for any GitHub
+/// writes (see [`Self::augment_prompt`]).  There is no process-level or
+/// config-level validation — enforcement is prompt-level only, and the
+/// engine itself is explicitly permitted to use `gh` directly per the
+/// revised ADR-001.
 pub struct PolicyGuard {
     overrides: UnsafeOverrides,
 }
@@ -45,25 +64,16 @@ impl PolicyGuard {
         Self { overrides }
     }
 
-    /// Validate that the orchestration configuration is safe.
+    /// Startup sanity check for orchestration config.
     ///
-    /// Returns a list of violations (empty = all clear).
-    pub fn validate_orchestration(&self, orchestration_enabled: bool) -> Vec<PolicyViolation> {
-        let violations = Vec::new();
-
-        if orchestration_enabled && !self.overrides.allow_direct_github {
-            // When orchestration is enabled, context resolution currently falls
-            // back to the `GhCliContextResolver` (direct `gh` CLI).  This is
-            // permitted for READ-ONLY operations, but the guard must ensure the
-            // prompts delivered to providers explicitly require MCP tool use for
-            // any WRITE operations.
-            //
-            // No violation is raised here for reads; the guard instead
-            // augments prompts (see `augment_prompt`) to enforce MCP-only
-            // writes.
-        }
-
-        violations
+    /// Returns a list of violations (empty = all clear).  At present this is
+    /// intentionally a no-op: the guard has no config invariants to check
+    /// beyond what the config loader already validates, and the actual
+    /// MCP-only enforcement happens at the prompt level via
+    /// [`Self::augment_prompt`].  The method is kept so callers have a single
+    /// startup hook to attach future validations to.
+    pub fn check_startup(&self, _orchestration_enabled: bool) -> Vec<PolicyViolation> {
+        Vec::new()
     }
 
     /// Augment a provider prompt with an MCP-use preamble.
@@ -108,14 +118,16 @@ mod tests {
     }
 
     fn permissive_guard() -> PolicyGuard {
-        PolicyGuard::new(UnsafeOverrides { allow_direct_github: true })
+        PolicyGuard::new(UnsafeOverrides {
+            allow_direct_github: true,
+        })
     }
 
-    // ── validate_orchestration ────────────────────────────────────────────────
+    // ── check_startup ────────────────────────────────────────────────
 
     #[test]
     fn no_violations_when_orchestration_disabled() {
-        let violations = default_guard().validate_orchestration(false);
+        let violations = default_guard().check_startup(false);
         assert!(violations.is_empty());
     }
 
@@ -123,13 +135,13 @@ mod tests {
     fn no_violations_when_orchestration_enabled_default_policy() {
         // Orchestration with default (safe) policy: reads via gh are allowed;
         // writes are constrained via prompt augmentation, not a hard violation.
-        let violations = default_guard().validate_orchestration(true);
+        let violations = default_guard().check_startup(true);
         assert!(violations.is_empty());
     }
 
     #[test]
     fn no_violations_with_allow_direct_github_override() {
-        let violations = permissive_guard().validate_orchestration(true);
+        let violations = permissive_guard().check_startup(true);
         assert!(violations.is_empty());
     }
 

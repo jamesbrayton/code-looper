@@ -17,4 +17,12 @@ pub enum LooperError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("provider '{binary}' timed out after {timeout_secs}s")]
+    ProviderTimeout { binary: String, timeout_secs: u64 },
+
+    #[error(
+        "executable '{binary}' is not in the provider allowlist; permitted binaries: {allowed}"
+    )]
+    DisallowedExecutable { binary: String, allowed: String },
 }
