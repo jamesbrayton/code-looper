@@ -54,7 +54,7 @@
 			"installDirectlyFromGitHubRelease": true,
 			"version": "latest"
 		},
-		"ghcr.io/devcontainers-extra/features/claude-code:1": {
+		"ghcr.io/devcontainers-extra/features/claude-code:2": {
 			"version": "latest"
 		}
 	},
