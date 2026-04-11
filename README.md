@@ -4,24 +4,39 @@ Code Looper is a Rust CLI loop engine that drives multiple coding-agent CLIs (Cl
 
 ## Status
 
-**Early / experimental.** Milestones M1–M14 are complete (core engine, all three provider adapters, orchestration policy, issue tracking, branch and PR lifecycle, multi-PR triage). The project follows the roadmap in [docs/PRD.md](docs/PRD.md). Breaking changes are possible until v1.0.
+**Early / experimental — ready for first-round user acceptance testing.** Milestones M1–M14 are complete (core engine, all three provider adapters, orchestration policy, issue tracking, branch and PR lifecycle, multi-PR triage). The project follows the roadmap in [docs/PRD.md](docs/PRD.md). Breaking changes are possible until v1.0.
+
+If you are a UAT tester, start with [docs/getting-started.md](docs/getting-started.md) — it walks through install, first run, and what successful output looks like end-to-end.
 
 ## Quick start
 
-Prerequisites: Rust toolchain (`rustup`), and at least one provider CLI on your `$PATH` (`claude`, `gh copilot`, or `codex`).
+Prerequisites:
+
+- **Rust toolchain** (install via [rustup.rs](https://rustup.rs))
+- **At least one provider CLI on `$PATH`**, *already authenticated*:
+  - `claude` — install with `npm install -g @anthropic-ai/claude-code`, then run `claude` once to log in
+  - `gh copilot` — install with `gh extension install github/gh-copilot` (requires `gh auth login` first)
+  - `codex` — install with `npm install -g @openai/codex`, then run `codex login`
 
 ```bash
-# Clone and build
+# 1. Clone and build
 git clone https://github.com/jamesbrayton/code-looper.git
 cd code-looper
 cargo build --release
 
-# Run a single iteration with an inline prompt
-./target/release/code-looper \
+# 2. In the target repository you want to loop over, set up the workspace
+#    prerequisites (creates CLAUDE.md section + .mcp.json stub as needed).
+cd /path/to/target/repo
+/path/to/code-looper/target/release/code-looper bootstrap
+
+# 3. Run a single iteration with an inline prompt.
+/path/to/code-looper/target/release/code-looper \
   --provider claude \
   --iterations 1 \
   --prompt-inline "Describe the repository structure"
 ```
+
+The run writes artifacts under `.code-looper/runs/<run-id>/` (per-iteration logs, manifest, and summary).
 
 For a GitHub-integrated workflow with issue tracking and PR management, see [docs/getting-started.md](docs/getting-started.md).
 
