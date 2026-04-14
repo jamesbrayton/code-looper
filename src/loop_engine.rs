@@ -1,5 +1,7 @@
 use crate::branch::BranchManager;
-use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode};
+use crate::config::{
+    CommentCadence, IssueTrackingMode, LoopConfig, PrMode, PromptSource, ValidatedLoopConfig,
+};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
@@ -125,7 +127,7 @@ fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
 
 /// Drives the main iteration loop.
 pub struct LoopEngine {
-    config: LoopConfig,
+    config: ValidatedLoopConfig,
     adapter: Box<dyn ProviderAdapter>,
     /// Optional orchestration policy engine (present when orchestration is enabled).
     policy_engine: Option<PolicyEngine>,
@@ -146,7 +148,7 @@ pub struct LoopEngine {
 }
 
 impl LoopEngine {
-    pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
+    pub fn new(config: ValidatedLoopConfig, guard: PolicyGuard) -> Self {
         let adapter = build_adapter(
             &config.provider,
             config.telemetry.stream_output,
@@ -202,7 +204,7 @@ impl LoopEngine {
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
     #[cfg(test)]
-    pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
+    pub fn with_adapter(config: ValidatedLoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
@@ -223,7 +225,7 @@ impl LoopEngine {
     /// Constructor that accepts a custom adapter and issue tracker (useful for testing).
     #[cfg(test)]
     pub fn with_adapter_and_tracker(
-        config: LoopConfig,
+        config: ValidatedLoopConfig,
         adapter: Box<dyn ProviderAdapter>,
         tracker: Box<dyn IssueTracker>,
     ) -> Self {
@@ -246,7 +248,7 @@ impl LoopEngine {
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
     #[cfg(test)]
     pub fn with_adapter_and_policy(
-        config: LoopConfig,
+        config: ValidatedLoopConfig,
         adapter: Box<dyn ProviderAdapter>,
         policy_engine: PolicyEngine,
     ) -> Self {
@@ -270,7 +272,7 @@ impl LoopEngine {
     /// Constructor that accepts a custom adapter and PR strategy (useful for testing).
     #[cfg(test)]
     pub fn with_adapter_and_pr_strategy(
-        config: LoopConfig,
+        config: ValidatedLoopConfig,
         adapter: Box<dyn ProviderAdapter>,
         pr_strategy: Box<dyn PrStrategy>,
     ) -> Self {
@@ -303,19 +305,18 @@ impl LoopEngine {
         Arc::clone(&self.interrupted)
     }
 
-    /// Resolve the prompt string from the config, or return a default.
+    /// Resolve the prompt string from the validated prompt source.
     fn resolve_prompt(&self) -> anyhow::Result<String> {
-        if let Some(inline) = &self.config.prompt_inline {
-            return Ok(inline.clone());
+        match &self.config.prompt_source {
+            PromptSource::Inline(s) => Ok(s.clone()),
+            PromptSource::File(path) => {
+                let content = std::fs::read_to_string(path).map_err(|e| {
+                    anyhow::anyhow!("failed to read prompt file {}: {e}", path.display())
+                })?;
+                Ok(content)
+            }
+            PromptSource::None => Ok(String::new()),
         }
-        if let Some(path) = &self.config.prompt_file {
-            let content = std::fs::read_to_string(path).map_err(|e| {
-                anyhow::anyhow!("failed to read prompt file {}: {e}", path.display())
-            })?;
-            return Ok(content);
-        }
-        // No prompt configured — use empty string; provider decides behaviour.
-        Ok(String::new())
     }
 
     /// Post a comment to the configured issue, logging a warning on failure.
@@ -356,19 +357,13 @@ impl LoopEngine {
             }
         };
 
-        let infinite = self.config.iterations == -1;
-        let max = if infinite {
-            u64::MAX
-        } else {
-            self.config.iterations as u64
-        };
+        let infinite = self.config.iteration_count.is_infinite();
+        let max = self.config.iteration_count.max_iterations();
 
-        let prompt_source = if self.config.prompt_file.is_some() {
-            crate::telemetry::PromptSource::File
-        } else if self.config.prompt_inline.is_some() {
-            crate::telemetry::PromptSource::Inline
-        } else {
-            crate::telemetry::PromptSource::None
+        let prompt_source = match &self.config.prompt_source {
+            PromptSource::File(_) => crate::telemetry::PromptSource::File,
+            PromptSource::Inline(_) => crate::telemetry::PromptSource::Inline,
+            PromptSource::None => crate::telemetry::PromptSource::None,
         };
 
         let mut summary = SessionSummary::default();
@@ -1205,7 +1200,7 @@ impl LoopEngine {
             started_at: run_started_at,
             ended_at: Some(run_ended_at),
             provider: self.config.provider.clone(),
-            iterations_requested: self.config.iterations,
+            iterations_requested: self.config.iteration_count.as_raw_i64(),
             termination_reason: summary.termination_reason.clone(),
             skipped_decisions: summary.skipped_decisions,
             run_by: resolve_operator(),
@@ -1286,13 +1281,15 @@ mod tests {
         assert_eq!(capped, 600_000);
     }
 
-    fn config_with_iterations(n: i64) -> LoopConfig {
+    fn config_with_iterations(n: i64) -> ValidatedLoopConfig {
         LoopConfig {
             iterations: n,
             provider: Provider::Claude,
             prompt_inline: Some("test".to_string()),
             ..Default::default()
         }
+        .validate()
+        .unwrap()
     }
 
     #[test]
@@ -1391,7 +1388,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             stop_on_failure: true,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::failure("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1411,7 +1410,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             stop_on_failure: false,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::failure("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1452,7 +1453,9 @@ mod tests {
             max_retries: 2,
             retry_backoff_ms: 0, // no sleep in tests
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(AlwaysFailAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
@@ -1494,7 +1497,9 @@ mod tests {
             max_retries: 3,
             retry_backoff_ms: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let calls = Arc::new(AtomicU32::new(0));
         let adapter = FlipFlopAdapter { calls };
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
@@ -1514,7 +1519,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             on_complete: Some("true".to_string()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::success("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1533,7 +1540,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             max_retries: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::failure("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1555,7 +1564,9 @@ mod tests {
             retry_backoff_ms: 0,
             non_retryable_exit_codes: vec![2],
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::with_exit_code("fake", 2);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1581,7 +1592,9 @@ mod tests {
             retry_backoff_ms: 0,
             non_retryable_exit_codes: vec![2],
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::with_exit_code("fake", 1);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1602,7 +1615,9 @@ mod tests {
             retry_backoff_ms: 0,
             non_retryable_exit_codes: vec![],
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::with_exit_code("fake", 99);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1625,7 +1640,9 @@ mod tests {
             max_retries: 2,
             retry_backoff_ms: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         // First call: exit 1 (transient) → retried. Second call: exit 0 → success.
         let adapter = FakeAdapter::sequence("fake", vec![1, 0]);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
@@ -1648,7 +1665,9 @@ mod tests {
             provider: Provider::Claude,
             prompt_inline: Some("hello world".to_string()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::success("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1668,7 +1687,9 @@ mod tests {
             provider: Provider::Claude,
             prompt_file: Some(f.path().to_path_buf()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::success("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1691,7 +1712,9 @@ mod tests {
                 ..OrchestrationConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let resolver = StubContextResolver {
             context: RepoContext {
                 open_pr_count: 0,
@@ -1733,7 +1756,9 @@ mod tests {
                 ..OrchestrationConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_policy(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1755,7 +1780,7 @@ mod tests {
     use crate::issue_tracker::{MockCall, MockIssueTracker};
     use std::sync::Arc;
 
-    fn github_tracker_config(issue: u32, cadence: CommentCadence) -> LoopConfig {
+    fn github_tracker_config(issue: u32, cadence: CommentCadence) -> ValidatedLoopConfig {
         LoopConfig {
             iterations: 2,
             provider: Provider::Claude,
@@ -1770,6 +1795,8 @@ mod tests {
             },
             ..Default::default()
         }
+        .validate()
+        .unwrap()
     }
 
     #[test]
@@ -1910,7 +1937,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1947,7 +1976,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1978,7 +2009,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2013,7 +2046,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2058,7 +2093,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2091,7 +2128,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::failure("fake")),
@@ -2135,7 +2174,9 @@ mod tests {
                 ..PrManagementConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         // Build a production engine; we check the branch_manager field directly.
         // We can't run the loop (it would spawn 'claude'), so we just verify
         // construction succeeds and branch_manager is present.
@@ -2173,7 +2214,9 @@ mod tests {
                 ..PrManagementConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let guard =
             crate::policy_guard::PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let engine = LoopEngine::new(config, guard);
@@ -2218,8 +2261,16 @@ mod tests {
                 mode: PrMode::MultiPr,
                 ..PrManagementConfig::default()
             },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_pr_strategy(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2245,7 +2296,9 @@ mod tests {
             provider: Provider::Claude,
             prompt_inline: Some("test".to_string()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 3);
@@ -2271,7 +2324,9 @@ mod tests {
             max_retries: 2,
             retry_backoff_ms: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
@@ -2289,7 +2344,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             stop_on_failure: true,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1, "should stop after first timeout");
@@ -2338,8 +2395,16 @@ mod tests {
                 mode: PrMode::MultiPr,
                 ..PrManagementConfig::default()
             },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_pr_strategy(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2385,8 +2450,16 @@ mod tests {
                 mode: PrMode::MultiPr,
                 ..PrManagementConfig::default()
             },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_pr_strategy(
             config,
             Box::new(FakeAdapter::success("fake")),

@@ -1,4 +1,4 @@
-use crate::config::{LoopConfig, RepoTarget};
+use crate::config::{RepoTarget, ValidatedLoopConfig};
 use crate::loop_engine::{LoopEngine, SessionSummary};
 use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,10 +15,9 @@ pub struct RepoRunResult {
 
 /// Run the loop for each repo target in sequence.
 ///
-/// For every target a fresh `LoopConfig` is derived from `base_config` with:
+/// For every target a fresh config is derived from `base_config` with:
 /// - `workspace_dir` set to `target.path`
 /// - `prompt_inline` replaced by `target.prompt_override` when present
-/// - `prompt_file` cleared when `prompt_override` is set
 ///
 /// A single SIGINT / Ctrl+C handler is installed for the whole multi-repo
 /// session.  When the signal fires the current repo's iteration runs to
@@ -26,7 +25,10 @@ pub struct RepoRunResult {
 ///
 /// Returns one `RepoRunResult` per target in the same order as `targets`
 /// (fewer entries when interrupted early).
-pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<RepoRunResult> {
+pub fn run_multi_repo(
+    base_config: ValidatedLoopConfig,
+    targets: &[RepoTarget],
+) -> Vec<RepoRunResult> {
     let interrupted = Arc::new(AtomicBool::new(false));
     install_signal_handler(Arc::clone(&interrupted));
 
@@ -44,12 +46,10 @@ pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<R
         let name = target.display_name();
         info!(repo = %name, path = %target.path.display(), "Starting multi-repo run");
 
-        let mut repo_config = base_config.clone();
-        repo_config.workspace_dir = Some(target.path.clone());
+        let mut repo_config = base_config.clone().with_workspace_dir(target.path.clone());
 
         if let Some(ref prompt) = target.prompt_override {
-            repo_config.prompt_inline = Some(prompt.clone());
-            repo_config.prompt_file = None;
+            repo_config = repo_config.with_prompt_override(prompt.clone());
         }
 
         let overrides = UnsafeOverrides {
@@ -180,13 +180,17 @@ mod tests {
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-a".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let config_b = LoopConfig {
             iterations: 2,
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-b".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
 
         let summary_a =
             LoopEngine::with_adapter(config_a, Box::new(FakeAdapter::success("fake"))).run();
@@ -213,7 +217,9 @@ mod tests {
             iterations: 5,
             prompt_inline: Some("task".to_string()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let summary = LoopEngine::with_adapter(config, Box::new(FakeAdapter::success("out")))
             .with_shared_interrupt(Arc::clone(&flag))
             .run();
@@ -241,7 +247,9 @@ mod tests {
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-a".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let summary_a = LoopEngine::with_adapter(config_a, Box::new(FakeAdapter::success("out")))
             .with_shared_interrupt(Arc::clone(&interrupted))
             .run();
@@ -256,7 +264,9 @@ mod tests {
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-b".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let summary_b = LoopEngine::with_adapter(config_b, Box::new(FakeAdapter::success("out")))
             .with_shared_interrupt(Arc::clone(&interrupted))
             .run();

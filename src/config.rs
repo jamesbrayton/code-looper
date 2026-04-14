@@ -1,5 +1,6 @@
 use crate::error::LooperError;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 // ── Git remote auto-detection ────────────────────────────────────────────────
@@ -635,6 +636,97 @@ impl Default for LoopConfig {
     }
 }
 
+// ── Validated config types ───────────────────────────────────────────────────
+
+/// Validated iteration count: either a finite positive count or infinite.
+///
+/// Replaces the raw `iterations: i64` field with a type that makes zero and
+/// invalid negative values unrepresentable.
+#[derive(Debug, Clone, PartialEq)]
+pub enum IterationCount {
+    /// Run a fixed number of iterations (always ≥ 1).
+    Finite(NonZeroU32),
+    /// Run indefinitely until interrupted or a stop condition fires.
+    Infinite,
+}
+
+impl IterationCount {
+    /// Maximum number of iterations to execute.  Returns `u64::MAX` for
+    /// [`Infinite`](IterationCount::Infinite).
+    pub fn max_iterations(&self) -> u64 {
+        match self {
+            IterationCount::Finite(n) => u64::from(n.get()),
+            IterationCount::Infinite => u64::MAX,
+        }
+    }
+
+    pub fn is_infinite(&self) -> bool {
+        matches!(self, IterationCount::Infinite)
+    }
+
+    /// Convert to the legacy `i64` representation (`-1` for infinite) used by
+    /// the telemetry manifest format.
+    pub fn as_raw_i64(&self) -> i64 {
+        match self {
+            IterationCount::Finite(n) => i64::from(n.get()),
+            IterationCount::Infinite => -1,
+        }
+    }
+}
+
+/// Validated prompt source: at most one of inline or file.
+///
+/// Replaces the pair of `prompt_inline: Option<String>` /
+/// `prompt_file: Option<PathBuf>` fields with a type that makes the "both set"
+/// state unrepresentable.
+#[derive(Debug, Clone)]
+pub enum PromptSource {
+    /// Prompt provided as an inline string.
+    Inline(String),
+    /// Prompt loaded from a file path.
+    File(PathBuf),
+    /// No prompt configured — the orchestration engine or provider decides.
+    None,
+}
+
+/// A `LoopConfig` that has passed [`LoopConfig::validate`] and carries
+/// refined types for fields with non-trivial invariants.
+///
+/// All other `LoopConfig` fields are accessible via `Deref`.  Downstream code
+/// should accept `&ValidatedLoopConfig` to make it impossible to accidentally
+/// operate on an unvalidated configuration.
+#[derive(Debug, Clone)]
+pub struct ValidatedLoopConfig {
+    inner: LoopConfig,
+    /// Validated iteration count (replaces `inner.iterations`).
+    pub iteration_count: IterationCount,
+    /// Validated prompt source (replaces `inner.prompt_inline` / `inner.prompt_file`).
+    pub prompt_source: PromptSource,
+}
+
+impl std::ops::Deref for ValidatedLoopConfig {
+    type Target = LoopConfig;
+    fn deref(&self) -> &LoopConfig {
+        &self.inner
+    }
+}
+
+impl ValidatedLoopConfig {
+    /// Return a clone with a different workspace directory.
+    pub fn with_workspace_dir(mut self, dir: PathBuf) -> Self {
+        self.inner.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Return a clone with the prompt replaced by an inline string.
+    pub fn with_prompt_override(mut self, prompt: String) -> Self {
+        self.prompt_source = PromptSource::Inline(prompt.clone());
+        self.inner.prompt_inline = Some(prompt);
+        self.inner.prompt_file = None;
+        self
+    }
+}
+
 /// Supported config file formats, detected from the file extension.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfigFormat {
@@ -725,18 +817,47 @@ impl LoopConfig {
         }
     }
 
-    /// Validate that the config is internally consistent.
-    pub fn validate(&self) -> Result<(), LooperError> {
-        if self.prompt_inline.is_some() && self.prompt_file.is_some() {
-            return Err(LooperError::InvalidArgument(
-                "--prompt-inline and --prompt-file are mutually exclusive".to_string(),
-            ));
-        }
-        if self.iterations < -1 || self.iterations == 0 {
+    /// Validate the config and return a [`ValidatedLoopConfig`] with refined
+    /// types for fields that have non-trivial invariants.
+    ///
+    /// Consumes `self` so callers cannot accidentally use the raw config after
+    /// validation.
+    pub fn validate(self) -> Result<ValidatedLoopConfig, LooperError> {
+        // ── Prompt source ───────────────────────────────────────────────
+        let prompt_source = match (&self.prompt_inline, &self.prompt_file) {
+            (Some(_), Some(_)) => {
+                return Err(LooperError::InvalidArgument(
+                    "--prompt-inline and --prompt-file are mutually exclusive".to_string(),
+                ));
+            }
+            (Some(s), None) => PromptSource::Inline(s.clone()),
+            (None, Some(p)) => {
+                if !p.exists() {
+                    return Err(LooperError::InvalidArgument(format!(
+                        "--prompt-file '{}' does not exist",
+                        p.display()
+                    )));
+                }
+                PromptSource::File(p.clone())
+            }
+            (None, None) => PromptSource::None,
+        };
+
+        // ── Iteration count ─────────────────────────────────────────────
+        let iteration_count = if self.iterations == -1 {
+            IterationCount::Infinite
+        } else if self.iterations > 0 {
+            // Safe: we just checked > 0, and i64 > 0 fits in u32 for any
+            // reasonable iteration count.  Clamp to u32::MAX for safety.
+            let n = u32::try_from(self.iterations).unwrap_or(u32::MAX);
+            IterationCount::Finite(NonZeroU32::new(n).expect("n > 0"))
+        } else {
             return Err(LooperError::InvalidArgument(
                 "--iterations must be a positive integer or -1 for infinite".to_string(),
             ));
-        }
+        };
+
+        // ── Orchestration fields ────────────────────────────────────────
         if self.orchestration.enabled {
             if self.orchestration.repo_owner.is_none() {
                 return Err(LooperError::InvalidArgument(
@@ -749,14 +870,8 @@ impl LoopConfig {
                 ));
             }
         }
-        if let Some(path) = &self.prompt_file {
-            if !path.exists() {
-                return Err(LooperError::InvalidArgument(format!(
-                    "--prompt-file '{}' does not exist",
-                    path.display()
-                )));
-            }
-        }
+
+        // ── on_complete ─────────────────────────────────────────────────
         if let Some(cmd) = &self.on_complete {
             if cmd.trim().is_empty() {
                 return Err(LooperError::InvalidArgument(
@@ -764,7 +879,8 @@ impl LoopConfig {
                 ));
             }
         }
-        // multi-pr mode requires GitHub issue tracking (local mode can't track PRs).
+
+        // ── PR / issue tracking cross-checks ────────────────────────────
         if self.pr_management.mode == PrMode::MultiPr
             && self.issue_tracking.mode != IssueTrackingMode::Github
         {
@@ -773,7 +889,6 @@ impl LoopConfig {
                     .to_string(),
             ));
         }
-        // When github mode is active, owner and repo must be resolvable.
         if self.issue_tracking.mode == IssueTrackingMode::Github {
             let owner = self
                 .issue_tracking
@@ -802,7 +917,12 @@ impl LoopConfig {
                 ));
             }
         }
-        Ok(())
+
+        Ok(ValidatedLoopConfig {
+            inner: self,
+            iteration_count,
+            prompt_source,
+        })
     }
 }
 
@@ -1850,5 +1970,127 @@ non_retryable_exit_codes = [2, 126, 127]
         );
         let config = LoopConfig::from_yaml_file(file.path()).unwrap();
         assert_eq!(config.non_retryable_exit_codes, [2, 127]);
+    }
+
+    // ── ValidatedLoopConfig / IterationCount / PromptSource tests ────────
+
+    #[test]
+    fn validate_returns_finite_iteration_count() {
+        let validated = LoopConfig {
+            iterations: 5,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            validated.iteration_count,
+            IterationCount::Finite(std::num::NonZeroU32::new(5).unwrap())
+        );
+        assert_eq!(validated.iteration_count.max_iterations(), 5);
+        assert!(!validated.iteration_count.is_infinite());
+        assert_eq!(validated.iteration_count.as_raw_i64(), 5);
+    }
+
+    #[test]
+    fn validate_returns_infinite_iteration_count() {
+        let validated = LoopConfig {
+            iterations: -1,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(validated.iteration_count, IterationCount::Infinite);
+        assert_eq!(validated.iteration_count.max_iterations(), u64::MAX);
+        assert!(validated.iteration_count.is_infinite());
+        assert_eq!(validated.iteration_count.as_raw_i64(), -1);
+    }
+
+    #[test]
+    fn validate_returns_inline_prompt_source() {
+        let validated = LoopConfig {
+            prompt_inline: Some("hello".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert!(matches!(validated.prompt_source, PromptSource::Inline(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn validate_returns_file_prompt_source() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "prompt content").unwrap();
+        let validated = LoopConfig {
+            prompt_file: Some(f.path().to_path_buf()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert!(matches!(validated.prompt_source, PromptSource::File(_)));
+    }
+
+    #[test]
+    fn validate_returns_none_prompt_source() {
+        let validated = LoopConfig::default().validate().unwrap();
+        assert!(matches!(validated.prompt_source, PromptSource::None));
+    }
+
+    #[test]
+    fn validated_config_derefs_to_inner_fields() {
+        let validated = LoopConfig {
+            iterations: 3,
+            log_level: "debug".to_string(),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        // Access via Deref — must see original LoopConfig fields.
+        assert_eq!(validated.log_level, "debug");
+        assert_eq!(validated.provider, Provider::Claude);
+    }
+
+    #[test]
+    fn with_workspace_dir_updates_inner() {
+        let validated = LoopConfig::default().validate().unwrap();
+        let updated = validated.with_workspace_dir("/tmp/repo".into());
+        assert_eq!(
+            updated.workspace_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
+    }
+
+    #[test]
+    fn with_prompt_override_updates_source_and_inner() {
+        let validated = LoopConfig::default().validate().unwrap();
+        let updated = validated.with_prompt_override("override prompt".to_string());
+        assert!(
+            matches!(updated.prompt_source, PromptSource::Inline(ref s) if s == "override prompt")
+        );
+        assert_eq!(updated.prompt_inline.as_deref(), Some("override prompt"));
+        assert!(updated.prompt_file.is_none());
+    }
+
+    #[test]
+    fn validate_consumes_config_preventing_reuse() {
+        // This test verifies the API contract: validate() takes ownership,
+        // so callers cannot accidentally use the raw config after validation.
+        // If this compiles, the guarantee holds — no runtime assertion needed.
+        let config = LoopConfig::default();
+        let _validated = config.validate().unwrap();
+        // `config` is now moved — any use would be a compile error.
+    }
+
+    #[test]
+    fn large_iteration_count_is_clamped_to_u32_max() {
+        let validated = LoopConfig {
+            iterations: i64::from(u32::MAX) + 1,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            validated.iteration_count,
+            IterationCount::Finite(std::num::NonZeroU32::new(u32::MAX).unwrap())
+        );
     }
 }

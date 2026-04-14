@@ -1,4 +1,4 @@
-use crate::config::{LoopConfig, Provider as ProviderKind};
+use crate::config::{Provider as ProviderKind, ValidatedLoopConfig};
 use crate::provider::build_adapter;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
@@ -114,7 +114,7 @@ impl ServiceState {
 /// Server ← {"ok":true,"data":{"message":"shutting down"}}
 /// ```
 pub struct ServiceMode {
-    config: LoopConfig,
+    config: ValidatedLoopConfig,
     bind_addr: String,
     port: u16,
     /// When `true`, `run()` will accept a non-loopback bind address.  See
@@ -130,7 +130,12 @@ impl ServiceMode {
     ///
     /// `unsafe_bind` controls whether `run()` will accept a non-loopback bind
     /// address — see `Self::is_loopback_bind` and `--unsafe-bind` on the CLI.
-    pub fn new(config: LoopConfig, bind_addr: String, port: u16, unsafe_bind: bool) -> Self {
+    pub fn new(
+        config: ValidatedLoopConfig,
+        bind_addr: String,
+        port: u16,
+        unsafe_bind: bool,
+    ) -> Self {
         Self {
             config,
             bind_addr,
@@ -452,7 +457,9 @@ mod tests {
         let config = crate::config::LoopConfig {
             provider: ProviderKind::Claude,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         ServiceMode::new(config, "127.0.0.1".to_string(), 7979, false)
     }
 
@@ -528,7 +535,9 @@ mod tests {
         let config = crate::config::LoopConfig {
             provider: ProviderKind::Claude,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let svc = ServiceMode::new(config, "0.0.0.0".to_string(), 0, false);
         let err = svc.run().expect_err("bind should be refused");
         let msg = err.to_string();

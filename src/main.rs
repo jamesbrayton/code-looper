@@ -79,13 +79,17 @@ fn main() -> anyhow::Result<()> {
                 )
                 .init();
 
+            let validated = resolved
+                .validate()
+                .context("invalid configuration for service mode")?;
+
             info!(
                 port = port,
                 bind_addr = %bind_addr,
                 unsafe_bind = unsafe_bind,
                 "Starting service mode"
             );
-            let svc = service::ServiceMode::new(resolved, bind_addr, port, unsafe_bind);
+            let svc = service::ServiceMode::new(validated, bind_addr, port, unsafe_bind);
             return svc.run();
         }
 
@@ -114,12 +118,12 @@ fn main() -> anyhow::Result<()> {
     // Fill in repo_owner/repo_name from git remote if not set explicitly.
     resolved.resolve_git_defaults();
 
-    // Validate resolved config.
-    resolved.validate().context("invalid configuration")?;
+    // Validate resolved config — returns a ValidatedLoopConfig with refined types.
+    let validated = resolved.validate().context("invalid configuration")?;
 
     // Run workspace prerequisite checks unless explicitly skipped.
-    if !resolved.skip_prereq_check {
-        let ws_dir = workspace::resolve_workspace_dir(resolved.workspace_dir.as_deref());
+    if !validated.skip_prereq_check {
+        let ws_dir = workspace::resolve_workspace_dir(validated.workspace_dir.as_deref());
         let checker = workspace::PrerequisiteChecker::new(&ws_dir);
         let check_result = checker.run();
         if !check_result.is_ok() {
@@ -136,9 +140,9 @@ fn main() -> anyhow::Result<()> {
 
     // Validate orchestration policy and build the guard.
     let guard = policy_guard::PolicyGuard::new(policy_guard::UnsafeOverrides {
-        allow_direct_github: resolved.allow_direct_github,
+        allow_direct_github: validated.allow_direct_github,
     });
-    let violations = guard.check_startup(resolved.orchestration.enabled);
+    let violations = guard.check_startup(validated.orchestration.enabled);
     if !violations.is_empty() {
         for v in &violations {
             eprintln!("{v}");
@@ -149,26 +153,27 @@ fn main() -> anyhow::Result<()> {
     // ── Multi-repo mode ──────────────────────────────────────────────────────
     // When `multi_repo` entries are present, run the loop for each target in
     // sequence and print a combined summary.  The single-repo path is skipped.
-    if !resolved.multi_repo.is_empty() {
+    if !validated.multi_repo.is_empty() {
         info!(
-            provider = %resolved.provider,
-            repos = resolved.multi_repo.len(),
+            provider = %validated.provider,
+            repos = validated.multi_repo.len(),
             "Code Looper initializing in multi-repo mode"
         );
-        let targets = resolved.multi_repo.clone();
-        let results = multi_repo::run_multi_repo(&resolved, &targets);
+        let targets = validated.multi_repo.clone();
+        let results = multi_repo::run_multi_repo(validated, &targets);
+
         multi_repo::print_multi_repo_summary(&results);
         return Ok(());
     }
 
     info!(
-        provider = %resolved.provider,
-        iterations = resolved.iterations,
+        provider = %validated.provider,
+        iterations = validated.iteration_count.as_raw_i64(),
         "Code Looper initialized"
     );
 
     // Build the loop engine, install signal handler, and run.
-    let engine = loop_engine::LoopEngine::new(resolved, guard);
+    let engine = loop_engine::LoopEngine::new(validated, guard);
     engine.install_signal_handler();
     engine.run();
 
