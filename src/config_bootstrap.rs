@@ -343,6 +343,10 @@ pub fn next_steps_message(dir: &Path, format: ConfigFormat) -> String {
 }
 
 /// Write a scaffold file, respecting dry_run and force flags.
+///
+/// When overwriting an existing file (`force` is true), uses a
+/// write-to-temp-then-rename pattern so that an interrupted write never
+/// leaves the original file truncated or corrupted.
 fn write_scaffold_file(
     path: &Path,
     content: &str,
@@ -357,7 +361,15 @@ fn write_scaffold_file(
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, content)?;
+        if overwriting {
+            // Atomic write: write to a temp file then rename, so the
+            // original is never truncated if the process is interrupted.
+            let tmp_path = path.with_extension("tmp");
+            std::fs::write(&tmp_path, content)?;
+            std::fs::rename(&tmp_path, path)?;
+        } else {
+            std::fs::write(path, content)?;
+        }
     }
     if overwriting {
         Ok(ConfigBootstrapAction::Overwritten(path.to_path_buf()))
@@ -507,5 +519,34 @@ mod tests {
             .filter(|a| matches!(a, ConfigBootstrapAction::Created(_)))
             .count();
         assert_eq!(created_files, 7, "expected 7 new files");
+    }
+
+    #[test]
+    fn force_overwrite_preserves_original_on_write_success() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join(".code-looper");
+
+        // First run creates everything.
+        run_config_bootstrap(&dir, ConfigFormat::Toml, false, false).unwrap();
+
+        // Modify config to confirm it gets overwritten atomically.
+        let config_path = dir.join("config.toml");
+        std::fs::write(&config_path, "modified content").unwrap();
+
+        // Force overwrite — should use atomic write (temp + rename).
+        run_config_bootstrap(&dir, ConfigFormat::Toml, false, true).unwrap();
+
+        // File should contain the template, not our modified content.
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(
+            content.contains("Code Looper configuration"),
+            "expected template content after atomic overwrite"
+        );
+
+        // No leftover .tmp file should remain.
+        assert!(
+            !dir.join("config.tmp").exists(),
+            "temp file should be cleaned up after rename"
+        );
     }
 }

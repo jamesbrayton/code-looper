@@ -863,6 +863,8 @@ pub fn resolve_config_path(
         if let Some(path) = find_config_in_dir(&user_dir) {
             return Some((path, "user"));
         }
+    } else {
+        tracing::debug!("HOME/USERPROFILE not set; skipping user-tier config lookup");
     }
 
     None
@@ -1080,14 +1082,10 @@ impl LoopConfig {
 }
 
 /// Validate that a rule file exists and is within the size limit.
-fn validate_rule_file(path: &PathBuf, config_key: &str) -> Result<(), LooperError> {
-    if !path.exists() {
-        return Err(LooperError::InvalidArgument(format!(
-            "{config_key} points to '{}' which does not exist. \
-             Create the file or remove the config entry.",
-            path.display()
-        )));
-    }
+///
+/// Uses `fs::metadata` as the single existence+size check, eliminating the
+/// TOCTOU race of a separate `path.exists()` call.
+fn validate_rule_file(path: &Path, config_key: &str) -> Result<(), LooperError> {
     let meta = std::fs::metadata(path).map_err(|e| {
         LooperError::InvalidArgument(format!(
             "{config_key}: cannot read '{}': {e}",
@@ -1115,9 +1113,26 @@ fn validate_rule_file(path: &PathBuf, config_key: &str) -> Result<(), LooperErro
 
 /// Load the contents of a rule file, returning an empty string for empty files.
 ///
+/// Enforces `RULES_SIZE_MAX_BYTES` on every call (not just startup validation)
+/// to guard against files that grow between iterations.
+///
 /// Callers should handle `Err` by logging and reusing the last good content
 /// (for mid-run re-reads) or by failing startup (for initial validation).
-pub fn load_rule_file(path: &PathBuf) -> Result<String, LooperError> {
+pub fn load_rule_file(path: &Path) -> Result<String, LooperError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "failed to read rule file '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if meta.len() > RULES_SIZE_MAX_BYTES {
+        return Err(LooperError::InvalidArgument(format!(
+            "rule file '{}' is {} bytes, exceeding the {} byte limit",
+            path.display(),
+            meta.len(),
+            RULES_SIZE_MAX_BYTES
+        )));
+    }
     let content = std::fs::read_to_string(path).map_err(|e| {
         LooperError::InvalidArgument(format!(
             "failed to read rule file '{}': {e}",
@@ -1135,15 +1150,29 @@ pub fn load_rule_file(path: &PathBuf) -> Result<String, LooperError> {
 ///
 /// The returned string contains the global rules (if any) followed by the
 /// workflow-specific rules (if any), separated by blank lines.
+///
+/// On read failure, falls back to the last successfully loaded content for
+/// the failing file (cached in `RULES_CACHE`).  This prevents rules from
+/// being silently dropped due to transient I/O errors mid-run.
 pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(ref path) = rules.global {
         match load_rule_file(path) {
-            Ok(content) if !content.trim().is_empty() => parts.push(content),
+            Ok(content) if !content.trim().is_empty() => {
+                cache_rule(path, &content);
+                parts.push(content);
+            }
             Ok(_) => {} // empty file — skip
             Err(e) => {
-                tracing::warn!("failed to re-read global rule file, skipping: {e}");
+                tracing::warn!(
+                    path = %path.display(),
+                    "failed to re-read global rule file: {e}"
+                );
+                if let Some(cached) = get_cached_rule(path) {
+                    tracing::info!(path = %path.display(), "using cached global rule file content");
+                    parts.push(cached);
+                }
             }
         }
     }
@@ -1153,13 +1182,21 @@ pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>)
         let key = branch.replace('-', "_");
         if let Some(path) = rules.workflows.get(&key) {
             match load_rule_file(path) {
-                Ok(content) if !content.trim().is_empty() => parts.push(content),
+                Ok(content) if !content.trim().is_empty() => {
+                    cache_rule(path, &content);
+                    parts.push(content);
+                }
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(
+                        path = %path.display(),
                         branch = branch,
-                        "failed to re-read workflow rule file, skipping: {e}"
+                        "failed to re-read workflow rule file: {e}"
                     );
+                    if let Some(cached) = get_cached_rule(path) {
+                        tracing::info!(path = %path.display(), branch = branch, "using cached workflow rule file content");
+                        parts.push(cached);
+                    }
                 }
             }
         }
@@ -1169,6 +1206,32 @@ pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>)
         None
     } else {
         Some(parts.join("\n\n"))
+    }
+}
+
+// ── Rule file cache ─────────────────────────────────────────────────────────
+
+use std::sync::Mutex;
+
+/// Cache of last successfully loaded rule file content, keyed by path.
+static RULES_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cache_rule(path: &Path, content: &str) {
+    if let Ok(mut cache) = RULES_CACHE.lock() {
+        cache.insert(path.to_path_buf(), content.to_string());
+    }
+}
+
+fn get_cached_rule(path: &Path) -> Option<String> {
+    RULES_CACHE.lock().ok()?.get(path).cloned()
+}
+
+/// Clear the rule cache (for testing).
+#[cfg(test)]
+fn clear_rules_cache() {
+    if let Ok(mut cache) = RULES_CACHE.lock() {
+        cache.clear();
     }
 }
 
@@ -2359,7 +2422,7 @@ non_retryable_exit_codes = [2, 126, 127]
             ..Default::default()
         };
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("does not exist"));
+        assert!(err.to_string().contains("cannot read"));
         assert!(err.to_string().contains("rules.global"));
     }
 
@@ -2376,7 +2439,7 @@ non_retryable_exit_codes = [2, 126, 127]
             ..Default::default()
         };
         let err = config.validate().unwrap_err();
-        assert!(err.to_string().contains("does not exist"));
+        assert!(err.to_string().contains("cannot read"));
         assert!(err.to_string().contains("rules.workflows.pr_review"));
     }
 
@@ -2428,8 +2491,58 @@ non_retryable_exit_codes = [2, 126, 127]
     fn load_rule_file_returns_content() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, "Always use snake_case.").unwrap();
-        let content = load_rule_file(&f.path().to_path_buf()).unwrap();
+        let content = load_rule_file(f.path()).unwrap();
         assert!(content.contains("snake_case"));
+    }
+
+    #[test]
+    fn load_rule_file_rejects_oversized_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        // Write more than RULES_SIZE_MAX_BYTES (64 KB).
+        let big = "x".repeat(RULES_SIZE_MAX_BYTES as usize + 1);
+        std::io::Write::write_all(&mut f, big.as_bytes()).unwrap();
+        let err = load_rule_file(f.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("exceeding"), "expected size error, got: {msg}");
+    }
+
+    #[test]
+    fn load_rules_for_branch_falls_back_to_cache_on_read_error() {
+        clear_rules_cache();
+
+        let mut global_file = NamedTempFile::new().unwrap();
+        writeln!(global_file, "CACHED RULE").unwrap();
+
+        let rules = RulesConfig {
+            global: Some(global_file.path().to_path_buf()),
+            workflows: HashMap::new(),
+        };
+
+        // First call succeeds and caches the content.
+        let result = load_rules_for_branch(&rules, None).unwrap();
+        assert!(result.contains("CACHED RULE"));
+
+        // Delete the file to simulate a read error.
+        let path = global_file.path().to_path_buf();
+        drop(global_file);
+        std::fs::remove_file(&path).ok();
+
+        // Second call should fall back to cached content.
+        let result = load_rules_for_branch(&rules, None).unwrap();
+        assert!(
+            result.contains("CACHED RULE"),
+            "expected cached content on read failure"
+        );
+
+        clear_rules_cache();
+    }
+
+    #[test]
+    fn validate_rule_file_rejects_missing_via_metadata() {
+        let result = validate_rule_file(Path::new("/nonexistent/rule.md"), "test.key");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("test.key"), "error should include config key");
     }
 
     #[test]

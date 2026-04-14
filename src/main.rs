@@ -109,15 +109,15 @@ fn main() -> anyhow::Result<()> {
             let bind_addr = bind_addr.clone();
             // Three-tier config resolution (same as the loop path).
             let serve_ws = workspace::resolve_workspace_dir(cli_args.workspace_dir.as_deref());
-            let base = if let Some((path, _tier)) =
+            let (base, serve_config_source) = if let Some((path, tier)) =
                 config::resolve_config_path(cli_args.config.as_deref(), &serve_ws)
             {
                 let mut cfg = config::LoopConfig::from_file(&path)
                     .with_context(|| format!("failed to load config from {}", path.display()))?;
                 config::resolve_rule_paths(&mut cfg, &path);
-                cfg
+                (cfg, Some((path, tier)))
             } else {
-                config::LoopConfig::default()
+                (config::LoopConfig::default(), None)
             };
             let mut resolved = cli_args.apply_overrides(base);
 
@@ -128,6 +128,17 @@ fn main() -> anyhow::Result<()> {
                     }),
                 )
                 .init();
+
+            // Log config source after tracing is initialized.
+            if let Some((ref path, tier)) = serve_config_source {
+                info!(
+                    config = %path.display(),
+                    tier = tier,
+                    "Config loaded"
+                );
+            } else {
+                info!("No config file found at any tier; using built-in defaults");
+            }
 
             // Fill in repo_owner/repo_name from git remote (same as the loop path).
             resolved.resolve_git_defaults();
@@ -181,6 +192,8 @@ fn main() -> anyhow::Result<()> {
             tier = tier,
             "Config loaded"
         );
+    } else {
+        info!("No config file found at any tier; using built-in defaults");
     }
 
     // Fill in repo_owner/repo_name from git remote if not set explicitly.
