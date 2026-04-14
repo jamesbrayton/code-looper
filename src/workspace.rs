@@ -189,12 +189,12 @@ impl PrerequisiteChecker {
     }
 }
 
-/// Returns `true` when the MCP config JSON contains a top-level or nested
-/// `"github"` server key.
+/// Returns `true` when the MCP config JSON contains a `"github"` key
+/// under `"mcpServers"`.
 ///
 /// Uses proper JSON parsing to avoid false positives from `"github"`
 /// appearing in string values or unrelated keys.
-fn has_github_server(json: &str) -> bool {
+pub fn has_github_server(json: &str) -> bool {
     let v: serde_json::Value = match serde_json::from_str(json) {
         Ok(v) => v,
         Err(_) => return false,

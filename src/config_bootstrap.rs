@@ -240,18 +240,6 @@ const EXAMPLE_BACKLOG_DISCOVERY_RULES: &str = r#"# Backlog discovery rules — p
 - Security hardening opportunities.
 "#;
 
-/// Example multi-PR triage rules file.
-const EXAMPLE_MULTI_PR_TRIAGE_RULES: &str = r#"# Multi-PR triage rules — prepended when the workflow branch is multi-pr-triage
-#
-# Rename this file to multi-pr-triage.md to activate it.
-
-## Triage guidelines
-
-- Prioritise PRs with failing checks or merge conflicts.
-- Review the oldest PRs first unless a newer one is blocking.
-- Leave actionable feedback — avoid vague comments.
-"#;
-
 /// Run the config bootstrap process.
 ///
 /// Scaffolds the `.code-looper/` directory structure with annotated config,
@@ -314,10 +302,6 @@ pub fn run_config_bootstrap(
             "rules/backlog-discovery.md.example",
             EXAMPLE_BACKLOG_DISCOVERY_RULES,
         ),
-        (
-            "rules/multi-pr-triage.md.example",
-            EXAMPLE_MULTI_PR_TRIAGE_RULES,
-        ),
     ];
     for (name, content) in rule_files {
         actions.push(write_scaffold_file(
@@ -347,9 +331,8 @@ pub fn next_steps_message(dir: &Path, format: ConfigFormat) -> String {
 
 /// Write a scaffold file, respecting dry_run and force flags.
 ///
-/// When overwriting an existing file (`force` is true), uses a
-/// `NamedTempFile` for atomic writes — the temp file has a unique name
-/// (no collision risk) and is automatically cleaned up on failure.
+/// All writes use `NamedTempFile` + `persist` for atomicity — if the
+/// process is interrupted mid-write, no partial file is left on disk (#120).
 fn write_scaffold_file(
     path: &Path,
     content: &str,
@@ -365,26 +348,19 @@ fn write_scaffold_file(
         std::fs::create_dir_all(parent).map_err(|e| {
             anyhow::anyhow!("failed to create directory '{}': {e}", parent.display())
         })?;
-        if overwriting {
-            // Atomic write via NamedTempFile: unique naming avoids
-            // collisions and automatic cleanup handles failures.
-            let mut tmp_file = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
-                anyhow::anyhow!("failed to create temp file in '{}': {e}", parent.display())
-            })?;
-            tmp_file
-                .write_all(content.as_bytes())
-                .map_err(|e| anyhow::anyhow!("failed to write temp file: {e}"))?;
-            tmp_file.persist(path).map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to persist temp file to '{}': {}",
-                    path.display(),
-                    e.error
-                )
-            })?;
-        } else {
-            std::fs::write(path, content)
-                .map_err(|e| anyhow::anyhow!("failed to write '{}': {e}", path.display()))?;
-        }
+        let mut tmp_file = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create temp file in '{}': {e}", parent.display())
+        })?;
+        tmp_file
+            .write_all(content.as_bytes())
+            .map_err(|e| anyhow::anyhow!("failed to write temp file: {e}"))?;
+        tmp_file.persist(path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to persist temp file to '{}': {}",
+                path.display(),
+                e.error
+            )
+        })?;
     }
     if overwriting {
         Ok(ConfigBootstrapAction::Overwritten(path.to_path_buf()))
@@ -418,10 +394,9 @@ mod tests {
         assert!(dir.join("rules/pr-review.md.example").is_file());
         assert!(dir.join("rules/issue-execution.md.example").is_file());
         assert!(dir.join("rules/backlog-discovery.md.example").is_file());
-        assert!(dir.join("rules/multi-pr-triage.md.example").is_file());
 
-        // Should have 3 dirs + 1 config + 1 prompt + 5 rules = 10 actions.
-        assert_eq!(actions.len(), 10);
+        // Should have 3 dirs + 1 config + 1 prompt + 4 rules = 9 actions.
+        assert_eq!(actions.len(), 9);
     }
 
     #[test]
@@ -533,7 +508,7 @@ mod tests {
             .iter()
             .filter(|a| matches!(a, ConfigBootstrapAction::Created(_)))
             .count();
-        assert_eq!(created_files, 7, "expected 7 new files");
+        assert_eq!(created_files, 6, "expected 6 new files");
     }
 
     #[test]

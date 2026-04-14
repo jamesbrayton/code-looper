@@ -1,7 +1,7 @@
 use crate::branch::BranchManager;
 use crate::config;
 use crate::config::{
-    CommentCadence, IssueTrackingMode, LoopConfig, PrMode, PromptSource, ValidatedLoopConfig,
+    CommentCadence, IssueTrackingMode, LoopConfig, PrMode, PromptInput, ValidatedLoopConfig,
 };
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
@@ -320,14 +320,14 @@ impl LoopEngine {
     /// Resolve the prompt string from the validated prompt source.
     fn resolve_prompt(&self) -> anyhow::Result<String> {
         match &self.config.prompt_source() {
-            PromptSource::Inline(s) => Ok(s.clone()),
-            PromptSource::File(path) => {
+            PromptInput::Inline(s) => Ok(s.clone()),
+            PromptInput::File(path) => {
                 let content = std::fs::read_to_string(path).map_err(|e| {
                     anyhow::anyhow!("failed to read prompt file {}: {e}", path.display())
                 })?;
                 Ok(content)
             }
-            PromptSource::Absent => Ok(String::new()),
+            PromptInput::Absent => Ok(String::new()),
         }
     }
 
@@ -370,9 +370,9 @@ impl LoopEngine {
         };
 
         let prompt_source = match &self.config.prompt_source() {
-            PromptSource::File(_) => crate::telemetry::PromptSource::File,
-            PromptSource::Inline(_) => crate::telemetry::PromptSource::Inline,
-            PromptSource::Absent => crate::telemetry::PromptSource::Absent,
+            PromptInput::File(_) => crate::telemetry::PromptSource::File,
+            PromptInput::Inline(_) => crate::telemetry::PromptSource::Inline,
+            PromptInput::Absent => crate::telemetry::PromptSource::Absent,
         };
 
         let mut summary = SessionSummary::default();

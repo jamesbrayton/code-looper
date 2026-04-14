@@ -15,6 +15,7 @@
 //!
 //! All changes are idempotent.  In `--dry-run` mode nothing is written.
 
+use crate::workspace::has_github_server;
 use std::path::{Path, PathBuf};
 
 pub const SECTION_BEGIN: &str = "<!-- code-looper begin -->";
@@ -202,22 +203,6 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
     Ok(BootstrapAction::MergedJson(path))
 }
 
-/// Returns `true` when the JSON contains a `"github"` MCP server key
-/// under the `"mcpServers"` object.
-///
-/// Uses proper JSON parsing to avoid false positives from `"github"`
-/// appearing in string values or unrelated keys.
-fn has_github_server(json: &str) -> bool {
-    let v: serde_json::Value = match serde_json::from_str(json) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    v.get("mcpServers")
-        .and_then(|s| s.as_object())
-        .map(|o| o.contains_key("github"))
-        .unwrap_or(false)
-}
-
 /// Strip trailing commas that appear before `}` in a JSON-object tail string.
 ///
 /// Only cleans the *last* trailing comma before each `}` — this is enough to
@@ -392,16 +377,24 @@ pub fn has_broad_code_looper_ignore(contents: &str) -> bool {
 /// Returns `true` if the warning was emitted.
 pub fn warn_if_broad_ignore_hides_config(workspace_dir: &Path) -> bool {
     let gitignore_path = workspace_dir.join(".gitignore");
-    let config_path = workspace_dir.join(".code-looper/config.toml");
 
-    if !config_path.is_file() || !gitignore_path.is_file() {
+    // Check all config file candidates, not just config.toml (#118).
+    let config_exists = ["config.toml", "config.yaml", "config.yml"]
+        .iter()
+        .any(|f| workspace_dir.join(".code-looper").join(f).is_file());
+
+    if !config_exists || !gitignore_path.is_file() {
         return false;
     }
 
     let contents = match std::fs::read_to_string(&gitignore_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("warning: could not read {}: {e}", gitignore_path.display());
+            tracing::warn!(path = %gitignore_path.display(), "could not read .gitignore: {e}");
+            eprintln!(
+                "[bootstrap] warning: could not read {}: {e}",
+                gitignore_path.display()
+            );
             return false;
         }
     };
@@ -821,6 +814,15 @@ mod tests {
         fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
         fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
         fs::write(dir.path().join(".code-looper/config.toml"), "").unwrap();
+        assert!(warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    #[test]
+    fn warn_if_broad_ignore_with_yaml_config_file_returns_true() {
+        let dir = tmp();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
+        fs::write(dir.path().join(".code-looper/config.yaml"), "").unwrap();
         assert!(warn_if_broad_ignore_hides_config(dir.path()));
     }
 

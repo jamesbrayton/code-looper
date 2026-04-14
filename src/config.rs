@@ -671,7 +671,7 @@ impl Default for LoopConfig {
 ///
 /// Replaces the raw `iterations: i64` field with a type that makes zero and
 /// invalid negative values unrepresentable.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IterationCount {
     /// Run a fixed number of iterations (always ≥ 1).
     Finite(NonZeroU32),
@@ -680,15 +680,6 @@ pub enum IterationCount {
 }
 
 impl IterationCount {
-    /// Maximum number of iterations to execute.  Returns `u64::MAX` for
-    /// [`Infinite`](IterationCount::Infinite).
-    pub fn max_iterations(&self) -> u64 {
-        match self {
-            IterationCount::Finite(n) => u64::from(n.get()),
-            IterationCount::Infinite => u64::MAX,
-        }
-    }
-
     /// Returns `true` when `iteration` (0-based) has reached or exceeded the
     /// configured count.  Always returns `false` for [`Infinite`](IterationCount::Infinite).
     pub fn is_done(&self, iteration: u64) -> bool {
@@ -698,10 +689,6 @@ impl IterationCount {
         }
     }
 
-    pub fn is_infinite(&self) -> bool {
-        matches!(self, IterationCount::Infinite)
-    }
-
     /// Convert to the legacy `i64` representation (`-1` for infinite) used by
     /// the telemetry manifest format.
     pub fn as_raw_i64(&self) -> i64 {
@@ -709,6 +696,20 @@ impl IterationCount {
             IterationCount::Finite(n) => i64::from(n.get()),
             IterationCount::Infinite => -1,
         }
+    }
+}
+
+#[cfg(test)]
+impl IterationCount {
+    pub fn max_iterations(&self) -> u64 {
+        match self {
+            IterationCount::Finite(n) => u64::from(n.get()),
+            IterationCount::Infinite => u64::MAX,
+        }
+    }
+
+    pub fn is_infinite(&self) -> bool {
+        matches!(self, IterationCount::Infinite)
     }
 }
 
@@ -727,7 +728,7 @@ impl std::fmt::Display for IterationCount {
 /// `prompt_file: Option<PathBuf>` fields with a type that makes the "both set"
 /// state unrepresentable.
 #[derive(Debug, Clone)]
-pub enum PromptSource {
+pub enum PromptInput {
     /// Prompt provided as an inline string.
     Inline(String),
     /// Prompt loaded from a file path.
@@ -748,9 +749,12 @@ pub struct ValidatedLoopConfig {
     /// Validated iteration count (replaces `inner.iterations`).
     iteration_count: IterationCount,
     /// Validated prompt source (replaces `inner.prompt_inline` / `inner.prompt_file`).
-    prompt_source: PromptSource,
+    prompt_source: PromptInput,
 }
 
+// NOTE: This Deref exposes raw `iterations`, `prompt_inline`, and `prompt_file`
+// fields. Callers should use `iteration_count()` and `prompt_source()` instead.
+// See #117 for discussion of alternatives.
 impl std::ops::Deref for ValidatedLoopConfig {
     type Target = LoopConfig;
     fn deref(&self) -> &LoopConfig {
@@ -765,7 +769,7 @@ impl ValidatedLoopConfig {
     }
 
     /// Read-only access to the validated prompt source.
-    pub fn prompt_source(&self) -> &PromptSource {
+    pub fn prompt_source(&self) -> &PromptInput {
         &self.prompt_source
     }
 
@@ -777,9 +781,9 @@ impl ValidatedLoopConfig {
 
     /// Return a clone with the prompt replaced by an inline string.
     pub fn with_prompt_override(mut self, prompt: String) -> Self {
-        self.prompt_source = PromptSource::Inline(prompt.clone());
-        self.inner.prompt_inline = Some(prompt);
         self.inner.prompt_file = None;
+        self.inner.prompt_inline = Some(prompt.clone());
+        self.prompt_source = PromptInput::Inline(prompt);
         self
     }
 }
@@ -1011,7 +1015,7 @@ impl LoopConfig {
                     "--prompt-inline and --prompt-file are mutually exclusive".to_string(),
                 ));
             }
-            (Some(s), None) => PromptSource::Inline(s.clone()),
+            (Some(s), None) => PromptInput::Inline(s.clone()),
             (None, Some(p)) => {
                 if !p.exists() {
                     return Err(LooperError::InvalidArgument(format!(
@@ -1019,9 +1023,9 @@ impl LoopConfig {
                         p.display()
                     )));
                 }
-                PromptSource::File(p.clone())
+                PromptInput::File(p.clone())
             }
-            (None, None) => PromptSource::Absent,
+            (None, None) => PromptInput::Absent,
         };
 
         // ── Iteration count ─────────────────────────────────────────────
@@ -1218,6 +1222,11 @@ pub fn load_rules_for_branch(
                         path = %path.display(),
                         "rule file re-read failed and no cached content available — this iteration will run WITHOUT global rules"
                     );
+                    eprintln!(
+                        "[loop] WARNING: rule file '{}' could not be read and no cached content \
+                         is available; this iteration will run WITHOUT rules.",
+                        path.display()
+                    );
                 }
             }
         }
@@ -1245,6 +1254,11 @@ pub fn load_rules_for_branch(
                             path = %path.display(),
                             workflow = %wf,
                             "rule file re-read failed and no cached content available — this iteration will run WITHOUT workflow rules"
+                        );
+                        eprintln!(
+                            "[loop] WARNING: rule file '{}' could not be read and no cached content \
+                             is available; this iteration will run WITHOUT rules.",
+                            path.display()
                         );
                     }
                 }
@@ -2349,7 +2363,7 @@ non_retryable_exit_codes = [2, 126, 127]
         assert_eq!(config.non_retryable_exit_codes, [2, 127]);
     }
 
-    // ── ValidatedLoopConfig / IterationCount / PromptSource tests ────────
+    // ── ValidatedLoopConfig / IterationCount / PromptInput tests ────────
 
     #[test]
     fn validate_returns_finite_iteration_count() {
@@ -2383,6 +2397,22 @@ non_retryable_exit_codes = [2, 126, 127]
     }
 
     #[test]
+    fn is_done_finite_boundary_semantics() {
+        let three = IterationCount::Finite(std::num::NonZeroU32::new(3).unwrap());
+        assert!(!three.is_done(0)); // iteration 0 — not done
+        assert!(!three.is_done(1)); // iteration 1 — not done
+        assert!(!three.is_done(2)); // iteration 2 — last valid (0-based < 3)
+        assert!(three.is_done(3)); // iteration 3 — done (0-based >= 3)
+        assert!(three.is_done(4)); // beyond n
+
+        let one = IterationCount::Finite(std::num::NonZeroU32::new(1).unwrap());
+        assert!(!one.is_done(0));
+        assert!(one.is_done(1));
+
+        assert!(!IterationCount::Infinite.is_done(u64::MAX));
+    }
+
+    #[test]
     fn validate_returns_inline_prompt_source() {
         let validated = LoopConfig {
             prompt_inline: Some("hello".to_string()),
@@ -2390,7 +2420,7 @@ non_retryable_exit_codes = [2, 126, 127]
         }
         .validate()
         .unwrap();
-        assert!(matches!(validated.prompt_source, PromptSource::Inline(ref s) if s == "hello"));
+        assert!(matches!(validated.prompt_source, PromptInput::Inline(ref s) if s == "hello"));
     }
 
     #[test]
@@ -2403,13 +2433,13 @@ non_retryable_exit_codes = [2, 126, 127]
         }
         .validate()
         .unwrap();
-        assert!(matches!(validated.prompt_source, PromptSource::File(_)));
+        assert!(matches!(validated.prompt_source, PromptInput::File(_)));
     }
 
     #[test]
     fn validate_returns_none_prompt_source() {
         let validated = LoopConfig::default().validate().unwrap();
-        assert!(matches!(validated.prompt_source, PromptSource::Absent));
+        assert!(matches!(validated.prompt_source, PromptInput::Absent));
     }
 
     #[test]
@@ -2441,7 +2471,7 @@ non_retryable_exit_codes = [2, 126, 127]
         let validated = LoopConfig::default().validate().unwrap();
         let updated = validated.with_prompt_override("override prompt".to_string());
         assert!(
-            matches!(updated.prompt_source, PromptSource::Inline(ref s) if s == "override prompt")
+            matches!(updated.prompt_source, PromptInput::Inline(ref s) if s == "override prompt")
         );
         assert_eq!(updated.prompt_inline.as_deref(), Some("override prompt"));
         assert!(updated.prompt_file.is_none());
@@ -2606,6 +2636,27 @@ non_retryable_exit_codes = [2, 126, 127]
     }
 
     #[test]
+    fn load_rules_for_branch_returns_none_when_first_read_fails_no_cache() {
+        clear_rules_cache();
+
+        // Point global at a path that never existed — first read will fail
+        // and there is no cached content to fall back on.
+        let rules = RulesConfig {
+            global: Some(PathBuf::from("/nonexistent/never-read.md")),
+            workflows: HashMap::new(),
+        };
+
+        // Should return None (not panic) when no cached content is available.
+        let result = load_rules_for_branch(&rules, None);
+        assert!(
+            result.is_none(),
+            "expected None when rule file was never successfully read"
+        );
+
+        clear_rules_cache();
+    }
+
+    #[test]
     fn validate_rule_file_rejects_missing_via_metadata() {
         let result = validate_rule_file(Path::new("/nonexistent/rule.md"), "test.key");
         assert!(result.is_err());
@@ -2615,6 +2666,7 @@ non_retryable_exit_codes = [2, 126, 127]
 
     #[test]
     fn load_rules_for_branch_combines_global_and_workflow() {
+        clear_rules_cache();
         let mut global_file = NamedTempFile::new().unwrap();
         writeln!(global_file, "GLOBAL RULE").unwrap();
         let mut workflow_file = NamedTempFile::new().unwrap();
@@ -2633,16 +2685,20 @@ non_retryable_exit_codes = [2, 126, 127]
         assert!(result.contains("PR REVIEW RULE"));
         // Global comes before workflow.
         assert!(result.find("GLOBAL RULE").unwrap() < result.find("PR REVIEW RULE").unwrap());
+        clear_rules_cache();
     }
 
     #[test]
     fn load_rules_for_branch_returns_none_when_no_rules() {
+        clear_rules_cache();
         let rules = RulesConfig::default();
         assert!(load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).is_none());
+        clear_rules_cache();
     }
 
     #[test]
     fn load_rules_for_branch_returns_global_only_when_no_workflow_match() {
+        clear_rules_cache();
         let mut global_file = NamedTempFile::new().unwrap();
         writeln!(global_file, "GLOBAL RULE").unwrap();
 
@@ -2653,6 +2709,7 @@ non_retryable_exit_codes = [2, 126, 127]
 
         let result = load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).unwrap();
         assert!(result.contains("GLOBAL RULE"));
+        clear_rules_cache();
     }
 
     // ── Three-tier config resolution ──────────────────────────────────
@@ -2740,6 +2797,38 @@ non_retryable_exit_codes = [2, 126, 127]
         // May return None or find a user-tier config — depends on HOME.
         // The important thing is it doesn't panic.
         let _ = result;
+    }
+
+    #[test]
+    fn resolve_config_path_user_tier_with_controlled_home() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // Create a user-tier config under a controlled HOME.
+        let user_config_dir = tmp.path().join(".config/code-looper");
+        std::fs::create_dir_all(&user_config_dir).unwrap();
+        std::fs::write(
+            user_config_dir.join("config.toml"),
+            "provider = \"claude\"\niterations = 1\n",
+        )
+        .unwrap();
+
+        // Override HOME to the temp directory.
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+
+        let result = resolve_config_path(None, &ws);
+
+        // Restore HOME.
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
+
+        // Should find the user-tier config.
+        let (path, tier) = result.expect("user-tier config should be found");
+        assert_eq!(tier, "user");
+        assert!(path.ends_with("config.toml"));
     }
 
     // ── Rule path resolution ────────────────────────────────────────────
