@@ -1,6 +1,6 @@
 provider = "claude"
 iterations = 1
-log_level = "trace"
+log_level = "debug"
 stop_on_failure = false
 
 [issue_tracking]
