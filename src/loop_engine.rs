@@ -318,6 +318,8 @@ impl LoopEngine {
     /// Post a comment to the configured issue, logging a warning on failure.
     ///
     /// No-ops when `comment_issue_number` is `None` or when in local mode.
+    /// Auth errors are surfaced prominently to the terminal so operators
+    /// notice expired/invalid tokens immediately.
     fn post_comment(&self, body: &str) {
         let issue_number = match self.config.issue_tracking.comment_issue_number {
             Some(n) => n,
@@ -328,6 +330,13 @@ impl LoopEngine {
         }
         if let Err(e) = self.tracker.add_comment(issue_number, body) {
             warn!(issue = issue_number, error = %e, "Failed to post comment to issue");
+            if matches!(e, crate::issue_tracker::IssueTrackerError::Auth(_)) {
+                eprintln!(
+                    "[loop] ERROR: GitHub authentication failed — \
+                     your token may be expired or invalid. \
+                     Check GITHUB_TOKEN or run `gh auth login`."
+                );
+            }
         }
     }
 
@@ -829,6 +838,19 @@ impl LoopEngine {
                 "Iteration complete"
             );
 
+            // User-facing progress: confirm the provider has exited.
+            {
+                let secs = final_duration_ms / 1000;
+                let mins = secs / 60;
+                let rem = secs % 60;
+                let outcome_label = final_outcome.label();
+                if mins > 0 {
+                    eprintln!("[loop] Iteration {i} complete ({outcome_label}, {mins}m {rem}s)");
+                } else {
+                    eprintln!("[loop] Iteration {i} complete ({outcome_label}, {secs}s)");
+                }
+            }
+
             // Single-PR: after each successful iteration, scan output for the
             // shippable signal and open/update the PR if detected.
             if final_outcome.is_success() {
@@ -1036,9 +1058,11 @@ impl LoopEngine {
         // appears done, warn (or close, when auto_close_owned_issues=true).
         if self.config.issue_tracking.mode == IssueTrackingMode::Github {
             if let Some(issue_number) = self.config.issue_tracking.comment_issue_number {
+                eprintln!("[loop] Checking issue #{issue_number} lifecycle…");
                 match self.tracker.get_issue(issue_number) {
                     Ok(issue) if issue.state == crate::issue_tracker::IssueState::Open => {
                         if self.config.issue_tracking.auto_close_owned_issues {
+                            eprintln!("[loop] Auto-closing issue #{issue_number}…");
                             info!(
                                 issue = issue_number,
                                 "auto_close_owned_issues: closing issue at end of run"
@@ -1062,6 +1086,13 @@ impl LoopEngine {
                                     "auto_close_owned_issues: failed to post closing \
                                      comment; closing issue anyway"
                                 );
+                                if matches!(e, crate::issue_tracker::IssueTrackerError::Auth(_)) {
+                                    eprintln!(
+                                        "[loop] ERROR: GitHub authentication failed — \
+                                         your token may be expired or invalid. \
+                                         Check GITHUB_TOKEN or run `gh auth login`."
+                                    );
+                                }
                             }
                             if let Err(e) = self.tracker.close_issue(
                                 issue_number,
@@ -1087,12 +1118,19 @@ impl LoopEngine {
                             "Owned issue is closed — lifecycle complete"
                         );
                     }
-                    Err(e) => {
+                    Err(ref e) => {
                         warn!(
                             issue = issue_number,
                             error = %e,
                             "Could not verify owned issue state at end of run"
                         );
+                        if matches!(e, crate::issue_tracker::IssueTrackerError::Auth(_)) {
+                            eprintln!(
+                                "[loop] ERROR: GitHub authentication failed — \
+                                 your token may be expired or invalid. \
+                                 Check GITHUB_TOKEN or run `gh auth login`."
+                            );
+                        }
                     }
                 }
             }
@@ -1100,6 +1138,7 @@ impl LoopEngine {
 
         // Post run-end comment.
         if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
+            eprintln!("[loop] Posting run summary to GitHub issue…");
             let reason = summary
                 .termination_reason
                 .as_ref()
@@ -1116,6 +1155,7 @@ impl LoopEngine {
         }
 
         // Write run manifest and summary.
+        eprintln!("[loop] Writing run artifacts…");
         let manifest = RunManifest {
             run_id: artifacts.run_id.clone(),
             started_at: run_started_at,
