@@ -54,6 +54,8 @@ log_level: info
 | `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
 | `retry_backoff_multiplier` | `--retry-backoff-multiplier` | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
 | `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`). **Security note:** the value is passed verbatim to `sh -c`, so any config-file or CLI source that can set this field can execute arbitrary shell on the host. Treat TOML/YAML config files the same way you would treat a shell script committed to the repo. |
+| `iteration_timeout_secs` | `--iteration-timeout-secs` | integer | — | Maximum wall-clock seconds per provider invocation. `0` is treated as no timeout. When exceeded, the provider process is killed and the iteration is recorded as a timeout failure. |
+| `non_retryable_exit_codes` | `--non-retryable-exit-code` (repeatable) | list of integers | `[]` | Provider exit codes that should never be retried, even when `max_retries > 0`. Short-circuits retry logic immediately. |
 | `provider_extra_args` | `--provider-extra-arg` (repeatable) | list of strings | `[]` | Extra arguments appended to the provider CLI invocation, after the adapter's hardcoded flags and before the prompt. Each element is a separate arg (no shell expansion). |
 
 ### Prompt validation
@@ -277,6 +279,45 @@ printf '%s\n%s\n' '{"cmd":"status"}' '{"cmd":"status"}' | nc 127.0.0.1 7979
 
 ---
 
+## Git auto-detection
+
+When `issue_tracking.mode = "github"` or `orchestration.enabled = true`, the engine needs `repo_owner` and `repo_name`. These are resolved in this order:
+
+1. **Explicit config** — `issue_tracking.repo_owner` / `issue_tracking.repo_name`
+2. **Inherited** — `orchestration.repo_owner` / `orchestration.repo_name`
+3. **Auto-detected** — parsed from `git remote get-url origin`
+
+Auto-detection supports HTTPS (`https://github.com/owner/repo.git`), SSH (`git@github.com:owner/repo.git`), and `ssh://` URLs. If all three tiers fail when a GitHub mode is enabled, validation returns an error at startup.
+
+## Validation rules
+
+These checks run at startup before the loop begins. Any failure is reported with a specific error message and the process exits.
+
+| Rule | Error |
+|------|-------|
+| `prompt_inline` and `prompt_file` are mutually exclusive | `--prompt-inline and --prompt-file are mutually exclusive` |
+| `iterations` must be > 0 or exactly -1 | `--iterations must be a positive integer or -1 for infinite` |
+| `orchestration.enabled` requires `repo_owner` | `orchestration requires --repo-owner` |
+| `orchestration.enabled` requires `repo_name` | `orchestration requires --repo-name` |
+| `prompt_file` path must exist on disk | `--prompt-file '<path>' does not exist` |
+| `on_complete` must not be whitespace-only | `--on-complete must not be an empty string` |
+| `pr_management.mode = "multi-pr"` requires `issue_tracking.mode = "github"` | `pr_management.mode="multi-pr" requires issue_tracking.mode="github"` |
+| `issue_tracking.mode = "github"` requires `repo_owner` (after auto-detection) | `issue_tracking.mode="github" requires repo_owner` |
+| `issue_tracking.mode = "github"` requires `repo_name` (after auto-detection) | `issue_tracking.mode="github" requires repo_name` |
+
+---
+
+## Example config files
+
+Ready-to-use example config files are available in the [`examples/`](../examples/) directory:
+
+| File | Description |
+|------|-------------|
+| [`simple.toml`](../examples/simple.toml) | Single-iteration run with an inline prompt |
+| [`orchestrated.toml`](../examples/orchestrated.toml) | Full GitHub-integrated orchestration loop |
+| [`orchestrated.yaml`](../examples/orchestrated.yaml) | Same as above in YAML format |
+| [`multi-repo.toml`](../examples/multi-repo.toml) | Run against multiple repositories in sequence |
+
 ## Example TOML config
 
 ```toml
@@ -334,4 +375,115 @@ name = "service-a"
 [[multi_repo]]
 path = "/home/dev/repos/service-b"
 prompt_override = "Apply the same lint fixes as service-a."
+```
+
+---
+
+## Example YAML config
+
+```yaml
+provider: claude
+iterations: -1
+log_level: info
+stop_on_failure: false
+max_retries: 2
+retry_backoff_ms: 500
+retry_backoff_multiplier: 2.0
+on_complete: "echo 'Loop finished' | tee -a loop.log"
+provider_extra_args:
+  - "--model"
+  - "claude-opus-4-5"
+
+orchestration:
+  enabled: true
+  repo_owner: acme
+  repo_name: my-project
+  policies:
+    - condition: has_open_prs
+      workflow: pr-review
+    - condition: has_open_issues
+      workflow: issue-execution
+    - condition: always
+      workflow: backlog-discovery
+
+issue_tracking:
+  mode: github
+  repo_owner: acme
+  repo_name: my-project
+  comment_issue_number: 42
+  comment_cadence: milestones
+  auto_close_owned_issues: false
+
+pr_management:
+  mode: single-pr
+  base_branch: main
+  branch_prefix: "loop/"
+  require_human_review: true
+
+telemetry:
+  stream_output: true
+  keep_runs: 20
+
+# Optional: run against multiple repositories in sequence.
+# When present, the single-repo path is skipped entirely.
+multi_repo:
+  - path: /home/dev/repos/service-a
+    name: service-a
+  - path: /home/dev/repos/service-b
+    prompt_override: "Apply the same lint fixes as service-a."
+```
+
+---
+
+## Minimal config examples
+
+### Simple single-iteration run
+
+```toml
+provider = "claude"
+iterations = 1
+prompt_inline = "Fix the failing test in src/auth.rs"
+```
+
+### Continuous orchestration (GitHub-integrated)
+
+```toml
+provider = "claude"
+iterations = -1
+stop_on_failure = true
+max_retries = 1
+
+[orchestration]
+enabled = true
+# repo_owner and repo_name auto-detected from git remote
+
+[issue_tracking]
+mode = "github"
+comment_cadence = "milestones"
+
+[pr_management]
+mode = "single-pr"
+require_human_review = true
+```
+
+### Multi-PR triage with custom retry
+
+```toml
+provider = "claude"
+iterations = 10
+max_retries = 2
+retry_backoff_ms = 1000
+retry_backoff_multiplier = 2.0
+iteration_timeout_secs = 600
+
+[orchestration]
+enabled = true
+
+[issue_tracking]
+mode = "github"
+
+[pr_management]
+mode = "multi-pr"
+triage_priority = "least-conflicts"
+skip_labels = ["do-not-loop", "wip", "blocked"]
 ```

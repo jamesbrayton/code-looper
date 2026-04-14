@@ -229,6 +229,7 @@ If any of steps 2–7 fail, capture the output and check [docs/troubleshooting.m
 - [docs/configuration.md](configuration.md) — Every config field, CLI flag, default, and precedence rule
 - [docs/providers.md](providers.md) — Provider adapter invocation, environment requirements, and known limitations
 - [docs/orchestration.md](orchestration.md) — Workflow branches, shippable signal, PR lifecycle, multi-PR triage
+- [docs/prompt-injection.md](prompt-injection.md) — Every prompt, preamble, and comment template the engine injects
 - [docs/workspace-prerequisites.md](workspace-prerequisites.md) — What the prerequisite checker validates and how to fix each diagnostic
 - [docs/troubleshooting.md](troubleshooting.md) — Common failure modes and remediation steps
 - [docs/PRD.md](PRD.md) — Full product requirements and roadmap

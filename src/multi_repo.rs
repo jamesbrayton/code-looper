@@ -6,12 +6,9 @@ use std::sync::Arc;
 use tracing::{info, warn};
 
 /// Result for a single repo target in a multi-repo run.
-#[allow(dead_code)]
 pub struct RepoRunResult {
     /// Display name of the repository (from `RepoTarget::display_name`).
     pub name: String,
-    /// Filesystem path used for this run (for log context).
-    pub path: std::path::PathBuf,
     /// Session summary returned by the loop engine.
     pub summary: SessionSummary,
 }
@@ -63,11 +60,7 @@ pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<R
             LoopEngine::new(repo_config, guard).with_shared_interrupt(Arc::clone(&interrupted));
         let summary = engine.run();
 
-        results.push(RepoRunResult {
-            name,
-            path: target.path.clone(),
-            summary,
-        });
+        results.push(RepoRunResult { name, summary });
     }
 
     results

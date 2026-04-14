@@ -1,0 +1,35 @@
+# Orchestrated loop with GitHub integration (YAML format).
+#
+# Equivalent to orchestrated.toml — use whichever format you prefer.
+#
+# Usage:
+#   code-looper --config examples/orchestrated.yaml
+
+provider: claude
+iterations: -1
+stop_on_failure: true
+max_retries: 1
+retry_backoff_ms: 1000
+retry_backoff_multiplier: 2.0
+iteration_timeout_secs: 600
+
+orchestration:
+  enabled: true
+  # repo_owner: your-org    # Auto-detected from git remote
+  # repo_name: your-repo
+
+issue_tracking:
+  mode: github
+  # comment_issue_number: 42
+  comment_cadence: milestones
+  auto_close_owned_issues: false
+
+pr_management:
+  mode: single-pr
+  base_branch: main
+  branch_prefix: "loop/"
+  require_human_review: true
+
+telemetry:
+  stream_output: true
+  keep_runs: 20

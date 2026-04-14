@@ -1,0 +1,28 @@
+# Multi-repo loop — run the same loop against multiple repositories in sequence.
+#
+# Each target can optionally override the prompt. The loop processes repos in
+# order and stops early on Ctrl+C (the current repo finishes its iteration).
+#
+# Usage:
+#   code-looper --config examples/multi-repo.toml
+
+provider = "claude"
+iterations = 3
+max_retries = 1
+prompt_inline = "Run cargo clippy and fix any warnings."
+
+[telemetry]
+stream_output = true
+
+[[multi_repo]]
+path = "/home/dev/repos/service-a"
+name = "service-a"
+
+[[multi_repo]]
+path = "/home/dev/repos/service-b"
+name = "service-b"
+
+[[multi_repo]]
+path = "/home/dev/repos/service-c"
+name = "service-c"
+prompt_override = "Run cargo clippy and cargo fmt, fixing all issues."
