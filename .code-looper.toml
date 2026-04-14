@@ -1,0 +1,8 @@
+provider = "claude"
+iterations = 1
+log_level = "trace"
+stop_on_failure = false
+
+[issue_tracking]
+mode = "github"
+comment_cadence = "milestones"

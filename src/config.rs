@@ -2,6 +2,68 @@ use crate::error::LooperError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+// ── Git remote auto-detection ────────────────────────────────────────────────
+
+/// Parsed owner/repo pair from a git remote URL.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GitRepoInfo {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// Parse `owner/repo` from a git remote URL.
+///
+/// Supports common formats:
+/// - `https://github.com/owner/repo.git`
+/// - `https://github.com/owner/repo`
+/// - `git@github.com:owner/repo.git`
+/// - `ssh://git@github.com/owner/repo.git`
+pub fn parse_git_remote_url(url: &str) -> Option<GitRepoInfo> {
+    let url = url.trim();
+
+    // SSH shorthand: git@github.com:owner/repo.git
+    if let Some(path) = url.strip_prefix("git@github.com:") {
+        return parse_owner_repo_from_path(path);
+    }
+
+    // HTTPS or SSH URL — strip known prefixes and extract the path portion.
+    let path = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))
+        .or_else(|| url.strip_prefix("ssh://git@github.com/"))?;
+
+    parse_owner_repo_from_path(path)
+}
+
+/// Extract owner/repo from a `"owner/repo.git"` (or `"owner/repo"`) path tail.
+fn parse_owner_repo_from_path(path: &str) -> Option<GitRepoInfo> {
+    let path = path.trim_end_matches(".git").trim_end_matches('/');
+    let mut parts = path.splitn(2, '/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(GitRepoInfo {
+        owner: owner.to_string(),
+        repo: repo.to_string(),
+    })
+}
+
+/// Try to detect `owner/repo` from the current git working directory by
+/// running `git remote get-url origin`.
+pub fn git_repo_info() -> Option<GitRepoInfo> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout);
+    parse_git_remote_url(&url)
+}
+
 // ── Issue tracking ────────────────────────────────────────────────────────────
 
 /// Issue tracking backend mode.
@@ -626,6 +688,43 @@ impl LoopConfig {
         }
     }
 
+    /// Fill in `repo_owner` / `repo_name` gaps from the git remote when the
+    /// user hasn't set them explicitly.  Call this **before** [`validate`].
+    ///
+    /// The resolution order (first non-`None` wins) is:
+    /// 1. Explicit value in `issue_tracking` config
+    /// 2. Inherited from `orchestration` config
+    /// 3. Inferred from `git remote get-url origin`
+    pub fn resolve_git_defaults(&mut self) {
+        // Only bother shelling out to git if at least one value is missing.
+        let needs_owner =
+            self.issue_tracking.repo_owner.is_none() && self.orchestration.repo_owner.is_none();
+        let needs_repo =
+            self.issue_tracking.repo_name.is_none() && self.orchestration.repo_name.is_none();
+
+        if !needs_owner && !needs_repo {
+            return;
+        }
+
+        if let Some(info) = git_repo_info() {
+            if needs_owner {
+                // Populate into issue_tracking so it takes priority in the
+                // fallback chain without touching the orchestration section.
+                self.issue_tracking.repo_owner = Some(info.owner.clone());
+                // Also fill orchestration so it's available if enabled later.
+                if self.orchestration.repo_owner.is_none() {
+                    self.orchestration.repo_owner = Some(info.owner);
+                }
+            }
+            if needs_repo {
+                self.issue_tracking.repo_name = Some(info.repo.clone());
+                if self.orchestration.repo_name.is_none() {
+                    self.orchestration.repo_name = Some(info.repo);
+                }
+            }
+        }
+    }
+
     /// Validate that the config is internally consistent.
     pub fn validate(&self) -> Result<(), LooperError> {
         if self.prompt_inline.is_some() && self.prompt_file.is_some() {
@@ -689,14 +788,16 @@ impl LoopConfig {
             if owner.is_none() {
                 return Err(LooperError::InvalidArgument(
                     "issue_tracking.mode=\"github\" requires repo_owner \
-                     (set issue_tracking.repo_owner or orchestration.repo_owner)"
+                     (set issue_tracking.repo_owner, orchestration.repo_owner, \
+                     or run inside a git repo with a GitHub remote)"
                         .to_string(),
                 ));
             }
             if repo.is_none() {
                 return Err(LooperError::InvalidArgument(
                     "issue_tracking.mode=\"github\" requires repo_name \
-                     (set issue_tracking.repo_name or orchestration.repo_name)"
+                     (set issue_tracking.repo_name, orchestration.repo_name, \
+                     or run inside a git repo with a GitHub remote)"
                         .to_string(),
                 ));
             }
@@ -710,6 +811,145 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    // ── git remote URL parsing ───────────────────────────────────────────
+
+    #[test]
+    fn parse_https_url() {
+        let info = parse_git_remote_url("https://github.com/jamesbrayton/code-looper.git");
+        assert_eq!(
+            info,
+            Some(GitRepoInfo {
+                owner: "jamesbrayton".to_string(),
+                repo: "code-looper".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_https_url_no_dot_git() {
+        let info = parse_git_remote_url("https://github.com/jamesbrayton/code-looper");
+        assert_eq!(
+            info,
+            Some(GitRepoInfo {
+                owner: "jamesbrayton".to_string(),
+                repo: "code-looper".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_ssh_shorthand_url() {
+        let info = parse_git_remote_url("git@github.com:acme/my-repo.git");
+        assert_eq!(
+            info,
+            Some(GitRepoInfo {
+                owner: "acme".to_string(),
+                repo: "my-repo".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_ssh_protocol_url() {
+        let info = parse_git_remote_url("ssh://git@github.com/acme/my-repo.git");
+        assert_eq!(
+            info,
+            Some(GitRepoInfo {
+                owner: "acme".to_string(),
+                repo: "my-repo".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_url_with_trailing_whitespace() {
+        let info = parse_git_remote_url("https://github.com/owner/repo.git\n");
+        assert_eq!(
+            info,
+            Some(GitRepoInfo {
+                owner: "owner".to_string(),
+                repo: "repo".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_non_github_url_returns_none() {
+        assert!(parse_git_remote_url("https://gitlab.com/owner/repo.git").is_none());
+    }
+
+    #[test]
+    fn parse_empty_url_returns_none() {
+        assert!(parse_git_remote_url("").is_none());
+    }
+
+    #[test]
+    fn parse_malformed_url_returns_none() {
+        assert!(parse_git_remote_url("git@github.com:").is_none());
+        assert!(parse_git_remote_url("https://github.com/").is_none());
+        assert!(parse_git_remote_url("https://github.com/owner-only").is_none());
+    }
+
+    // ── resolve_git_defaults ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_git_defaults_fills_from_git_remote() {
+        // This test runs inside the code-looper repo, so git_repo_info()
+        // should return Some(...).  If it doesn't (e.g. CI), skip silently.
+        let git_info = match git_repo_info() {
+            Some(info) => info,
+            None => return,
+        };
+
+        let mut config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: None,
+                repo_name: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.resolve_git_defaults();
+        assert_eq!(
+            config.issue_tracking.repo_owner.as_deref(),
+            Some(git_info.owner.as_str())
+        );
+        assert_eq!(
+            config.issue_tracking.repo_name.as_deref(),
+            Some(git_info.repo.as_str())
+        );
+        // Validation should pass now.
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn explicit_config_overrides_git_remote() {
+        let mut config = LoopConfig {
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("explicit-owner".to_string()),
+                repo_name: Some("explicit-repo".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        config.resolve_git_defaults();
+        // Explicit values must not be overwritten.
+        assert_eq!(
+            config.issue_tracking.repo_owner.as_deref(),
+            Some("explicit-owner")
+        );
+        assert_eq!(
+            config.issue_tracking.repo_name.as_deref(),
+            Some("explicit-repo")
+        );
+    }
+
+    // ── existing tests ───────────────────────────────────────────────────
 
     #[test]
     fn default_config_is_valid() {

@@ -101,7 +101,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Apply CLI overrides on top of base.
-    let resolved = cli_args.apply_overrides(base);
+    let mut resolved = cli_args.apply_overrides(base);
 
     // Initialize tracing now that we have the log level.
     tracing_subscriber::fmt()
@@ -110,6 +110,9 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&resolved.log_level)),
         )
         .init();
+
+    // Fill in repo_owner/repo_name from git remote if not set explicitly.
+    resolved.resolve_git_defaults();
 
     // Validate resolved config.
     resolved.validate().context("invalid configuration")?;
