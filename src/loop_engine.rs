@@ -17,7 +17,8 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 
 /// Reason the loop terminated.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TerminationReason {
     /// All requested iterations completed normally.
     Completed,
@@ -361,11 +362,11 @@ impl LoopEngine {
         };
 
         let prompt_source = if self.config.prompt_file.is_some() {
-            "file"
+            crate::telemetry::PromptSource::File
         } else if self.config.prompt_inline.is_some() {
-            "inline"
+            crate::telemetry::PromptSource::Inline
         } else {
-            "none"
+            crate::telemetry::PromptSource::None
         };
 
         let mut summary = SessionSummary::default();
@@ -430,7 +431,7 @@ impl LoopEngine {
             } else {
                 max.to_string()
             },
-            prompt_source,
+            prompt_source = %prompt_source,
             "Loop starting"
         );
 
@@ -560,8 +561,8 @@ impl LoopEngine {
                         // Record as a success iteration (merge happened, no agent needed).
                         iteration_records.push(IterationRecord {
                             iteration: i,
-                            provider: self.adapter.name().to_string(),
-                            prompt_source: "triage-merge".to_string(),
+                            provider: self.config.provider.clone(),
+                            prompt_source: crate::telemetry::PromptSource::TriageMerge,
                             workflow_branch: None,
                             outcome: IterationOutcome::Success,
                             duration_ms: iter_start.elapsed().as_millis(),
@@ -613,8 +614,8 @@ impl LoopEngine {
                         };
                         iteration_records.push(IterationRecord {
                             iteration: i,
-                            provider: self.adapter.name().to_string(),
-                            prompt_source: prompt_source.to_string(),
+                            provider: self.config.provider.clone(),
+                            prompt_source: prompt_source.clone(),
                             workflow_branch: None,
                             outcome: outcome.clone(),
                             duration_ms: iter_start.elapsed().as_millis(),
@@ -1001,8 +1002,8 @@ impl LoopEngine {
 
             iteration_records.push(IterationRecord {
                 iteration: i,
-                provider: self.adapter.name().to_string(),
-                prompt_source: prompt_source.to_string(),
+                provider: self.config.provider.clone(),
+                prompt_source: prompt_source.clone(),
                 workflow_branch: workflow_branch.clone(),
                 outcome: final_outcome.clone(),
                 duration_ms: final_duration_ms,
@@ -1160,9 +1161,9 @@ impl LoopEngine {
             run_id: artifacts.run_id.clone(),
             started_at: run_started_at,
             ended_at: Some(run_ended_at),
-            provider: self.adapter.name().to_string(),
+            provider: self.config.provider.clone(),
             iterations_requested: self.config.iterations,
-            termination_reason: summary.termination_reason.as_ref().map(|r| r.to_string()),
+            termination_reason: summary.termination_reason.clone(),
             skipped_decisions: summary.skipped_decisions,
             run_by: resolve_operator(),
             workspace_dir: self
