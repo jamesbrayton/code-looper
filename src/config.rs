@@ -1082,11 +1082,8 @@ impl LoopConfig {
             }
             (Some(s), None) => PromptInput::Inline(s.clone()),
             (None, Some(p)) => {
-                std::fs::metadata(p).map_err(|_| {
-                    LooperError::InvalidArgument(format!(
-                        "--prompt-file '{}' does not exist",
-                        p.display()
-                    ))
+                std::fs::metadata(p).map_err(|e| {
+                    LooperError::InvalidArgument(format!("--prompt-file '{}': {e}", p.display()))
                 })?;
                 PromptInput::File(p.clone())
             }
@@ -1140,6 +1137,15 @@ impl LoopConfig {
         {
             return Err(LooperError::InvalidArgument(
                 "pr_management.mode=\"multi-pr\" requires issue_tracking.mode=\"github\""
+                    .to_string(),
+            ));
+        }
+        if self.pr_management.mode == PrMode::SinglePr
+            && self.issue_tracking.comment_issue_number.is_none()
+        {
+            return Err(LooperError::InvalidArgument(
+                "pr_management.mode=\"single-pr\" requires \
+                 issue_tracking.comment_issue_number to be set"
                     .to_string(),
             ));
         }
@@ -1378,9 +1384,11 @@ fn get_cached_rule(path: &Path) -> Option<String> {
     }
 }
 
-/// Clear the rule cache (for testing).
-#[cfg(test)]
-fn clear_rules_cache() {
+/// Clear the rule cache.
+///
+/// Called between repo iterations in multi-repo mode to prevent
+/// cross-repo rule contamination (#163), and in tests for isolation.
+pub fn clear_rules_cache() {
     RULES_CACHE
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -1575,8 +1583,8 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(
-            err.to_string().contains("does not exist"),
-            "expected 'does not exist' in error: {err}"
+            err.to_string().contains("--prompt-file") && err.to_string().contains("prompt.md"),
+            "expected prompt-file error, got: {err}"
         );
     }
 
@@ -2107,16 +2115,45 @@ local_promise_path = ".code-looper/dev.md"
 
     #[test]
     fn no_pr_and_single_pr_work_with_local_issue_tracking() {
-        for mode in [PrMode::NoPr, PrMode::SinglePr] {
-            let config = LoopConfig {
-                pr_management: PrManagementConfig {
-                    mode,
-                    ..PrManagementConfig::default()
-                },
-                ..LoopConfig::default()
-            };
-            assert!(config.validate().is_ok());
-        }
+        // NoPr works without comment_issue_number.
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::NoPr,
+                ..PrManagementConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // SinglePr requires comment_issue_number.
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::SinglePr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                comment_issue_number: Some(1),
+                ..IssueTrackingConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn single_pr_without_issue_number_rejected() {
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::SinglePr,
+                ..PrManagementConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("comment_issue_number"),
+            "expected error about comment_issue_number, got: {err}"
+        );
     }
 
     #[test]

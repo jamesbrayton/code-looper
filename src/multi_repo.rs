@@ -1,4 +1,4 @@
-use crate::config::{RepoTarget, ValidatedLoopConfig};
+use crate::config::{self, RepoTarget, ValidatedLoopConfig};
 use crate::loop_engine::{LoopEngine, SessionSummary};
 use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
 use crate::provider::{AdapterFactory, DefaultAdapterFactory};
@@ -57,6 +57,10 @@ pub fn run_multi_repo_with_factory(
         let name = target.display_name();
         info!(repo = %name, path = %target.path.display(), "Starting multi-repo run");
 
+        // Clear rules cache between repo runs to prevent cross-repo
+        // contamination from stale cached rule file content (#163).
+        config::clear_rules_cache();
+
         let mut repo_config = base_config.clone().with_workspace_dir(target.path.clone());
 
         if let Some(ref prompt) = target.prompt_override {
@@ -93,7 +97,10 @@ fn get_or_init_interrupt_flag() -> Arc<AtomicBool> {
             handler_flag.store(true, Ordering::SeqCst);
             eprintln!("\nInterrupt received — finishing current repo and stopping…");
         })
-        .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler for multi-repo run: {e}"));
+        .unwrap_or_else(|e| {
+            eprintln!("WARNING: Failed to install Ctrl+C handler for multi-repo run: {e}");
+            warn!("Failed to install Ctrl+C handler for multi-repo run: {e}");
+        });
         flag
     }))
 }

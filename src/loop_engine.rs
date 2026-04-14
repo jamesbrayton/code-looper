@@ -109,11 +109,10 @@ fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
                 .clone()
                 .or_else(|| config.orchestration.repo_owner.clone())
                 .unwrap_or_else(|| {
-                    warn!(
-                        "GitHubIssueTracker constructed with no repo_owner — \
-                         all GitHub API calls will fail"
-                    );
-                    String::new()
+                    unreachable!(
+                        "repo_owner should be set after validation — \
+                         this is a bug in validate()"
+                    )
                 });
             let repo = config
                 .issue_tracking
@@ -121,11 +120,10 @@ fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
                 .clone()
                 .or_else(|| config.orchestration.repo_name.clone())
                 .unwrap_or_else(|| {
-                    warn!(
-                        "GitHubIssueTracker constructed with no repo_name — \
-                         all GitHub API calls will fail"
-                    );
-                    String::new()
+                    unreachable!(
+                        "repo_name should be set after validation — \
+                         this is a bug in validate()"
+                    )
                 });
             Box::new(GitHubIssueTracker::new(owner, repo))
         }
@@ -1336,7 +1334,7 @@ impl LoopEngine {
 mod tests {
     use super::*;
     use crate::config::{LoopConfig, Provider};
-    use crate::provider::tests::FakeAdapter;
+    use crate::provider::tests::{CapturingAdapter, FakeAdapter};
 
     // ── compute_backoff_ms ────────────────────────────────────────────────────
 
@@ -1610,6 +1608,32 @@ mod tests {
         assert_eq!(
             summary.termination_reason,
             Some(TerminationReason::Completed)
+        );
+        assert!(!summary.hook_failed);
+    }
+
+    #[test]
+    fn on_complete_hook_failure_sets_hook_failed() {
+        // Use a shell command that always fails (exit 1).
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            on_complete: Some("false".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let adapter = FakeAdapter::success("fake");
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Completed)
+        );
+        assert!(
+            summary.hook_failed,
+            "hook_failed should be true when on_complete exits non-zero"
         );
     }
 
@@ -2254,6 +2278,10 @@ mod tests {
                 branch_prefix: "loop/".to_string(),
                 ..PrManagementConfig::default()
             },
+            issue_tracking: crate::config::IssueTrackingConfig {
+                comment_issue_number: Some(42),
+                ..Default::default()
+            },
             ..Default::default()
         }
         .validate()
@@ -2548,5 +2576,61 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 1);
+    }
+
+    // ── Rules injection into adapter prompt (#166) ───────────────────────────
+
+    #[test]
+    fn rules_are_prepended_to_adapter_prompt() {
+        use crate::config::RulesConfig;
+        use std::io::Write;
+
+        // Create a temporary rule file with known content.
+        let dir = tempfile::tempdir().unwrap();
+        let rule_path = dir.path().join("global.md");
+        {
+            let mut f = std::fs::File::create(&rule_path).unwrap();
+            writeln!(f, "RULE: always use snake_case").unwrap();
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("do the thing".to_string()),
+            rules: RulesConfig {
+                global: Some(rule_path),
+                workflows: Default::default(),
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+
+        // Clear the rules cache so the test starts fresh.
+        crate::config::clear_rules_cache();
+
+        let adapter = CapturingAdapter::new("fake");
+        let prompts = std::sync::Arc::clone(&adapter.received_prompts);
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.successes, 1);
+
+        let captured = prompts.lock().unwrap();
+        assert_eq!(captured.len(), 1, "adapter should have been called once");
+        assert!(
+            captured[0].contains("RULE: always use snake_case"),
+            "adapter prompt should contain rule content, got: {}",
+            captured[0]
+        );
+        assert!(
+            captured[0].contains("do the thing"),
+            "adapter prompt should contain the original prompt, got: {}",
+            captured[0]
+        );
+
+        // Clean up cache.
+        crate::config::clear_rules_cache();
     }
 }

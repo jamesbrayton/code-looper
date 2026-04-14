@@ -249,6 +249,12 @@ fn main() -> anyhow::Result<()> {
 
         // Exit with failure if any repo had failures or a failing termination
         // reason — mirrors the single-repo exit-code logic below (#136).
+        let any_interrupted = results.iter().any(|r| {
+            matches!(
+                r.summary.termination_reason,
+                Some(loop_engine::TerminationReason::Interrupted)
+            )
+        });
         let any_failed = results.iter().any(|r| {
             r.summary.failures > 0
                 || r.summary.hook_failed
@@ -258,6 +264,9 @@ fn main() -> anyhow::Result<()> {
                         | Some(loop_engine::TerminationReason::ProviderError(_))
                 )
         });
+        if any_interrupted {
+            std::process::exit(130);
+        }
         if any_failed {
             std::process::exit(1);
         }
@@ -275,13 +284,18 @@ fn main() -> anyhow::Result<()> {
     engine.install_signal_handler();
     let summary = engine.run();
 
+    if matches!(
+        summary.termination_reason,
+        Some(loop_engine::TerminationReason::Interrupted)
+    ) {
+        std::process::exit(130);
+    }
     if summary.failures > 0
         || summary.hook_failed
         || matches!(
             summary.termination_reason,
             Some(loop_engine::TerminationReason::StoppedOnFailure)
                 | Some(loop_engine::TerminationReason::ProviderError(_))
-                | Some(loop_engine::TerminationReason::Interrupted)
         )
     {
         std::process::exit(1);

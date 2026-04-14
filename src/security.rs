@@ -35,18 +35,21 @@ pub fn redact_secrets(input: &str) -> String {
     out
 }
 
-// ── GitHub token prefixes ─────────────────────────────────────────────────────
+// ── Token prefixes ────────────────────────────────────────────────────────────
 
-/// Prefixes used by GitHub-issued tokens.
-const GH_TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "ghs_", "ghr_", "sk-ant-"];
-
-/// Minimum number of alphanumeric characters that must follow a prefix for it
-/// to be considered a real token (avoids redacting short test strings).
-const GH_TOKEN_MIN_SUFFIX: usize = 36;
+/// Known token prefixes paired with the minimum suffix length required
+/// for redaction (avoids redacting short test strings).
+const TOKEN_PREFIXES: &[(&str, usize)] = &[
+    ("ghp_", 36),    // GitHub personal access tokens
+    ("gho_", 36),    // GitHub OAuth tokens
+    ("ghs_", 36),    // GitHub server-to-server tokens
+    ("ghr_", 36),    // GitHub refresh tokens
+    ("sk-ant-", 20), // Anthropic API keys
+];
 
 fn redact_gh_tokens(mut s: String) -> String {
-    for prefix in GH_TOKEN_PREFIXES {
-        s = redact_prefixed_token(&s, prefix, GH_TOKEN_MIN_SUFFIX);
+    for &(prefix, min_suffix) in TOKEN_PREFIXES {
+        s = redact_prefixed_token(&s, prefix, min_suffix);
     }
     s
 }

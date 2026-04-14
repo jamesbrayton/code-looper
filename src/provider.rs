@@ -862,6 +862,7 @@ fn run_provider_process(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::time::Duration;
 
     /// A deterministic test adapter that returns either a fixed result or a
@@ -990,6 +991,41 @@ pub mod tests {
                 Ok(r) => Ok(r.clone()),
                 Err(e) => Err(LooperError::InvalidArgument(e.to_string())),
             }
+        }
+    }
+
+    /// A test adapter that records every prompt it receives, so tests can
+    /// assert on prompt content (e.g. rule injection).
+    pub struct CapturingAdapter {
+        pub name: String,
+        pub received_prompts: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl CapturingAdapter {
+        pub fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                received_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ProviderAdapter for CapturingAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
+            self.received_prompts
+                .lock()
+                .expect("received_prompts mutex poisoned")
+                .push(prompt.to_string());
+            Ok(ExecutionResult {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                duration: Duration::from_millis(5),
+            })
         }
     }
 

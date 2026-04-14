@@ -348,12 +348,19 @@ fn write_scaffold_file(
         std::fs::create_dir_all(parent).map_err(|e| {
             anyhow::anyhow!("failed to create directory '{}': {e}", parent.display())
         })?;
+        let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
         let mut tmp_file = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
             anyhow::anyhow!("failed to create temp file in '{}': {e}", parent.display())
         })?;
         tmp_file
             .write_all(content.as_bytes())
             .map_err(|e| anyhow::anyhow!("failed to write temp file: {e}"))?;
+        if let Some(perms) = existing_perms {
+            tmp_file
+                .as_file()
+                .set_permissions(perms)
+                .map_err(|e| anyhow::anyhow!("failed to set permissions: {e}"))?;
+        }
         tmp_file.persist(path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to persist temp file to '{}': {}",

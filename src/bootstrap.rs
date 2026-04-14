@@ -26,8 +26,12 @@ use std::path::{Path, PathBuf};
 /// writes from power loss or process kills.
 fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
+    let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents.as_bytes())?;
+    if let Some(perms) = existing_perms {
+        tmp.as_file().set_permissions(perms)?;
+    }
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
