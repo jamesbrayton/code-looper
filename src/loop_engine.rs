@@ -201,7 +201,7 @@ impl LoopEngine {
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
@@ -244,7 +244,7 @@ impl LoopEngine {
     }
 
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_adapter_and_policy(
         config: LoopConfig,
         adapter: Box<dyn ProviderAdapter>,

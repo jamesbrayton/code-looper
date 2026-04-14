@@ -547,6 +547,28 @@ mod tests {
         assert!(name.starts_with("loop/99-"));
     }
 
+    /// Pin the invariant that slug bytes are always ASCII after non-ASCII
+    /// replacement.  The truncation path uses `slug[..max_slug]` which would
+    /// panic on a multi-byte char boundary if non-ASCII survived.
+    #[test]
+    fn unicode_title_truncated_at_max_slug_is_safe() {
+        // Title entirely non-ASCII — all chars become '-', collapsed to empty slug.
+        let name = derive_branch_name("loop/", 1, "日本語テスト", 5);
+        assert!(name.starts_with("loop/1"));
+        // Slug must be ASCII-only (the implementation replaces non-ASCII with '-').
+        let slug = name.trim_start_matches("loop/1-");
+        assert!(
+            slug.is_ascii(),
+            "slug must be ASCII-only after non-ASCII replacement: {slug:?}"
+        );
+
+        // Mixed ASCII + multi-byte, truncated mid-slug to verify no byte-boundary panic.
+        let name2 = derive_branch_name("loop/", 2, "fix 日本語 auth 🔒 flow", 8);
+        let slug2 = name2.trim_start_matches("loop/2-");
+        assert!(slug2.len() <= 8, "slug exceeds max_slug: {slug2:?}");
+        assert!(slug2.is_ascii(), "slug must be ASCII: {slug2:?}");
+    }
+
     #[test]
     fn custom_prefix_propagated() {
         assert_eq!(
