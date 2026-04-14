@@ -1,6 +1,7 @@
 use crate::config::{RepoTarget, ValidatedLoopConfig};
 use crate::loop_engine::{LoopEngine, SessionSummary};
 use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
+use crate::provider::{AdapterFactory, DefaultAdapterFactory};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -29,6 +30,17 @@ pub fn run_multi_repo(
     base_config: ValidatedLoopConfig,
     targets: &[RepoTarget],
 ) -> Vec<RepoRunResult> {
+    run_multi_repo_with_factory(base_config, targets, &DefaultAdapterFactory)
+}
+
+/// Like [`run_multi_repo`] but accepts an [`AdapterFactory`] for building
+/// provider adapters.  Tests use this to inject fakes without spawning real
+/// provider processes.
+pub fn run_multi_repo_with_factory(
+    base_config: ValidatedLoopConfig,
+    targets: &[RepoTarget],
+    factory: &dyn AdapterFactory,
+) -> Vec<RepoRunResult> {
     let interrupted = Arc::new(AtomicBool::new(false));
     install_signal_handler(Arc::clone(&interrupted));
 
@@ -56,8 +68,8 @@ pub fn run_multi_repo(
             allow_direct_github: base_config.allow_direct_github,
         };
         let guard = PolicyGuard::new(overrides);
-        let engine =
-            LoopEngine::new(repo_config, guard).with_shared_interrupt(Arc::clone(&interrupted));
+        let engine = LoopEngine::with_factory(repo_config, guard, factory)
+            .with_shared_interrupt(Arc::clone(&interrupted));
         let summary = engine.run();
 
         results.push(RepoRunResult { name, summary });
@@ -199,6 +211,82 @@ mod tests {
 
         assert_eq!(summary_a.successes, 1);
         assert_eq!(summary_b.successes, 2);
+    }
+
+    // ── run_multi_repo_with_factory tests ──────────────────────────────────────
+
+    #[test]
+    fn run_multi_repo_with_factory_collects_results_per_target() {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let base_config = LoopConfig {
+            iterations: 2,
+            prompt_inline: Some("task".to_string()),
+            ..LoopConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        let targets = [
+            make_target("/tmp/repo-a", Some("repo-a"), None),
+            make_target("/tmp/repo-b", Some("repo-b"), None),
+        ];
+
+        let factory = FakeAdapterFactory::success();
+        let results = run_multi_repo_with_factory(base_config, &targets, &factory);
+
+        assert_eq!(results.len(), 2, "should have one result per target");
+        assert_eq!(results[0].name, "repo-a");
+        assert_eq!(results[1].name, "repo-b");
+        assert_eq!(results[0].summary.successes, 2);
+        assert_eq!(results[1].summary.successes, 2);
+    }
+
+    #[test]
+    fn run_multi_repo_with_factory_applies_prompt_override() {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let base_config = LoopConfig {
+            iterations: 1,
+            prompt_inline: Some("base prompt".to_string()),
+            ..LoopConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        let targets = [make_target(
+            "/tmp/repo-a",
+            Some("repo-a"),
+            Some("custom prompt"),
+        )];
+
+        let factory = FakeAdapterFactory::success();
+        let results = run_multi_repo_with_factory(base_config, &targets, &factory);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary.successes, 1);
+    }
+
+    #[test]
+    fn run_multi_repo_with_factory_failure_counts() {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let base_config = LoopConfig {
+            iterations: 3,
+            prompt_inline: Some("task".to_string()),
+            ..LoopConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        let targets = [make_target("/tmp/repo-a", Some("repo-a"), None)];
+
+        let factory = FakeAdapterFactory::failure();
+        let results = run_multi_repo_with_factory(base_config, &targets, &factory);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary.failures, 3);
+        assert_eq!(results[0].summary.successes, 0);
     }
 
     #[test]

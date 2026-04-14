@@ -7,7 +7,7 @@ use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
 use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrManager, TriageAction};
 use crate::pr_strategy::{build_strategy, PrStrategy};
-use crate::provider::{build_adapter, ProviderAdapter};
+use crate::provider::{AdapterFactory, DefaultAdapterFactory, ProviderAdapter};
 use crate::telemetry::{
     resolve_operator, unix_now, IterationOutcome, IterationRecord, RetryPolicy, RunArtifacts,
     RunManifest,
@@ -149,7 +149,18 @@ pub struct LoopEngine {
 
 impl LoopEngine {
     pub fn new(config: ValidatedLoopConfig, guard: PolicyGuard) -> Self {
-        let adapter = build_adapter(
+        Self::with_factory(config, guard, &DefaultAdapterFactory)
+    }
+
+    /// Like [`Self::new`] but uses the supplied [`AdapterFactory`] to build the
+    /// provider adapter.  This is the primary injection point for tests that
+    /// need to run the real `LoopEngine` logic with a fake adapter.
+    pub fn with_factory(
+        config: ValidatedLoopConfig,
+        guard: PolicyGuard,
+        factory: &dyn AdapterFactory,
+    ) -> Self {
+        let adapter = factory.build(
             &config.provider,
             config.telemetry.stream_output,
             config.workspace_dir.clone(),

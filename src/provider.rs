@@ -63,6 +63,42 @@ pub trait ProviderAdapter: Send + Sync {
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError>;
 }
 
+// ── Adapter factory ──────────────────────────────────────────────────────────
+
+/// Factory trait for constructing provider adapters.
+///
+/// Production code uses [`DefaultAdapterFactory`]; tests inject a fake
+/// implementation that returns test doubles without spawning real processes.
+/// This follows the same trait-object pattern used by [`crate::issue_tracker::IssueTracker`]
+/// and [`crate::pr_manager::PrLifecycle`].
+pub trait AdapterFactory: Send + Sync {
+    /// Build a boxed [`ProviderAdapter`] for the given provider kind.
+    fn build(
+        &self,
+        kind: &ProviderKind,
+        stream_output: bool,
+        working_dir: Option<PathBuf>,
+        timeout_secs: Option<u64>,
+        extra_args: Vec<String>,
+    ) -> Box<dyn ProviderAdapter>;
+}
+
+/// Default factory that delegates to [`build_adapter`].
+pub struct DefaultAdapterFactory;
+
+impl AdapterFactory for DefaultAdapterFactory {
+    fn build(
+        &self,
+        kind: &ProviderKind,
+        stream_output: bool,
+        working_dir: Option<PathBuf>,
+        timeout_secs: Option<u64>,
+        extra_args: Vec<String>,
+    ) -> Box<dyn ProviderAdapter> {
+        build_adapter(kind, stream_output, working_dir, timeout_secs, extra_args)
+    }
+}
+
 // ── Adapter constructors ──────────────────────────────────────────────────────
 
 /// Build the concrete adapter for the given `ProviderKind`.
@@ -916,6 +952,40 @@ pub mod tests {
                 Ok(r) => Ok(r.clone()),
                 Err(e) => Err(LooperError::InvalidArgument(e.to_string())),
             }
+        }
+    }
+
+    /// A test adapter factory that always returns [`FakeAdapter`] instances,
+    /// ignoring the requested [`ProviderKind`].
+    ///
+    /// The `exit_code` controls the behaviour of every adapter built by this
+    /// factory: `0` means success, anything else means failure.
+    pub struct FakeAdapterFactory {
+        exit_code: i32,
+    }
+
+    impl FakeAdapterFactory {
+        /// Build a factory whose adapters always succeed (exit code 0).
+        pub fn success() -> Self {
+            Self { exit_code: 0 }
+        }
+
+        /// Build a factory whose adapters always fail (exit code 1).
+        pub fn failure() -> Self {
+            Self { exit_code: 1 }
+        }
+    }
+
+    impl super::AdapterFactory for FakeAdapterFactory {
+        fn build(
+            &self,
+            _kind: &ProviderKind,
+            _stream_output: bool,
+            _working_dir: Option<PathBuf>,
+            _timeout_secs: Option<u64>,
+            _extra_args: Vec<String>,
+        ) -> Box<dyn super::ProviderAdapter> {
+            Box::new(FakeAdapter::with_exit_code("fake", self.exit_code))
         }
     }
 

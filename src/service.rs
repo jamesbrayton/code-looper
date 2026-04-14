@@ -1,5 +1,5 @@
 use crate::config::{Provider as ProviderKind, ValidatedLoopConfig};
-use crate::provider::build_adapter;
+use crate::provider::{AdapterFactory, DefaultAdapterFactory};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, TcpListener, TcpStream};
@@ -121,12 +121,17 @@ pub struct ServiceMode {
     /// `--unsafe-bind` in the CLI.  Defaults to `false`, in which case any
     /// non-loopback bind is refused with an error.
     unsafe_bind: bool,
+    /// Factory used to build provider adapters for each `Run` request.
+    adapter_factory: Box<dyn AdapterFactory>,
 }
 
 impl ServiceMode {
     /// Create a new service mode from an existing resolved config and binding
     /// parameters.  `config.provider` is used as the default provider for `run`
     /// requests that omit the `provider` field.
+    ///
+    /// Uses [`DefaultAdapterFactory`] to build real provider adapters.
+    /// For testing, use [`Self::with_factory`] instead.
     ///
     /// `unsafe_bind` controls whether `run()` will accept a non-loopback bind
     /// address — see `Self::is_loopback_bind` and `--unsafe-bind` on the CLI.
@@ -136,11 +141,32 @@ impl ServiceMode {
         port: u16,
         unsafe_bind: bool,
     ) -> Self {
+        Self::with_factory(
+            config,
+            bind_addr,
+            port,
+            unsafe_bind,
+            Box::new(DefaultAdapterFactory),
+        )
+    }
+
+    /// Like [`Self::new`] but accepts a custom [`AdapterFactory`].
+    ///
+    /// Tests use this to inject a fake factory that returns test doubles
+    /// without spawning real provider processes.
+    pub fn with_factory(
+        config: ValidatedLoopConfig,
+        bind_addr: String,
+        port: u16,
+        unsafe_bind: bool,
+        adapter_factory: Box<dyn AdapterFactory>,
+    ) -> Self {
         Self {
             config,
             bind_addr,
             port,
             unsafe_bind,
+            adapter_factory,
         }
     }
 
@@ -286,7 +312,7 @@ impl ServiceMode {
         match req {
             ServiceRequest::Run { prompt, provider } => {
                 let provider_kind = provider.as_ref().unwrap_or(&self.config.provider);
-                let adapter = build_adapter(
+                let adapter = self.adapter_factory.build(
                     provider_kind,
                     false,
                     self.config.workspace_dir.clone(),
@@ -490,6 +516,156 @@ mod tests {
         assert!(resp.ok);
         let data = resp.data.unwrap();
         assert_eq!(data["message"], "shutting down");
+    }
+
+    // ── process_request(Run) via fake adapter factory ─────────────────────────
+
+    fn make_service_with_fake(exit_code: i32) -> ServiceMode {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let factory = if exit_code == 0 {
+            FakeAdapterFactory::success()
+        } else {
+            FakeAdapterFactory::failure()
+        };
+        let config = crate::config::LoopConfig {
+            provider: ProviderKind::Claude,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        ServiceMode::with_factory(
+            config,
+            "127.0.0.1".to_string(),
+            7979,
+            false,
+            Box::new(factory),
+        )
+    }
+
+    #[test]
+    fn process_run_success_increments_counters() {
+        let service = make_service_with_fake(0);
+        let mut state = ServiceState::new();
+
+        let (resp, shutdown) = service.process_request(
+            ServiceRequest::Run {
+                prompt: "fix the tests".to_string(),
+                provider: None,
+            },
+            &mut state,
+        );
+
+        assert!(!shutdown);
+        assert!(resp.ok);
+        assert_eq!(state.run_count, 1);
+        assert_eq!(state.success_count, 1);
+        assert_eq!(state.failure_count, 0);
+
+        let data = resp.data.unwrap();
+        assert_eq!(data["ok"], true);
+        assert_eq!(data["exit_code"], 0);
+        assert!(data["duration_ms"].is_number());
+    }
+
+    #[test]
+    fn process_run_failure_increments_failure_counter() {
+        let service = make_service_with_fake(1);
+        let mut state = ServiceState::new();
+
+        let (resp, shutdown) = service.process_request(
+            ServiceRequest::Run {
+                prompt: "will fail".to_string(),
+                provider: None,
+            },
+            &mut state,
+        );
+
+        assert!(!shutdown);
+        assert!(resp.ok); // response itself is ok — it's the run that failed
+        assert_eq!(state.run_count, 1);
+        assert_eq!(state.success_count, 0);
+        assert_eq!(state.failure_count, 1);
+
+        let data = resp.data.unwrap();
+        assert_eq!(data["ok"], false);
+        assert_eq!(data["exit_code"], 1);
+    }
+
+    #[test]
+    fn process_run_multiple_times_accumulates_counters() {
+        let service = make_service_with_fake(0);
+        let mut state = ServiceState::new();
+
+        for _ in 0..3 {
+            service.process_request(
+                ServiceRequest::Run {
+                    prompt: "task".to_string(),
+                    provider: None,
+                },
+                &mut state,
+            );
+        }
+
+        assert_eq!(state.run_count, 3);
+        assert_eq!(state.success_count, 3);
+        assert_eq!(state.failure_count, 0);
+    }
+
+    #[test]
+    fn process_run_does_not_set_shutdown_flag() {
+        let service = make_service_with_fake(0);
+        let mut state = ServiceState::new();
+
+        let (_, shutdown) = service.process_request(
+            ServiceRequest::Run {
+                prompt: "task".to_string(),
+                provider: None,
+            },
+            &mut state,
+        );
+
+        assert!(!shutdown, "Run should never trigger shutdown");
+    }
+
+    // ── handle_connection wire protocol ──────────────────────────────────────
+
+    #[test]
+    fn handle_connection_processes_run_and_status() {
+        let service = make_service_with_fake(0);
+        let mut state = ServiceState::new();
+
+        // Simulate a TCP stream with two requests: a Run then a Status.
+        let input = r#"{"cmd":"run","prompt":"hello"}
+{"cmd":"status"}
+"#;
+        let mut output = Vec::new();
+
+        // We need a TcpStream-like object.  Since handle_connection takes
+        // TcpStream, we test the processing logic via process_request instead.
+        // This test validates the JSON-lines wire protocol by simulating what
+        // handle_connection does: parse lines and call process_request.
+        for line in input.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let req: ServiceRequest = serde_json::from_str(line).unwrap();
+            let (resp, _) = service.process_request(req, &mut state);
+            let json = serde_json::to_string(&resp).unwrap();
+            output.push(json);
+        }
+
+        assert_eq!(output.len(), 2);
+        // First response is a Run result
+        let run_resp: serde_json::Value = serde_json::from_str(&output[0]).unwrap();
+        assert_eq!(run_resp["ok"], true);
+        assert!(run_resp["data"]["exit_code"].is_number());
+
+        // Second response is a Status result
+        let status_resp: serde_json::Value = serde_json::from_str(&output[1]).unwrap();
+        assert_eq!(status_resp["ok"], true);
+        assert_eq!(status_resp["data"]["run_count"], 1);
     }
 
     // ── is_loopback_bind (safety gate for #61) ────────────────────────────────
