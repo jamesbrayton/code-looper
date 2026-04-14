@@ -37,7 +37,7 @@ const DEFAULT_MAX_SLUG_LEN: usize = 40;
 /// ```
 pub fn derive_branch_name(
     prefix: &str,
-    issue_number: u64,
+    issue_number: u32,
     title: &str,
     max_slug_length: usize,
 ) -> String {
@@ -297,7 +297,7 @@ impl BranchManager {
     }
 
     /// Derive the feature branch name for this issue.
-    pub fn branch_name(&self, issue_number: u64, title: &str) -> String {
+    pub fn branch_name(&self, issue_number: u32, title: &str) -> String {
         derive_branch_name(
             &self.config.branch_prefix,
             issue_number,
@@ -311,7 +311,7 @@ impl BranchManager {
     /// reuses it without creating a duplicate.
     ///
     /// Returns the branch name.
-    pub fn ensure_branch(&self, issue_number: u64, title: &str) -> Result<String, BranchError> {
+    pub fn ensure_branch(&self, issue_number: u32, title: &str) -> Result<String, BranchError> {
         let branch = self.branch_name(issue_number, title);
 
         // Guard: never operate on base_branch

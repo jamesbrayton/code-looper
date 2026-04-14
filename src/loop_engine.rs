@@ -55,6 +55,8 @@ pub struct SessionSummary {
     /// (e.g. PR blocked on human review, no actionable PR found).
     pub skipped_decisions: u64,
     pub termination_reason: Option<TerminationReason>,
+    /// Whether the `on_complete` hook exited with non-zero status.
+    pub hook_failed: bool,
 }
 
 impl SessionSummary {
@@ -106,13 +108,25 @@ fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
                 .repo_owner
                 .clone()
                 .or_else(|| config.orchestration.repo_owner.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    warn!(
+                        "GitHubIssueTracker constructed with no repo_owner — \
+                         all GitHub API calls will fail"
+                    );
+                    String::new()
+                });
             let repo = config
                 .issue_tracking
                 .repo_name
                 .clone()
                 .or_else(|| config.orchestration.repo_name.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    warn!(
+                        "GitHubIssueTracker constructed with no repo_name — \
+                         all GitHub API calls will fail"
+                    );
+                    String::new()
+                });
             Box::new(GitHubIssueTracker::new(owner, repo))
         }
         IssueTrackingMode::Local => {
@@ -169,8 +183,20 @@ impl LoopEngine {
             config.provider_extra_args.clone(),
         );
         let policy_engine = if config.orchestration.enabled {
-            let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
-            let repo = config.orchestration.repo_name.clone().unwrap_or_default();
+            let owner = config.orchestration.repo_owner.clone().unwrap_or_else(|| {
+                warn!(
+                    "PolicyEngine constructed with no repo_owner — \
+                     orchestration context resolution will fail"
+                );
+                String::new()
+            });
+            let repo = config.orchestration.repo_name.clone().unwrap_or_else(|| {
+                warn!(
+                    "PolicyEngine constructed with no repo_name — \
+                     orchestration context resolution will fail"
+                );
+                String::new()
+            });
             let rules = config.orchestration.policies.clone();
             Some(PolicyEngine::with_rules(
                 Box::new(GhCliContextResolver { owner, repo }),
@@ -317,7 +343,13 @@ impl LoopEngine {
             flag.store(true, Ordering::SeqCst);
             eprintln!("\nInterrupt received — finishing current iteration and stopping…");
         })
-        .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler: {e}"));
+        .unwrap_or_else(|e| {
+            warn!("Failed to install Ctrl+C handler: {e}");
+            eprintln!(
+                "[loop] WARNING: Ctrl+C handler could not be installed ({e}); \
+                 the loop cannot be interrupted gracefully."
+            );
+        });
         Arc::clone(&self.interrupted)
     }
 
@@ -467,19 +499,18 @@ impl LoopEngine {
         // Single-PR: ensure the feature branch exists before iterations start.
         // The derived branch name is kept for use in the shippable-signal handler.
         let single_pr_branch: String = if let Some(ref bm) = self.branch_manager {
-            let issue_number = self
-                .config
-                .issue_tracking
-                .comment_issue_number
-                .map(|n| n as u64)
-                .unwrap_or_else(|| {
-                    warn!(
-                        "single-pr mode active but comment_issue_number is not set; \
-                         using 0 as issue number for branch derivation — \
-                         set issue_tracking.comment_issue_number in config"
-                    );
-                    0
-                });
+            let issue_number = match self.config.issue_tracking.comment_issue_number {
+                Some(n) => n,
+                None => {
+                    let msg = "single-pr mode requires issue_tracking.comment_issue_number \
+                               to be set";
+                    error!("{msg}");
+                    eprintln!("[loop] ERROR: {msg}");
+                    summary.termination_reason =
+                        Some(TerminationReason::ProviderError(msg.to_string()));
+                    return summary;
+                }
+            };
             match bm.ensure_branch(issue_number, "") {
                 Ok(branch) => {
                     info!(branch = %branch, "single-pr: checked out feature branch");
@@ -592,7 +623,9 @@ impl LoopEngine {
                                 (IterationOutcome::Success, None)
                             }
                             Ok(out) => {
-                                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                                let stderr = crate::security::redact_secrets(
+                                    &String::from_utf8_lossy(&out.stderr),
+                                );
                                 warn!(iteration = i, pr = pr.number, stderr = %stderr, "multi-pr: merge failed");
                                 (
                                     IterationOutcome::NonZeroExit {
@@ -950,7 +983,6 @@ impl LoopEngine {
                         .config
                         .issue_tracking
                         .comment_issue_number
-                        .map(|n| n as u64)
                         .unwrap_or_else(|| {
                             warn!(
                                 "comment_issue_number is not set; using 0 — \
@@ -1276,15 +1308,20 @@ impl LoopEngine {
                     if status.success() {
                         info!(command = %cmd, "on_complete hook succeeded");
                     } else {
+                        let code = status.code().unwrap_or(-1);
                         warn!(
                             command = %cmd,
-                            exit_code = status.code().unwrap_or(-1),
+                            exit_code = code,
                             "on_complete hook exited with non-zero status"
                         );
+                        eprintln!("[loop] WARNING: on_complete hook exited with code {code}");
+                        summary.hook_failed = true;
                     }
                 }
                 Err(e) => {
                     error!(command = %cmd, error = %e, "Failed to spawn on_complete hook");
+                    eprintln!("[loop] ERROR: Failed to spawn on_complete hook: {e}");
+                    summary.hook_failed = true;
                 }
             }
         }

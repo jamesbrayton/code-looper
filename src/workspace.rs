@@ -213,7 +213,11 @@ pub fn resolve_workspace_dir(override_path: Option<&Path>) -> PathBuf {
     if let Some(p) = override_path {
         p.to_path_buf()
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        std::env::current_dir().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Could not determine current working directory; falling back to '.'");
+            eprintln!("[loop] WARNING: could not determine current working directory ({e}); using '.'");
+            PathBuf::from(".")
+        })
     }
 }
 

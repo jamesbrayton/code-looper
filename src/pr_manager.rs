@@ -447,13 +447,13 @@ impl<L: PrLifecycle> PrManager<L> {
     }
 
     /// Build a PR title from an issue number and title.
-    fn pr_title(issue_number: u64, issue_title: &str) -> String {
+    fn pr_title(issue_number: u32, issue_title: &str) -> String {
         format!("[LOOPER] #{issue_number}: {issue_title}")
     }
 
     /// Build a PR body linking back to the originating issue and including an
     /// optional agent-provided summary.
-    fn pr_body(issue_number: u64, run_summary: Option<&str>) -> String {
+    fn pr_body(issue_number: u32, run_summary: Option<&str>) -> String {
         let mut body = format!(
             "Closes #{issue_number}\n\n\
              > This pull request was opened automatically by [Code Looper](https://github.com/jamesbrayton/code-looper).\n"
@@ -480,7 +480,7 @@ impl<L: PrLifecycle> PrManager<L> {
     pub fn handle_milestone(
         &self,
         branch: &str,
-        issue_number: u64,
+        issue_number: u32,
         issue_title: &str,
         agent_output: &str,
     ) -> Result<PrAction, PrError> {

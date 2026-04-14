@@ -293,8 +293,14 @@ impl ServiceMode {
 
             if shutdown {
                 // Best-effort response — shutdown proceeds even if the write fails.
-                let _ =
-                    serde_json::to_string(&response).map(|json| writeln!(write_stream, "{json}"));
+                match serde_json::to_string(&response) {
+                    Ok(json) => {
+                        if let Err(e) = writeln!(write_stream, "{json}") {
+                            warn!(error = %e, "Could not send shutdown ACK to client");
+                        }
+                    }
+                    Err(e) => warn!(error = %e, "Could not serialize shutdown response"),
+                }
                 shutdown_requested = true;
                 break;
             }

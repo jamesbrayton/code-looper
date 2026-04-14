@@ -450,6 +450,19 @@ pub struct RulesConfig {
     pub workflows: HashMap<PolicyWorkflow, PathBuf>,
 }
 
+impl RulesConfig {
+    /// Validate that all configured rule files exist and are within the size limit.
+    pub fn validate(&self) -> Result<(), LooperError> {
+        if let Some(ref path) = self.global {
+            validate_rule_file(path, "rules.global")?;
+        }
+        for (branch, path) in &self.workflows {
+            validate_rule_file(path, &format!("rules.workflows.{branch}"))?;
+        }
+        Ok(())
+    }
+}
+
 /// Soft-warning threshold for rule file size (bytes).
 pub const RULES_SIZE_WARN_BYTES: u64 = 16_384;
 
@@ -752,9 +765,10 @@ pub struct ValidatedLoopConfig {
     prompt_source: PromptInput,
 }
 
-// NOTE: This Deref exposes raw `iterations`, `prompt_inline`, and `prompt_file`
-// fields. Callers should use `iteration_count()` and `prompt_source()` instead.
-// See #117 for discussion of alternatives.
+// WARNING: This Deref exposes raw `iterations`, `prompt_inline`, and `prompt_file`
+// fields which have validated counterparts. Always use `iteration_count()` and
+// `prompt_source()` instead. Accessing the raw fields bypasses validation
+// invariants. See #117 and #153 for discussion of alternatives.
 impl std::ops::Deref for ValidatedLoopConfig {
     type Target = LoopConfig;
     fn deref(&self) -> &LoopConfig {
@@ -959,7 +973,7 @@ fn resolve_config_path_with_home(
 /// When rule paths are relative, they are resolved against the directory
 /// containing the config file (not against CWD).  Absolute paths are left
 /// unchanged.
-pub fn resolve_rule_paths(config: &mut LoopConfig, config_file: &Path) {
+pub fn resolve_rule_paths(rules: &mut RulesConfig, config_file: &Path) {
     let config_dir = config_file.parent().unwrap_or_else(|| {
         tracing::warn!(
             config_file = %config_file.display(),
@@ -968,14 +982,13 @@ pub fn resolve_rule_paths(config: &mut LoopConfig, config_file: &Path) {
         Path::new(".")
     });
 
-    if let Some(ref mut path) = config.rules.global {
+    if let Some(ref mut path) = rules.global {
         if path.is_relative() {
             *path = config_dir.join(&path);
         }
     }
 
-    let resolved: HashMap<PolicyWorkflow, PathBuf> = config
-        .rules
+    let resolved: HashMap<PolicyWorkflow, PathBuf> = rules
         .workflows
         .iter()
         .map(|(k, v)| {
@@ -987,7 +1000,7 @@ pub fn resolve_rule_paths(config: &mut LoopConfig, config_file: &Path) {
             (k.clone(), p)
         })
         .collect();
-    config.rules.workflows = resolved;
+    rules.workflows = resolved;
 }
 
 impl LoopConfig {
@@ -1170,12 +1183,7 @@ impl LoopConfig {
         }
 
         // ── Rules file validation ────────────────────────────────────────
-        if let Some(ref path) = self.rules.global {
-            validate_rule_file(path, "rules.global")?;
-        }
-        for (branch, path) in &self.rules.workflows {
-            validate_rule_file(path, &format!("rules.workflows.{branch}"))?;
-        }
+        self.rules.validate()?;
 
         Ok(ValidatedLoopConfig {
             inner: self,
@@ -1377,6 +1385,26 @@ fn clear_rules_cache() {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .clear();
+}
+
+/// RAII guard that clears `RULES_CACHE` on creation and on drop, ensuring
+/// test isolation even if the test panics.
+#[cfg(test)]
+struct RulesCacheGuard;
+
+#[cfg(test)]
+impl RulesCacheGuard {
+    fn new() -> Self {
+        clear_rules_cache();
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RulesCacheGuard {
+    fn drop(&mut self) {
+        clear_rules_cache();
+    }
 }
 
 #[cfg(test)]
@@ -2529,14 +2557,12 @@ non_retryable_exit_codes = [2, 126, 127]
     }
 
     #[test]
-    fn with_prompt_override_updates_source_and_inner() {
+    fn with_prompt_override_updates_source() {
         let validated = LoopConfig::default().validate().unwrap();
         let updated = validated.with_prompt_override("override prompt".to_string());
         assert!(
-            matches!(updated.prompt_source, PromptInput::Inline(ref s) if s == "override prompt")
+            matches!(updated.prompt_source(), PromptInput::Inline(ref s) if s == "override prompt")
         );
-        assert_eq!(updated.prompt_inline.as_deref(), Some("override prompt"));
-        assert!(updated.prompt_file.is_none());
     }
 
     #[test]
@@ -2711,7 +2737,7 @@ non_retryable_exit_codes = [2, 126, 127]
 
     #[test]
     fn load_rules_for_branch_falls_back_to_cache_on_read_error() {
-        clear_rules_cache();
+        let _guard = RulesCacheGuard::new();
 
         let mut global_file = NamedTempFile::new().unwrap();
         writeln!(global_file, "CACHED RULE").unwrap();
@@ -2736,13 +2762,11 @@ non_retryable_exit_codes = [2, 126, 127]
             result.contains("CACHED RULE"),
             "expected cached content on read failure"
         );
-
-        clear_rules_cache();
     }
 
     #[test]
     fn load_rules_for_branch_returns_none_when_first_read_fails_no_cache() {
-        clear_rules_cache();
+        let _guard = RulesCacheGuard::new();
 
         // Point global at a path that never existed — first read will fail
         // and there is no cached content to fall back on.
@@ -2757,8 +2781,6 @@ non_retryable_exit_codes = [2, 126, 127]
             result.is_none(),
             "expected None when rule file was never successfully read"
         );
-
-        clear_rules_cache();
     }
 
     #[test]
@@ -2771,7 +2793,7 @@ non_retryable_exit_codes = [2, 126, 127]
 
     #[test]
     fn load_rules_for_branch_combines_global_and_workflow() {
-        clear_rules_cache();
+        let _guard = RulesCacheGuard::new();
         let mut global_file = NamedTempFile::new().unwrap();
         writeln!(global_file, "GLOBAL RULE").unwrap();
         let mut workflow_file = NamedTempFile::new().unwrap();
@@ -2790,20 +2812,18 @@ non_retryable_exit_codes = [2, 126, 127]
         assert!(result.contains("PR REVIEW RULE"));
         // Global comes before workflow.
         assert!(result.find("GLOBAL RULE").unwrap() < result.find("PR REVIEW RULE").unwrap());
-        clear_rules_cache();
     }
 
     #[test]
     fn load_rules_for_branch_returns_none_when_no_rules() {
-        clear_rules_cache();
+        let _guard = RulesCacheGuard::new();
         let rules = RulesConfig::default();
         assert!(load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).is_none());
-        clear_rules_cache();
     }
 
     #[test]
     fn load_rules_for_branch_returns_global_only_when_no_workflow_match() {
-        clear_rules_cache();
+        let _guard = RulesCacheGuard::new();
         let mut global_file = NamedTempFile::new().unwrap();
         writeln!(global_file, "GLOBAL RULE").unwrap();
 
@@ -2814,7 +2834,6 @@ non_retryable_exit_codes = [2, 126, 127]
 
         let result = load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).unwrap();
         assert!(result.contains("GLOBAL RULE"));
-        clear_rules_cache();
     }
 
     // ── Three-tier config resolution ──────────────────────────────────
@@ -2933,24 +2952,20 @@ non_retryable_exit_codes = [2, 126, 127]
     #[test]
     fn resolve_rule_paths_makes_relative_absolute() {
         let config_file = Path::new("/opt/project/.code-looper/config.toml");
-        let mut config = LoopConfig {
-            rules: RulesConfig {
-                global: Some(PathBuf::from("rules/global.md")),
-                workflows: HashMap::from([(
-                    PolicyWorkflow::PrReview,
-                    PathBuf::from("rules/pr-review.md"),
-                )]),
-            },
-            ..Default::default()
+        let mut rules = RulesConfig {
+            global: Some(PathBuf::from("rules/global.md")),
+            workflows: HashMap::from([(
+                PolicyWorkflow::PrReview,
+                PathBuf::from("rules/pr-review.md"),
+            )]),
         };
-        resolve_rule_paths(&mut config, config_file);
+        resolve_rule_paths(&mut rules, config_file);
         assert_eq!(
-            config.rules.global.as_deref(),
+            rules.global.as_deref(),
             Some(Path::new("/opt/project/.code-looper/rules/global.md"))
         );
         assert_eq!(
-            config
-                .rules
+            rules
                 .workflows
                 .get(&PolicyWorkflow::PrReview)
                 .map(|p| p.as_path()),
@@ -2961,16 +2976,13 @@ non_retryable_exit_codes = [2, 126, 127]
     #[test]
     fn resolve_rule_paths_leaves_absolute_unchanged() {
         let config_file = Path::new("/opt/project/.code-looper/config.toml");
-        let mut config = LoopConfig {
-            rules: RulesConfig {
-                global: Some(PathBuf::from("/etc/code-looper/global.md")),
-                workflows: HashMap::new(),
-            },
-            ..Default::default()
+        let mut rules = RulesConfig {
+            global: Some(PathBuf::from("/etc/code-looper/global.md")),
+            workflows: HashMap::new(),
         };
-        resolve_rule_paths(&mut config, config_file);
+        resolve_rule_paths(&mut rules, config_file);
         assert_eq!(
-            config.rules.global.as_deref(),
+            rules.global.as_deref(),
             Some(Path::new("/etc/code-looper/global.md"))
         );
     }

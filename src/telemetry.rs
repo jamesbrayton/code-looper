@@ -322,10 +322,27 @@ impl RunArtifacts {
     pub fn prune_old_runs(artifacts_root: &Path, keep_runs: usize) {
         let entries = match std::fs::read_dir(artifacts_root) {
             Ok(e) => e,
-            Err(_) => return,
+            Err(e) => {
+                warn!(
+                    path = %artifacts_root.display(),
+                    error = %e,
+                    "Could not read run artifacts directory for pruning"
+                );
+                return;
+            }
         };
         let mut dirs: Vec<PathBuf> = entries
-            .flatten()
+            .filter_map(|entry| match entry {
+                Ok(e) => Some(e),
+                Err(e) => {
+                    warn!(
+                        path = %artifacts_root.display(),
+                        error = %e,
+                        "Skipping unreadable entry during pruning"
+                    );
+                    None
+                }
+            })
             .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .map(|e| e.path())
             .collect();

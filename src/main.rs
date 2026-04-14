@@ -114,7 +114,7 @@ fn main() -> anyhow::Result<()> {
             {
                 let mut cfg = config::LoopConfig::from_file(&path)
                     .with_context(|| format!("failed to load config from {}", path.display()))?;
-                config::resolve_rule_paths(&mut cfg, &path);
+                config::resolve_rule_paths(&mut cfg.rules, &path);
                 (cfg, Some((path, tier)))
             } else {
                 (config::LoopConfig::default(), None)
@@ -168,7 +168,7 @@ fn main() -> anyhow::Result<()> {
         let mut cfg = config::LoopConfig::from_file(&path)
             .with_context(|| format!("failed to load config from {}", path.display()))?;
         // Resolve rule file paths relative to the config file, not CWD.
-        config::resolve_rule_paths(&mut cfg, &path);
+        config::resolve_rule_paths(&mut cfg.rules, &path);
         (cfg, Some((path, tier)))
     } else {
         (config::LoopConfig::default(), None)
@@ -251,6 +251,7 @@ fn main() -> anyhow::Result<()> {
         // reason — mirrors the single-repo exit-code logic below (#136).
         let any_failed = results.iter().any(|r| {
             r.summary.failures > 0
+                || r.summary.hook_failed
                 || matches!(
                     r.summary.termination_reason,
                     Some(loop_engine::TerminationReason::StoppedOnFailure)
@@ -275,6 +276,7 @@ fn main() -> anyhow::Result<()> {
     let summary = engine.run();
 
     if summary.failures > 0
+        || summary.hook_failed
         || matches!(
             summary.termination_reason,
             Some(loop_engine::TerminationReason::StoppedOnFailure)
