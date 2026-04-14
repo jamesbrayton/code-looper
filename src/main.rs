@@ -53,6 +53,8 @@ fn main() -> anyhow::Result<()> {
                      Run \"code-looper --help\" to get started."
                 );
             }
+            // Warn if a broad .code-looper/ rule hides config files (#88).
+            bootstrap::warn_if_broad_ignore_hides_config(&ws_dir);
             return Ok(());
         }
 
@@ -139,6 +141,8 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(1);
         }
         info!(workspace = %ws_dir.display(), "Workspace prerequisite checks passed");
+        // Warn if a broad .code-looper/ rule hides config files (#88).
+        bootstrap::warn_if_broad_ignore_hides_config(&ws_dir);
     }
 
     // Validate orchestration policy and build the guard.

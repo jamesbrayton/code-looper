@@ -68,7 +68,7 @@ This is idempotent and safe to run multiple times. It will:
 
 - Create `CLAUDE.md` with a Code Looper section if no instruction file exists, or append the section to an existing `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md`.
 - Create `.mcp.json` with a GitHub MCP server stub (Docker-based by default) if one does not already exist, or merge the `github` entry into an existing file.
-- Add `.code-looper/` to `.gitignore` so run artifacts do not clutter `git status`. If you are **not** running bootstrap, append `.code-looper/` to your `.gitignore` manually.
+- Add `.code-looper/runs/` to `.gitignore` so run artifacts do not clutter `git status`. Config, rules, and prompts under `.code-looper/` are intended to be committed. If you are **not** running bootstrap, append `.code-looper/runs/` to your `.gitignore` manually.
 
 Preview what would change without writing anything:
 

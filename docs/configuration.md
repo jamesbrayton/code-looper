@@ -37,6 +37,27 @@ log_level: info
 
 ---
 
+## `.code-looper/` directory layout
+
+Code Looper uses a `.code-looper/` directory in the workspace root for both
+configuration and runtime artifacts. The `runs/` subdirectory is gitignored;
+everything else is intended to be committed to version control.
+
+| Path | Purpose | Version-controlled? |
+|------|---------|---------------------|
+| `.code-looper/config.toml` | Workspace configuration file | Yes |
+| `.code-looper/rules/` | Rule files (global + per-workflow) | Yes |
+| `.code-looper/prompts/` | Prompt templates | Yes |
+| `.code-looper/runs/` | Per-run artifacts (logs, summaries) | **No** — gitignored |
+| `.code-looper/promise.md` | Runtime promise file | **No** — ephemeral |
+
+`code-looper bootstrap` adds `.code-looper/runs/` to `.gitignore`
+automatically. If your `.gitignore` contains the older broad `.code-looper/`
+rule, replace it with `.code-looper/runs/` so that config and rule files are
+not hidden from version control.
+
+---
+
 ## Top-level fields
 
 | TOML key | CLI flag | Type | Default | Description |

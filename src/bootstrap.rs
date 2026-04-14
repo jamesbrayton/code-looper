@@ -10,8 +10,8 @@
 //! | Instruction file lacks a Code Looper section | Append a delimited section |
 //! | `.mcp.json` missing | Create a minimal stub |
 //! | `.mcp.json` lacks a `"github"` key | Merge the entry into the existing file |
-//! | `.gitignore` missing | Create with `.code-looper/` entry |
-//! | `.gitignore` lacks `.code-looper/` | Append the entry |
+//! | `.gitignore` missing | Create with `.code-looper/runs/` entry |
+//! | `.gitignore` lacks `.code-looper/runs/` | Append the entry |
 //!
 //! All changes are idempotent.  In `--dry-run` mode nothing is written.
 
@@ -311,7 +311,10 @@ fn merge_github_server(json: &str) -> Option<String> {
 // ── .gitignore ───────────────────────────────────────────────────────────────
 
 /// The gitignore entry appended (or used to seed) `.gitignore`.
-const GITIGNORE_ENTRY: &str = ".code-looper/";
+///
+/// Only the `runs/` subdirectory is ignored — config, rules, and prompts
+/// under `.code-looper/` are intended to be committed to version control.
+const GITIGNORE_ENTRY: &str = ".code-looper/runs/";
 const GITIGNORE_COMMENT: &str = "# Code Looper run artifacts";
 
 fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<BootstrapAction> {
@@ -346,14 +349,60 @@ fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Bo
     Ok(BootstrapAction::Appended(path))
 }
 
-/// Returns `true` when `.gitignore` already contains a `.code-looper/` or
-/// `.code-looper` entry (with or without trailing slash), ignoring leading
+/// Returns `true` when `.gitignore` already contains a Code Looper ignore
+/// entry — either the narrow `.code-looper/runs/` rule or the legacy broad
+/// `.code-looper/` rule (with or without trailing slash).  Ignores leading
 /// and trailing whitespace on each line.
 fn has_code_looper_ignore(contents: &str) -> bool {
     contents.lines().any(|line| {
         let trimmed = line.trim();
+        trimmed == ".code-looper"
+            || trimmed == ".code-looper/"
+            || trimmed == ".code-looper/runs"
+            || trimmed == ".code-looper/runs/"
+    })
+}
+
+/// Returns `true` when `.gitignore` contains the broad `.code-looper/` rule
+/// (as opposed to the narrower `.code-looper/runs/` rule).
+///
+/// When this returns `true` **and** a `.code-looper/config.toml` exists,
+/// callers should warn the user that the broad rule will hide version-
+/// controlled config files.
+pub fn has_broad_code_looper_ignore(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim();
         trimmed == ".code-looper" || trimmed == ".code-looper/"
     })
+}
+
+/// Emit a warning when a broad `.code-looper/` gitignore rule coexists with
+/// a `.code-looper/config.toml` in the workspace.  The broad rule would
+/// silently hide version-controlled config, rules, and prompt files.
+///
+/// Returns `true` if the warning was emitted.
+pub fn warn_if_broad_ignore_hides_config(workspace_dir: &Path) -> bool {
+    let gitignore_path = workspace_dir.join(".gitignore");
+    let config_path = workspace_dir.join(".code-looper/config.toml");
+
+    if !config_path.is_file() || !gitignore_path.is_file() {
+        return false;
+    }
+
+    let Ok(contents) = std::fs::read_to_string(&gitignore_path) else {
+        return false;
+    };
+
+    if has_broad_code_looper_ignore(&contents) {
+        eprintln!(
+            "warning: .gitignore contains a broad \".code-looper/\" rule that hides \
+             .code-looper/config.toml and other version-controlled files.\n  \
+             → Replace \".code-looper/\" with \".code-looper/runs/\" in your .gitignore."
+        );
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -628,7 +677,10 @@ mod tests {
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[2], BootstrapAction::Created(p) if p == &path));
         let content = fs::read_to_string(&path).unwrap();
-        assert!(content.contains(".code-looper/"));
+        assert!(
+            content.contains(".code-looper/runs/"),
+            "must write narrow .code-looper/runs/ rule"
+        );
         assert!(content.contains("# Code Looper"));
     }
 
@@ -645,7 +697,10 @@ mod tests {
             content.contains("node_modules/"),
             "existing entries preserved"
         );
-        assert!(content.contains(".code-looper/"));
+        assert!(
+            content.contains(".code-looper/runs/"),
+            "must write narrow .code-looper/runs/ rule"
+        );
     }
 
     #[test]
@@ -685,5 +740,68 @@ mod tests {
         let actions = run_bootstrap(dir.path(), true).unwrap();
         assert!(matches!(&actions[2], BootstrapAction::Created(_)));
         assert!(!path.exists(), "dry-run must not create .gitignore");
+    }
+
+    #[test]
+    fn gitignore_with_narrow_runs_entry_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".code-looper/runs/\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    #[test]
+    fn gitignore_with_narrow_runs_entry_no_trailing_slash_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".code-looper/runs\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    // ── Broad-rule detection tests (#88) ─────────────────────────────────────
+
+    #[test]
+    fn has_broad_detects_legacy_broad_rule() {
+        assert!(has_broad_code_looper_ignore(".code-looper/\n"));
+        assert!(has_broad_code_looper_ignore(".code-looper\n"));
+        assert!(has_broad_code_looper_ignore(
+            "*.log\n.code-looper/\nnode_modules/\n"
+        ));
+    }
+
+    #[test]
+    fn has_broad_does_not_flag_narrow_rule() {
+        assert!(!has_broad_code_looper_ignore(".code-looper/runs/\n"));
+        assert!(!has_broad_code_looper_ignore(".code-looper/runs\n"));
+    }
+
+    #[test]
+    fn warn_if_broad_ignore_no_config_file_returns_false() {
+        let dir = tmp();
+        // Broad rule in .gitignore but no config.toml — no warning.
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
+        assert!(!warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    #[test]
+    fn warn_if_broad_ignore_with_config_file_returns_true() {
+        let dir = tmp();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
+        fs::write(dir.path().join(".code-looper/config.toml"), "").unwrap();
+        assert!(warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    #[test]
+    fn warn_if_narrow_ignore_with_config_file_returns_false() {
+        let dir = tmp();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/runs/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
+        fs::write(dir.path().join(".code-looper/config.toml"), "").unwrap();
+        assert!(!warn_if_broad_ignore_hides_config(dir.path()));
     }
 }
