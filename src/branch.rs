@@ -104,11 +104,15 @@ pub enum BranchError {
     UnsafeDelete(String),
 }
 
-/// Run a git command and return trimmed stdout on success, or a `BranchError`
-/// on non-zero exit.
-fn git(args: &[&str]) -> Result<String, BranchError> {
-    let out = Command::new("git")
-        .args(args)
+/// Run a git command in an optional working directory and return trimmed
+/// stdout on success, or a `BranchError` on non-zero exit.
+fn git_in_dir(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String, BranchError> {
+    let mut cmd = Command::new("git");
+    cmd.args(args);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let out = cmd
         .output()
         .map_err(|e| BranchError::GitCommand(format!("failed to spawn git: {e}")))?;
     if out.status.success() {
@@ -122,37 +126,55 @@ fn git(args: &[&str]) -> Result<String, BranchError> {
     }
 }
 
+/// Convenience wrapper that runs git in the process CWD.
+fn git(args: &[&str]) -> Result<String, BranchError> {
+    git_in_dir(None, args)
+}
+
+/// CWD-based wrappers used by free functions and tests.
+#[cfg(test)]
+fn local_branch_exists(name: &str) -> bool {
+    local_branch_exists_in(None, name)
+}
+
+#[cfg(test)]
+fn remote_branch_exists(name: &str) -> bool {
+    remote_branch_exists_in(None, name)
+}
+
 /// Return the name of the currently checked-out branch.
 pub fn current_branch() -> Result<String, BranchError> {
     git(&["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
 /// Return `true` if a local branch with `name` exists.
-fn local_branch_exists(name: &str) -> bool {
-    Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{name}"),
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn local_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{name}"),
+    ]);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Return `true` if a remote-tracking branch `origin/{name}` exists.
-fn remote_branch_exists(name: &str) -> bool {
-    Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/origin/{name}"),
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn remote_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/remotes/origin/{name}"),
+    ]);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Return `true` if the working tree has uncommitted changes (tracked or staged).
@@ -208,6 +230,8 @@ pub struct BranchManager {
     no_pr_push: bool,
     /// Delete the remote branch after a PR merge (default: `true`).
     delete_remote_branch_on_merge: bool,
+    /// Working directory for git operations.  When `None`, uses the process CWD.
+    work_dir: Option<std::path::PathBuf>,
 }
 
 impl BranchManager {
@@ -218,7 +242,14 @@ impl BranchManager {
             max_slug_length: DEFAULT_MAX_SLUG_LEN,
             no_pr_push: true,
             delete_remote_branch_on_merge: true,
+            work_dir: None,
         }
+    }
+
+    /// Set the working directory for all git operations.
+    pub fn with_work_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.work_dir = Some(dir);
+        self
     }
 
     /// Override the `no_pr_push` flag at construction time.
@@ -243,6 +274,21 @@ impl BranchManager {
     pub fn with_delete_remote_branch_on_merge(mut self, enabled: bool) -> Self {
         self.delete_remote_branch_on_merge = enabled;
         self
+    }
+
+    /// Run a git command in this manager's working directory.
+    fn git(&self, args: &[&str]) -> Result<String, BranchError> {
+        git_in_dir(self.work_dir.as_deref(), args)
+    }
+
+    /// Check if a local branch exists in this manager's repo.
+    fn local_branch_exists(&self, name: &str) -> bool {
+        local_branch_exists_in(self.work_dir.as_deref(), name)
+    }
+
+    /// Check if a remote-tracking branch exists in this manager's repo.
+    fn remote_branch_exists(&self, name: &str) -> bool {
+        remote_branch_exists_in(self.work_dir.as_deref(), name)
     }
 
     /// The base branch name (e.g. `"main"`).
@@ -273,20 +319,20 @@ impl BranchManager {
             return Err(BranchError::BaseBranchProtected(branch));
         }
 
-        if local_branch_exists(&branch) {
+        if self.local_branch_exists(&branch) {
             // Already exists locally — just switch to it
             tracing::debug!(
                 branch,
                 "feature branch already exists locally; checking out"
             );
-            git(&["checkout", &branch])?;
-        } else if remote_branch_exists(&branch) {
+            self.git(&["checkout", &branch])?;
+        } else if self.remote_branch_exists(&branch) {
             // Exists on remote but not locally — create tracking branch
             tracing::debug!(
                 branch,
                 "feature branch exists on remote; creating local tracking branch"
             );
-            git(&["checkout", "-b", &branch, &format!("origin/{branch}")])?;
+            self.git(&["checkout", "-b", &branch, &format!("origin/{branch}")])?;
         } else {
             // New branch — create from latest base_branch.
             //
@@ -297,9 +343,12 @@ impl BranchManager {
             // `origin/{base}` is the classic source of "why are my PRs full
             // of conflicts" debugging sessions (see #68).
             tracing::debug!(branch, base = self.base(), "creating new feature branch");
-            let fetch_status = Command::new("git")
-                .args(["fetch", "origin", self.base()])
-                .status();
+            let mut fetch_cmd = Command::new("git");
+            fetch_cmd.args(["fetch", "origin", self.base()]);
+            if let Some(d) = &self.work_dir {
+                fetch_cmd.current_dir(d);
+            }
+            let fetch_status = fetch_cmd.status();
             match fetch_status {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
@@ -321,7 +370,7 @@ impl BranchManager {
                     );
                 }
             }
-            git(&[
+            self.git(&[
                 "checkout",
                 "-b",
                 &branch,
@@ -362,7 +411,7 @@ impl BranchManager {
             force = self.config.allow_force_push,
             "pushing feature branch"
         );
-        git(&args).map(|_| ())
+        self.git(&args).map(|_| ())
     }
 
     /// Delete a feature branch that the engine itself checked out locally
@@ -402,15 +451,16 @@ impl BranchManager {
 
         // Switch away from the branch before deleting it (if currently on it)
         if current_branch().ok().as_deref() == Some(branch) {
-            git(&["checkout", self.base()])?;
+            self.git(&["checkout", self.base()])?;
         }
 
         tracing::info!(branch, "deleting local feature branch after merge");
-        git(&["branch", "-d", branch])?;
+        self.git(&["branch", "-d", branch])?;
 
-        if self.delete_remote_branch_on_merge && remote_branch_exists(branch) {
+        if self.delete_remote_branch_on_merge && self.remote_branch_exists(branch) {
             tracing::info!(branch, "deleting remote feature branch after merge");
-            git(&["push", "origin", "--delete", branch]).map(|_| ())?;
+            self.git(&["push", "origin", "--delete", branch])
+                .map(|_| ())?;
         }
 
         Ok(())
@@ -442,7 +492,7 @@ impl BranchManager {
             );
             return Ok(());
         }
-        if !remote_branch_exists(branch) {
+        if !self.remote_branch_exists(branch) {
             tracing::debug!(
                 branch,
                 "remote branch no longer exists; skipping remote cleanup"
@@ -453,7 +503,8 @@ impl BranchManager {
             branch,
             "deleting remote feature branch after multi-PR merge"
         );
-        git(&["push", "origin", "--delete", branch]).map(|_| ())
+        self.git(&["push", "origin", "--delete", branch])
+            .map(|_| ())
     }
 }
 

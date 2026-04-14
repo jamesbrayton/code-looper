@@ -258,7 +258,17 @@ fn main() -> anyhow::Result<()> {
     // Build the loop engine, install signal handler, and run.
     let engine = loop_engine::LoopEngine::new(validated, guard);
     engine.install_signal_handler();
-    engine.run();
+    let summary = engine.run();
+
+    if summary.failures > 0
+        || matches!(
+            summary.termination_reason,
+            Some(loop_engine::TerminationReason::StoppedOnFailure)
+                | Some(loop_engine::TerminationReason::ProviderError(_))
+        )
+    {
+        std::process::exit(1);
+    }
 
     Ok(())
 }

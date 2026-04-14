@@ -187,7 +187,11 @@ impl LoopEngine {
             None
         };
         let branch_manager = if config.pr_management.mode == PrMode::SinglePr {
-            Some(BranchManager::new(config.pr_management.clone()))
+            let mut bm = BranchManager::new(config.pr_management.clone());
+            if let Some(ref dir) = config.workspace_dir {
+                bm = bm.with_work_dir(dir.clone());
+            }
+            Some(bm)
         } else {
             None
         };
@@ -545,7 +549,7 @@ impl LoopEngine {
                         let merge_result = Command::new("gh")
                             .args(["pr", "merge", &pr.number.to_string(), "--merge"])
                             .output();
-                        match merge_result {
+                        let (merge_outcome, merge_stderr) = match merge_result {
                             Ok(out) if out.status.success() => {
                                 info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
                                 // Attempt post-merge **remote-only** branch
@@ -559,7 +563,11 @@ impl LoopEngine {
                                 // touches the remote.  Failures are
                                 // non-fatal (PR is already merged).
                                 if let Some(head_ref) = pr.head_ref.as_deref() {
-                                    let bm = BranchManager::new(self.config.pr_management.clone());
+                                    let mut bm =
+                                        BranchManager::new(self.config.pr_management.clone());
+                                    if let Some(ref dir) = self.config.workspace_dir {
+                                        bm = bm.with_work_dir(dir.clone());
+                                    }
                                     match bm.cleanup_merged_remote_branch(head_ref) {
                                         Ok(()) => info!(
                                             iteration = i,
@@ -581,30 +589,47 @@ impl LoopEngine {
                                          skipping remote branch cleanup"
                                     );
                                 }
+                                (IterationOutcome::Success, None)
                             }
                             Ok(out) => {
-                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                                 warn!(iteration = i, pr = pr.number, stderr = %stderr, "multi-pr: merge failed");
+                                (
+                                    IterationOutcome::NonZeroExit {
+                                        exit_code: out.status.code().unwrap_or(-1),
+                                    },
+                                    Some(stderr),
+                                )
                             }
                             Err(e) => {
                                 warn!(iteration = i, pr = pr.number, error = %e, "multi-pr: failed to spawn gh for merge");
+                                (
+                                    IterationOutcome::SpawnFailure {
+                                        message: e.to_string(),
+                                    },
+                                    None,
+                                )
                             }
-                        }
-                        // Record as a success iteration (merge happened, no agent needed).
+                        };
+                        let merge_succeeded = matches!(merge_outcome, IterationOutcome::Success);
                         iteration_records.push(IterationRecord {
                             iteration: i,
                             provider: self.config.provider.clone(),
                             prompt_source: crate::telemetry::PromptSource::TriageMerge,
                             workflow_branch: None,
-                            outcome: IterationOutcome::Success,
+                            outcome: merge_outcome,
                             duration_ms: iter_start.elapsed().as_millis(),
                             retries: 0,
-                            stderr_excerpt: None,
+                            stderr_excerpt: merge_stderr,
                             transcript_path: None,
                             started_at: iter_started_at,
                         });
                         summary.iterations_run += 1;
-                        summary.successes += 1;
+                        if merge_succeeded {
+                            summary.successes += 1;
+                        } else {
+                            summary.failures += 1;
+                        }
                         continue;
                     }
                     TriageAction::BlockedOnHumanReview { pr } => {
@@ -2430,10 +2455,10 @@ mod tests {
             Box::new(MergeStrategy),
         );
         // `gh pr merge` will fail (no real GitHub), but the engine must not
-        // panic and must record the iteration as a success.
+        // panic.  The failed merge is correctly recorded as a failure (#126).
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
-        assert_eq!(summary.successes, 1);
+        assert_eq!(summary.failures, 1);
     }
 
     /// When `head_ref` is empty the cleanup branch is skipped entirely.
@@ -2484,8 +2509,9 @@ mod tests {
             Box::new(FakeAdapter::success("fake")),
             Box::new(MergeNoRefStrategy),
         );
+        // `gh pr merge` fails (no real GitHub) — correctly recorded as failure (#126).
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
-        assert_eq!(summary.successes, 1);
+        assert_eq!(summary.failures, 1);
     }
 }

@@ -16,7 +16,21 @@
 //! All changes are idempotent.  In `--dry-run` mode nothing is written.
 
 use crate::workspace::has_github_server;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Atomically write `contents` to `path` using a temp file + rename.
+///
+/// The file is first written to a `NamedTempFile` in the same directory as
+/// `path`, then atomically renamed via `persist`.  This prevents partial
+/// writes from power loss or process kills.
+fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(contents.as_bytes())?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
 
 pub const SECTION_BEGIN: &str = "<!-- code-looper begin -->";
 pub const SECTION_END: &str = "<!-- code-looper end -->";
@@ -138,9 +152,9 @@ fn bootstrap_instruction_file(
             // No instruction file at all → create CLAUDE.md.
             let path = workspace_dir.join("CLAUDE.md");
             if !dry_run {
-                std::fs::write(
+                atomic_write(
                     &path,
-                    format!("# Project Instructions\n\n{CLAUDE_MD_SECTION}\n"),
+                    &format!("# Project Instructions\n\n{CLAUDE_MD_SECTION}\n"),
                 )
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
             }
@@ -162,7 +176,7 @@ fn bootstrap_instruction_file(
                         "\n\n"
                     };
                     let updated = format!("{contents}{separator}{CLAUDE_MD_SECTION}\n");
-                    std::fs::write(&path, updated)
+                    atomic_write(&path, &updated)
                         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
                 }
                 Ok(BootstrapAction::Appended(path))
@@ -178,7 +192,7 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
 
     if !path.is_file() {
         if !dry_run {
-            std::fs::write(&path, MCP_STUB)
+            atomic_write(&path, MCP_STUB)
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
         }
         return Ok(BootstrapAction::Created(path));
@@ -196,7 +210,7 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
         .ok_or_else(|| anyhow::anyhow!("could not parse {} as a JSON object", path.display()))?;
 
     if !dry_run {
-        std::fs::write(&path, merged)
+        atomic_write(&path, &merged)
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     }
 
@@ -265,6 +279,12 @@ fn merge_github_server(json: &str) -> Option<String> {
         let brace_offset = after_key.find('{')?;
         let insert_pos = mcp_start + "\"mcpServers\"".len() + brace_offset + 1;
 
+        // Guard against non-ASCII input: if `insert_pos` lands inside a
+        // multi-byte UTF-8 sequence, bail out rather than panicking.
+        if !json.is_char_boundary(insert_pos) {
+            return None;
+        }
+
         // Strip trailing commas from existing content so we don't produce
         // double-comma output (e.g. `"github":{...},,"context7":{},`).
         // See #100.
@@ -289,6 +309,10 @@ fn merge_github_server(json: &str) -> Option<String> {
     // No mcpServers block: insert at the top-level object.
     let open = json.find('{')?;
     let insert_pos = open + 1;
+    // Guard against non-ASCII input at top-level insertion point.
+    if !json.is_char_boundary(insert_pos) {
+        return None;
+    }
     let tail = &json[insert_pos..];
     let cleaned_tail = strip_trailing_commas_in_object(tail);
     let needs_comma = !cleaned_tail.trim_start().starts_with('}');
@@ -316,7 +340,7 @@ fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Bo
 
     if !path.is_file() {
         if !dry_run {
-            std::fs::write(&path, format!("{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n"))
+            atomic_write(&path, &format!("{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n"))
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
         }
         return Ok(BootstrapAction::Created(path));
@@ -336,7 +360,7 @@ fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Bo
             "\n\n"
         };
         let updated = format!("{contents}{separator}{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n");
-        std::fs::write(&path, updated)
+        atomic_write(&path, &updated)
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     }
 
@@ -629,6 +653,15 @@ mod tests {
 }"#;
         let result = merge_github_server(input).expect("should produce output");
         assert!(!result.contains(",,"), "must not produce double commas");
+        assert!(result.contains("\"github\""));
+    }
+
+    #[test]
+    fn merge_handles_non_ascii_content_before_mcp_servers() {
+        // Non-ASCII characters (a comment value) before the mcpServers key.
+        // The byte-offset arithmetic must not panic on valid UTF-8.
+        let input = "{\n  \"description\": \"Ünïcödé ☕\",\n  \"mcpServers\": {\n    \"context7\": {}\n  }\n}";
+        let result = merge_github_server(input).expect("should produce output with non-ASCII");
         assert!(result.contains("\"github\""));
     }
 

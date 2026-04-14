@@ -824,25 +824,45 @@ impl ConfigFormat {
 ///
 /// Returns `None` if the home directory cannot be determined.
 pub fn user_config_dir() -> Option<PathBuf> {
+    user_config_dir_with_home(None)
+}
+
+/// Resolve the user config directory, optionally overriding the home directory.
+///
+/// When `home_override` is `Some`, it is used in place of `$HOME`/`$USERPROFILE`
+/// for computing the user config path.  This avoids thread-unsafe `env::set_var`
+/// calls in tests.
+fn user_config_dir_with_home(home_override: Option<&Path>) -> Option<PathBuf> {
     fn home_dir() -> Option<PathBuf> {
         std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
     }
 
+    let effective_home =
+        || -> Option<PathBuf> { home_override.map(PathBuf::from).or_else(home_dir) };
+
     #[cfg(target_os = "macos")]
     {
-        home_dir().map(|h| h.join("Library/Application Support/code-looper"))
+        effective_home().map(|h| h.join("Library/Application Support/code-looper"))
     }
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("code-looper"))
+        if home_override.is_some() {
+            effective_home().map(|h| h.join("AppData/Roaming/code-looper"))
+        } else {
+            std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("code-looper"))
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| home_dir().map(|h| h.join(".config")))
+        if home_override.is_none() {
+            if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+                return Some(PathBuf::from(xdg).join("code-looper"));
+            }
+        }
+        effective_home()
+            .map(|h| h.join(".config"))
             .map(|base| base.join("code-looper"))
     }
 }
@@ -891,7 +911,39 @@ pub fn resolve_config_path(
     }
 
     // Tier 3: user config.
-    if let Some(user_dir) = user_config_dir() {
+    if let Some(dir) = user_config_dir() {
+        if let Some(path) = find_config_in_dir(&dir) {
+            return Some((path, "user"));
+        }
+    } else {
+        tracing::debug!("HOME/USERPROFILE not set; skipping user-tier config lookup");
+    }
+
+    None
+}
+
+/// Like [`resolve_config_path`] but accepts an optional home directory override
+/// for the user-tier lookup.  Used in tests to avoid thread-unsafe
+/// `env::set_var("HOME", ...)`.
+#[cfg(test)]
+fn resolve_config_path_with_home(
+    cli_config: Option<&Path>,
+    workspace_dir: &Path,
+    home_override: Option<&Path>,
+) -> Option<(PathBuf, &'static str)> {
+    // Tier 1: explicit CLI flag.
+    if let Some(path) = cli_config {
+        return Some((path.to_path_buf(), "cli"));
+    }
+
+    // Tier 2: workspace config.
+    let workspace_config_dir = workspace_dir.join(".code-looper");
+    if let Some(path) = find_config_in_dir(&workspace_config_dir) {
+        return Some((path, "workspace"));
+    }
+
+    // Tier 3: user config.
+    if let Some(user_dir) = user_config_dir_with_home(home_override) {
         if let Some(path) = find_config_in_dir(&user_dir) {
             return Some((path, "user"));
         }
@@ -1105,6 +1157,16 @@ impl LoopConfig {
                         .to_string(),
                 ));
             }
+        }
+
+        // ── Backoff multiplier ────────────────────────────────────────────
+        if self.retry_backoff_multiplier.is_nan()
+            || self.retry_backoff_multiplier.is_infinite()
+            || self.retry_backoff_multiplier < 0.0
+        {
+            return Err(LooperError::InvalidArgument(
+                "--retry-backoff-multiplier must be a finite, non-negative number".to_string(),
+            ));
         }
 
         // ── Rules file validation ────────────────────────────────────────
@@ -2586,6 +2648,48 @@ non_retryable_exit_codes = [2, 126, 127]
     }
 
     #[test]
+    fn validate_rejects_nan_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: f64::NAN,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("retry-backoff-multiplier"),
+            "expected backoff multiplier error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_infinite_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: f64::INFINITY,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry-backoff-multiplier"));
+    }
+
+    #[test]
+    fn validate_rejects_negative_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: -1.0,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry-backoff-multiplier"));
+    }
+
+    #[test]
+    fn validate_accepts_zero_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: 0.0,
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn load_rule_file_returns_content() {
         let mut f = NamedTempFile::new().unwrap();
         writeln!(f, "Always use snake_case.").unwrap();
@@ -2806,24 +2910,16 @@ non_retryable_exit_codes = [2, 126, 127]
         std::fs::create_dir_all(&ws).unwrap();
 
         // Create a user-tier config under a controlled HOME.
-        let user_config_dir = tmp.path().join(".config/code-looper");
-        std::fs::create_dir_all(&user_config_dir).unwrap();
+        let user_cfg_dir = tmp.path().join(".config/code-looper");
+        std::fs::create_dir_all(&user_cfg_dir).unwrap();
         std::fs::write(
-            user_config_dir.join("config.toml"),
+            user_cfg_dir.join("config.toml"),
             "provider = \"claude\"\niterations = 1\n",
         )
         .unwrap();
 
-        // Override HOME to the temp directory.
-        let old_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-
-        let result = resolve_config_path(None, &ws);
-
-        // Restore HOME.
-        if let Some(h) = old_home {
-            std::env::set_var("HOME", h);
-        }
+        // Use the injectable home override instead of thread-unsafe env::set_var.
+        let result = resolve_config_path_with_home(None, &ws, Some(tmp.path()));
 
         // Should find the user-tier config.
         let (path, tier) = result.expect("user-tier config should be found");

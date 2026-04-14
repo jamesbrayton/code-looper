@@ -85,11 +85,14 @@ fn redact_prefixed_token(s: &str, prefix: &str, min_suffix: usize) -> String {
 
 // ── Authorization headers ─────────────────────────────────────────────────────
 
-/// Redact `Authorization: Bearer <token>` and `Authorization: token <token>`.
+/// Redact `Authorization: Bearer <token>`, `Authorization: token <token>`,
+/// and `Authorization: Basic <credentials>`.
 ///
 /// Matching is case-insensitive for the header name and scheme keyword.
 fn redact_auth_headers(s: String) -> String {
-    redact_header_value(&s, "Bearer").pipe(|s| redact_header_value(&s, "token"))
+    redact_header_value(&s, "Bearer")
+        .pipe(|s| redact_header_value(&s, "token"))
+        .pipe(|s| redact_header_value(&s, "Basic"))
 }
 
 fn redact_header_value(s: &str, scheme: &str) -> String {
@@ -528,13 +531,12 @@ mod tests {
     }
 
     #[test]
-    fn basic_auth_scheme_is_not_redacted() {
-        // Only Bearer and token schemes are redacted by design.
+    fn basic_auth_scheme_is_redacted() {
         let input = "Authorization: Basic dXNlcjpwYXNz";
         let output = redact_secrets(input);
         assert_eq!(
-            output, input,
-            "Basic auth should not be redacted (by current design)"
+            output, "Authorization: Basic [REDACTED]",
+            "Basic auth credentials should be redacted"
         );
     }
 

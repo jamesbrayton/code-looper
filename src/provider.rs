@@ -311,8 +311,20 @@ fn run_claude_streaming(
         source: e,
     })?;
 
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| LooperError::ProviderSpawn {
+            binary: "claude".to_string(),
+            source: std::io::Error::other("stdout pipe missing after spawn"),
+        })?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| LooperError::ProviderSpawn {
+            binary: "claude".to_string(),
+            source: std::io::Error::other("stderr pipe missing after spawn"),
+        })?;
 
     let child = Arc::new(std::sync::Mutex::new(child));
     let timeout_fired = Arc::new(AtomicBool::new(false));
@@ -478,6 +490,7 @@ impl ProviderAdapter for CopilotAdapter {
         let mut args: Vec<&str> = vec!["copilot", "suggest", "-t", "shell"];
         let extra: Vec<&str> = self.extra_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&extra);
+        args.push("--");
         args.push(prompt);
         run_provider_process(
             "gh",
@@ -508,6 +521,7 @@ impl ProviderAdapter for CodexAdapter {
         let mut args: Vec<&str> = Vec::new();
         let extra: Vec<&str> = self.extra_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&extra);
+        args.push("--");
         args.push(prompt);
         run_provider_process(
             "codex",
@@ -615,8 +629,20 @@ fn run_provider_process(
             source: e,
         })?;
 
-        let stdout_pipe = child.stdout.take().expect("stdout piped");
-        let stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stdout_pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stdout pipe missing after spawn"),
+            })?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stderr pipe missing after spawn"),
+            })?;
 
         // Wrap child in Arc<Mutex> so the optional watchdog thread can kill it.
         let child = std::sync::Arc::new(std::sync::Mutex::new(child));
@@ -727,8 +753,20 @@ fn run_provider_process(
             source: e,
         })?;
 
-        let stdout_pipe = child.stdout.take().expect("stdout piped");
-        let stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stdout_pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stdout pipe missing after spawn"),
+            })?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stderr pipe missing after spawn"),
+            })?;
 
         // Wrap child so the optional watchdog can kill it.
         let child = Arc::new(std::sync::Mutex::new(child));

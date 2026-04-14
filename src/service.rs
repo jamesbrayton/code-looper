@@ -291,13 +291,16 @@ impl ServiceMode {
                 Err(e) => (ServiceResponse::failure(format!("parse error: {e}")), false),
             };
 
-            let response_json = serde_json::to_string(&response)?;
-            writeln!(write_stream, "{response_json}")?;
-
             if shutdown {
+                // Best-effort response — shutdown proceeds even if the write fails.
+                let _ =
+                    serde_json::to_string(&response).map(|json| writeln!(write_stream, "{json}"));
                 shutdown_requested = true;
                 break;
             }
+
+            let response_json = serde_json::to_string(&response)?;
+            writeln!(write_stream, "{response_json}")?;
         }
 
         Ok(shutdown_requested)
