@@ -54,7 +54,7 @@ impl CheckResult {
 /// 1. An instruction file exists (`CLAUDE.md`, `AGENTS.md`, or
 ///    `.github/copilot-instructions.md`).
 /// 2. The instruction file contains the Code Looper section marker
-///    (`<!-- code-looper:begin -->`); skipped when check 1 fails.
+///    (`<!-- code-looper begin -->`); skipped when check 1 fails.
 /// 3. An MCP config file (`.mcp.json`) exists and contains a `"github"` key,
 ///    indicating the GitHub MCP server is configured.
 pub struct PrerequisiteChecker {
