@@ -1069,12 +1069,12 @@ impl LoopConfig {
             }
             (Some(s), None) => PromptInput::Inline(s.clone()),
             (None, Some(p)) => {
-                if !p.exists() {
-                    return Err(LooperError::InvalidArgument(format!(
+                std::fs::metadata(p).map_err(|_| {
+                    LooperError::InvalidArgument(format!(
                         "--prompt-file '{}' does not exist",
                         p.display()
-                    )));
-                }
+                    ))
+                })?;
                 PromptInput::File(p.clone())
             }
             (None, None) => PromptInput::Absent,
@@ -1162,10 +1162,10 @@ impl LoopConfig {
         // ── Backoff multiplier ────────────────────────────────────────────
         if self.retry_backoff_multiplier.is_nan()
             || self.retry_backoff_multiplier.is_infinite()
-            || self.retry_backoff_multiplier < 0.0
+            || self.retry_backoff_multiplier <= 0.0
         {
             return Err(LooperError::InvalidArgument(
-                "--retry-backoff-multiplier must be a finite, non-negative number".to_string(),
+                "--retry-backoff-multiplier must be a finite, positive number (> 0.0)".to_string(),
             ));
         }
 
@@ -2681,12 +2681,13 @@ non_retryable_exit_codes = [2, 126, 127]
     }
 
     #[test]
-    fn validate_accepts_zero_backoff_multiplier() {
+    fn validate_rejects_zero_backoff_multiplier() {
         let config = LoopConfig {
             retry_backoff_multiplier: 0.0,
             ..Default::default()
         };
-        assert!(config.validate().is_ok());
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry-backoff-multiplier"));
     }
 
     #[test]

@@ -17,6 +17,8 @@
 //! | `Authorization: token <token>` | HTTP Authorization header (token) |
 //! | `GITHUB_TOKEN=<value>` | Environment variable assignment |
 //! | `GH_TOKEN=<value>` | Alternative env var used by the `gh` CLI |
+//! | `ANTHROPIC_API_KEY=<value>` | Anthropic API key env var |
+//! | `sk-ant-<36+chars>` | Anthropic API key token |
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -36,7 +38,7 @@ pub fn redact_secrets(input: &str) -> String {
 // ── GitHub token prefixes ─────────────────────────────────────────────────────
 
 /// Prefixes used by GitHub-issued tokens.
-const GH_TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "ghs_", "ghr_"];
+const GH_TOKEN_PREFIXES: &[&str] = &["ghp_", "gho_", "ghs_", "ghr_", "sk-ant-"];
 
 /// Minimum number of alphanumeric characters that must follow a prefix for it
 /// to be considered a real token (avoids redacting short test strings).
@@ -62,8 +64,9 @@ fn redact_prefixed_token(s: &str, prefix: &str, min_suffix: usize) -> String {
 
         let after_prefix = &remaining[pos + prefix.len()..];
         let suffix_len = after_prefix
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .as_bytes()
+            .iter()
+            .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
             .count();
 
         if suffix_len >= min_suffix {
@@ -194,7 +197,7 @@ fn count_inline_ws_bytes(s: &str) -> usize {
 
 // ── Environment variable assignments ─────────────────────────────────────────
 
-const SENSITIVE_ENV_VARS: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN"];
+const SENSITIVE_ENV_VARS: &[&str] = &["GITHUB_TOKEN", "GH_TOKEN", "ANTHROPIC_API_KEY"];
 
 fn redact_env_vars(mut s: String) -> String {
     for var in SENSITIVE_ENV_VARS {
@@ -538,6 +541,40 @@ mod tests {
             output, "Authorization: Basic [REDACTED]",
             "Basic auth credentials should be redacted"
         );
+    }
+
+    // ── Anthropic token patterns (#138) ──────────────────────────────────────
+
+    #[test]
+    fn redacts_anthropic_api_key_env_var() {
+        let input = "ANTHROPIC_API_KEY=sk-ant-api03-abc123 next";
+        let output = redact_secrets(input);
+        assert!(
+            output.contains("ANTHROPIC_API_KEY=[REDACTED]"),
+            "Anthropic env var should be redacted: {output}"
+        );
+        assert!(output.contains("next"), "{output}");
+    }
+
+    #[test]
+    fn redacts_anthropic_token_prefix() {
+        // sk-ant- prefix followed by 36+ alphanumeric/hyphen/underscore chars.
+        let token = "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab";
+        let input = format!("key is {token} end");
+        let output = redact_secrets(&input);
+        assert!(
+            output.contains("sk-ant-[REDACTED]"),
+            "Anthropic token should be redacted: {output}"
+        );
+        assert!(!output.contains("api03-ABCDE"), "{output}");
+    }
+
+    #[test]
+    fn does_not_redact_short_anthropic_prefix() {
+        // Only 10 chars after sk-ant- — below the 36-char minimum.
+        let input = "sk-ant-short123";
+        let output = redact_secrets(input);
+        assert_eq!(output, input, "Short suffix should NOT be redacted");
     }
 
     #[test]

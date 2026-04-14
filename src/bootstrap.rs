@@ -28,6 +28,7 @@ fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
     let parent = path.parent().unwrap_or(Path::new("."));
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     tmp.write_all(contents.as_bytes())?;
+    tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }

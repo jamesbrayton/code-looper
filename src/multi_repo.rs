@@ -3,7 +3,7 @@ use crate::loop_engine::{LoopEngine, SessionSummary};
 use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
 use crate::provider::{AdapterFactory, DefaultAdapterFactory};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::{info, warn};
 
 /// Result for a single repo target in a multi-repo run.
@@ -41,8 +41,7 @@ pub fn run_multi_repo_with_factory(
     targets: &[RepoTarget],
     factory: &dyn AdapterFactory,
 ) -> Vec<RepoRunResult> {
-    let interrupted = Arc::new(AtomicBool::new(false));
-    install_signal_handler(Arc::clone(&interrupted));
+    let interrupted = get_or_init_interrupt_flag();
 
     let mut results = Vec::with_capacity(targets.len());
 
@@ -78,16 +77,25 @@ pub fn run_multi_repo_with_factory(
     results
 }
 
-/// Install a process-level SIGINT / Ctrl+C handler that sets `flag` to `true`.
+/// Global interrupt flag shared across all `run_multi_repo_with_factory` calls.
 ///
-/// Logs a warning if the handler cannot be installed (e.g. already registered
-/// by a caller further up the stack), but does not panic.
-fn install_signal_handler(flag: Arc<AtomicBool>) {
-    ctrlc::set_handler(move || {
-        flag.store(true, Ordering::SeqCst);
-        eprintln!("\nInterrupt received — finishing current repo and stopping…");
-    })
-    .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler for multi-repo run: {e}"));
+/// The SIGINT handler is installed exactly once (via `OnceLock`).  Subsequent
+/// invocations reuse the same `AtomicBool`, so an interrupt always reaches the
+/// active run regardless of how many times the function is called (#141).
+static MULTI_REPO_INTERRUPT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Return the global interrupt flag, installing the SIGINT handler on first call.
+fn get_or_init_interrupt_flag() -> Arc<AtomicBool> {
+    Arc::clone(MULTI_REPO_INTERRUPT.get_or_init(|| {
+        let flag = Arc::new(AtomicBool::new(false));
+        let handler_flag = Arc::clone(&flag);
+        ctrlc::set_handler(move || {
+            handler_flag.store(true, Ordering::SeqCst);
+            eprintln!("\nInterrupt received — finishing current repo and stopping…");
+        })
+        .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler for multi-repo run: {e}"));
+        flag
+    }))
 }
 
 /// Print a human-readable summary of all repo run results.

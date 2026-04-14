@@ -246,6 +246,20 @@ fn main() -> anyhow::Result<()> {
         let results = multi_repo::run_multi_repo(validated, &targets);
 
         multi_repo::print_multi_repo_summary(&results);
+
+        // Exit with failure if any repo had failures or a failing termination
+        // reason — mirrors the single-repo exit-code logic below (#136).
+        let any_failed = results.iter().any(|r| {
+            r.summary.failures > 0
+                || matches!(
+                    r.summary.termination_reason,
+                    Some(loop_engine::TerminationReason::StoppedOnFailure)
+                        | Some(loop_engine::TerminationReason::ProviderError(_))
+                )
+        });
+        if any_failed {
+            std::process::exit(1);
+        }
         return Ok(());
     }
 
@@ -265,6 +279,7 @@ fn main() -> anyhow::Result<()> {
             summary.termination_reason,
             Some(loop_engine::TerminationReason::StoppedOnFailure)
                 | Some(loop_engine::TerminationReason::ProviderError(_))
+                | Some(loop_engine::TerminationReason::Interrupted)
         )
     {
         std::process::exit(1);

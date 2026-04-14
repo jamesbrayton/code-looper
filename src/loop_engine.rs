@@ -2402,11 +2402,9 @@ mod tests {
 
     // ── Multi-PR merge path ───────────────────────────────────────────────────
 
-    /// Verify that `TriageAction::Merge` is handled without panicking and the
-    /// iteration is always recorded as a success (regardless of whether `gh pr
-    /// merge` succeeds in the test environment — no real GitHub connection is
-    /// available).  Post-merge branch cleanup is attempted but the failure is
-    /// non-fatal; the summary must still show one success.
+    /// Verify that `TriageAction::Merge` handles a failed `gh pr merge`
+    /// without panicking and records the iteration as a failure.  Post-merge
+    /// branch cleanup is attempted but the failure is non-fatal.
     #[test]
     fn merge_triage_action_is_handled_gracefully() {
         use crate::config::{PrManagementConfig, PrMode};
