@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 config::LoopConfig::default()
             };
-            let resolved = cli_args.apply_overrides(base);
+            let mut resolved = cli_args.apply_overrides(base);
 
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -78,6 +78,9 @@ fn main() -> anyhow::Result<()> {
                     }),
                 )
                 .init();
+
+            // Fill in repo_owner/repo_name from git remote (same as the loop path).
+            resolved.resolve_git_defaults();
 
             let validated = resolved
                 .validate()
