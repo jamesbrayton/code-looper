@@ -1,4 +1,5 @@
 use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode, Provider};
+use crate::config_bootstrap::ConfigFormat;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -67,6 +68,40 @@ pub enum Commands {
         /// control.
         #[arg(long)]
         unsafe_bind: bool,
+    },
+
+    /// Manage Code Looper configuration.
+    #[command(subcommand)]
+    Config(ConfigCommands),
+}
+
+/// Subcommands under `code-looper config`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommands {
+    /// Scaffold a `.code-looper/` configuration directory with annotated
+    /// defaults, example prompts, and example rule files.
+    ///
+    /// Files are created with sensible defaults.  Rule files are scaffolded
+    /// with a `.example` suffix — rename them to activate.
+    ///
+    /// Re-running is safe: existing files are reported as `AlreadySatisfied`
+    /// and left untouched unless `--force` is passed.
+    Bootstrap {
+        /// Output format for the config file.
+        #[arg(long, default_value = "toml")]
+        format: ConfigFormat,
+
+        /// Target directory.  Defaults to `.code-looper` in the current directory.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+
+        /// Print the plan without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Overwrite existing files.
+        #[arg(long)]
+        force: bool,
     },
 }
 

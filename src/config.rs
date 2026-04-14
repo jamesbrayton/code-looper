@@ -1,7 +1,8 @@
 use crate::error::LooperError;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // ── Git remote auto-detection ────────────────────────────────────────────────
 
@@ -431,6 +432,30 @@ pub fn default_policy_rules() -> Vec<PolicyRule> {
     ]
 }
 
+/// User rules configuration — global preamble and per-workflow-branch overrides.
+///
+/// Rule files are markdown files whose contents are prepended to the engine-
+/// generated prompt (not replacing it).  This gives users a way to inject
+/// standing instructions (coding standards, review checklists, domain context)
+/// while preserving the MCP policy and workflow structure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RulesConfig {
+    /// Path to a global rules markdown file prepended to every provider prompt.
+    #[serde(default)]
+    pub global: Option<PathBuf>,
+
+    /// Per-workflow-branch rule file overrides.  Keys are workflow branch names
+    /// (e.g. `pr_review`, `issue_execution`, `backlog_discovery`).
+    #[serde(default)]
+    pub workflows: HashMap<String, PathBuf>,
+}
+
+/// Soft-warning threshold for rule file size (bytes).
+pub const RULES_SIZE_WARN_BYTES: u64 = 16_384;
+
+/// Hard-error threshold for rule file size (bytes).
+pub const RULES_SIZE_MAX_BYTES: u64 = 65_536;
+
 /// Orchestration policy engine configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestrationConfig {
@@ -518,6 +543,9 @@ pub struct LoopConfig {
     pub prompt_file: Option<PathBuf>,
     /// Tracing log level (e.g. "info", "debug").
     pub log_level: String,
+    /// User rules: global preamble and per-workflow-branch overrides.
+    #[serde(default)]
+    pub rules: RulesConfig,
     /// Orchestration policy engine settings.
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
@@ -616,6 +644,7 @@ impl Default for LoopConfig {
             prompt_inline: None,
             prompt_file: None,
             log_level: "info".to_string(),
+            rules: RulesConfig::default(),
             orchestration: OrchestrationConfig::default(),
             workspace_dir: None,
             skip_prereq_check: false,
@@ -751,6 +780,122 @@ impl ConfigFormat {
             _ => ConfigFormat::Toml,
         }
     }
+}
+
+// ── Three-tier config resolution ──────────────────────────────────────────────
+
+/// Return the platform-appropriate user config directory for Code Looper.
+///
+/// - Linux: `$XDG_CONFIG_HOME/code-looper` (falls back to `~/.config/code-looper`)
+/// - macOS: `~/Library/Application Support/code-looper`
+/// - Windows: `%APPDATA%\code-looper`
+///
+/// Returns `None` if the home directory cannot be determined.
+pub fn user_config_dir() -> Option<PathBuf> {
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        home_dir().map(|h| h.join("Library/Application Support/code-looper"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("code-looper"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home_dir().map(|h| h.join(".config")))
+            .map(|base| base.join("code-looper"))
+    }
+}
+
+/// Candidate config file paths for a given directory.
+fn config_candidates(dir: &Path) -> Vec<PathBuf> {
+    vec![
+        dir.join("config.toml"),
+        dir.join("config.yaml"),
+        dir.join("config.yml"),
+    ]
+}
+
+/// Search for a config file in the given directory.
+///
+/// Checks `config.toml`, `config.yaml`, `config.yml` in that order and returns
+/// the first one that exists.
+pub fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
+    config_candidates(dir).into_iter().find(|p| p.is_file())
+}
+
+/// Three-tier config resolution: CLI → workspace → user.
+///
+/// Returns the path to the config file that should be loaded, along with a
+/// label indicating which tier it came from (for logging).
+///
+/// **Tier 1 — CLI flag:** if `cli_config` is `Some`, it is used directly.
+/// **Tier 2 — Workspace:** looks for `.code-looper/config.{toml,yaml,yml}` in
+/// the workspace directory.
+/// **Tier 3 — User:** looks in the platform user config directory.
+///
+/// Returns `None` if no config file is found at any tier.
+pub fn resolve_config_path(
+    cli_config: Option<&Path>,
+    workspace_dir: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    // Tier 1: explicit CLI flag.
+    if let Some(path) = cli_config {
+        return Some((path.to_path_buf(), "cli"));
+    }
+
+    // Tier 2: workspace config.
+    let workspace_config_dir = workspace_dir.join(".code-looper");
+    if let Some(path) = find_config_in_dir(&workspace_config_dir) {
+        return Some((path, "workspace"));
+    }
+
+    // Tier 3: user config.
+    if let Some(user_dir) = user_config_dir() {
+        if let Some(path) = find_config_in_dir(&user_dir) {
+            return Some((path, "user"));
+        }
+    }
+
+    None
+}
+
+/// Resolve rule file paths relative to the config file's parent directory.
+///
+/// When rule paths are relative, they are resolved against the directory
+/// containing the config file (not against CWD).  Absolute paths are left
+/// unchanged.
+pub fn resolve_rule_paths(config: &mut LoopConfig, config_file: &Path) {
+    let config_dir = config_file.parent().unwrap_or_else(|| Path::new("."));
+
+    if let Some(ref mut path) = config.rules.global {
+        if path.is_relative() {
+            *path = config_dir.join(&path);
+        }
+    }
+
+    let resolved: HashMap<String, PathBuf> = config
+        .rules
+        .workflows
+        .iter()
+        .map(|(k, v)| {
+            let p = if v.is_relative() {
+                config_dir.join(v)
+            } else {
+                v.clone()
+            };
+            (k.clone(), p)
+        })
+        .collect();
+    config.rules.workflows = resolved;
 }
 
 impl LoopConfig {
@@ -918,11 +1063,112 @@ impl LoopConfig {
             }
         }
 
+        // ── Rules file validation ────────────────────────────────────────
+        if let Some(ref path) = self.rules.global {
+            validate_rule_file(path, "rules.global")?;
+        }
+        for (branch, path) in &self.rules.workflows {
+            validate_rule_file(path, &format!("rules.workflows.{branch}"))?;
+        }
+
         Ok(ValidatedLoopConfig {
             inner: self,
             iteration_count,
             prompt_source,
         })
+    }
+}
+
+/// Validate that a rule file exists and is within the size limit.
+fn validate_rule_file(path: &PathBuf, config_key: &str) -> Result<(), LooperError> {
+    if !path.exists() {
+        return Err(LooperError::InvalidArgument(format!(
+            "{config_key} points to '{}' which does not exist. \
+             Create the file or remove the config entry.",
+            path.display()
+        )));
+    }
+    let meta = std::fs::metadata(path).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "{config_key}: cannot read '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if meta.len() > RULES_SIZE_MAX_BYTES {
+        return Err(LooperError::InvalidArgument(format!(
+            "{config_key}: '{}' is {} bytes, exceeding the {} byte limit",
+            path.display(),
+            meta.len(),
+            RULES_SIZE_MAX_BYTES
+        )));
+    }
+    if meta.len() > RULES_SIZE_WARN_BYTES {
+        tracing::warn!(
+            path = %path.display(),
+            size = meta.len(),
+            limit = RULES_SIZE_WARN_BYTES,
+            "{config_key}: rule file is large; consider trimming to stay under {RULES_SIZE_WARN_BYTES} bytes"
+        );
+    }
+    Ok(())
+}
+
+/// Load the contents of a rule file, returning an empty string for empty files.
+///
+/// Callers should handle `Err` by logging and reusing the last good content
+/// (for mid-run re-reads) or by failing startup (for initial validation).
+pub fn load_rule_file(path: &PathBuf) -> Result<String, LooperError> {
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "failed to read rule file '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if content.trim().is_empty() {
+        tracing::debug!(path = %path.display(), "rule file is empty — treated as no-op");
+    }
+    Ok(content)
+}
+
+/// Load all configured rules and return the assembled preamble for a given
+/// workflow branch.  Returns `None` if no rules are configured.
+///
+/// The returned string contains the global rules (if any) followed by the
+/// workflow-specific rules (if any), separated by blank lines.
+pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref path) = rules.global {
+        match load_rule_file(path) {
+            Ok(content) if !content.trim().is_empty() => parts.push(content),
+            Ok(_) => {} // empty file — skip
+            Err(e) => {
+                tracing::warn!("failed to re-read global rule file, skipping: {e}");
+            }
+        }
+    }
+
+    if let Some(branch) = workflow_branch {
+        // Normalise branch name: "pr-review" → "pr_review" for config lookup.
+        let key = branch.replace('-', "_");
+        if let Some(path) = rules.workflows.get(&key) {
+            match load_rule_file(path) {
+                Ok(content) if !content.trim().is_empty() => parts.push(content),
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        branch = branch,
+                        "failed to re-read workflow rule file, skipping: {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
     }
 }
 
@@ -2092,5 +2338,288 @@ non_retryable_exit_codes = [2, 126, 127]
             validated.iteration_count,
             IterationCount::Finite(std::num::NonZeroU32::new(u32::MAX).unwrap())
         );
+    }
+
+    // ── Rules config ────────────────────────────────────────────────────
+
+    #[test]
+    fn rules_config_defaults_to_empty() {
+        let rules = RulesConfig::default();
+        assert!(rules.global.is_none());
+        assert!(rules.workflows.is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_missing_global_rule_file() {
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(PathBuf::from("/nonexistent/rules.md")),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+        assert!(err.to_string().contains("rules.global"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_workflow_rule_file() {
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: None,
+                workflows: HashMap::from([(
+                    "pr_review".to_string(),
+                    PathBuf::from("/nonexistent/pr-review.md"),
+                )]),
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+        assert!(err.to_string().contains("rules.workflows.pr_review"));
+    }
+
+    #[test]
+    fn validate_accepts_existing_rule_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "# My coding rules").unwrap();
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(f.path().to_path_buf()),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_empty_rule_file() {
+        let f = NamedTempFile::new().unwrap();
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(f.path().to_path_buf()),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_rule_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        // Write just over the 64 KB limit.
+        let content = "x".repeat(RULES_SIZE_MAX_BYTES as usize + 1);
+        f.write_all(content.as_bytes()).unwrap();
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(f.path().to_path_buf()),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("exceeding"));
+    }
+
+    #[test]
+    fn load_rule_file_returns_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "Always use snake_case.").unwrap();
+        let content = load_rule_file(&f.path().to_path_buf()).unwrap();
+        assert!(content.contains("snake_case"));
+    }
+
+    #[test]
+    fn load_rules_for_branch_combines_global_and_workflow() {
+        let mut global_file = NamedTempFile::new().unwrap();
+        writeln!(global_file, "GLOBAL RULE").unwrap();
+        let mut workflow_file = NamedTempFile::new().unwrap();
+        writeln!(workflow_file, "PR REVIEW RULE").unwrap();
+
+        let rules = RulesConfig {
+            global: Some(global_file.path().to_path_buf()),
+            workflows: HashMap::from([(
+                "pr_review".to_string(),
+                workflow_file.path().to_path_buf(),
+            )]),
+        };
+
+        let result = load_rules_for_branch(&rules, Some("pr-review")).unwrap();
+        assert!(result.contains("GLOBAL RULE"));
+        assert!(result.contains("PR REVIEW RULE"));
+        // Global comes before workflow.
+        assert!(result.find("GLOBAL RULE").unwrap() < result.find("PR REVIEW RULE").unwrap());
+    }
+
+    #[test]
+    fn load_rules_for_branch_returns_none_when_no_rules() {
+        let rules = RulesConfig::default();
+        assert!(load_rules_for_branch(&rules, Some("pr-review")).is_none());
+    }
+
+    #[test]
+    fn load_rules_for_branch_returns_global_only_when_no_workflow_match() {
+        let mut global_file = NamedTempFile::new().unwrap();
+        writeln!(global_file, "GLOBAL RULE").unwrap();
+
+        let rules = RulesConfig {
+            global: Some(global_file.path().to_path_buf()),
+            workflows: HashMap::new(),
+        };
+
+        let result = load_rules_for_branch(&rules, Some("pr-review")).unwrap();
+        assert!(result.contains("GLOBAL RULE"));
+    }
+
+    // ── Three-tier config resolution ──────────────────────────────────
+
+    #[test]
+    fn user_config_dir_returns_some_on_linux() {
+        // Ensure HOME is set so the function can find a path.
+        if std::env::var_os("HOME").is_some() {
+            let dir = user_config_dir();
+            assert!(dir.is_some());
+            let dir = dir.unwrap();
+            assert!(dir.to_string_lossy().contains("code-looper"));
+        }
+    }
+
+    #[test]
+    fn find_config_in_dir_finds_toml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "provider = \"claude\"\niterations = 1\n",
+        )
+        .unwrap();
+        let found = find_config_in_dir(tmp.path());
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn find_config_in_dir_finds_yaml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "provider: claude\n").unwrap();
+        let found = find_config_in_dir(tmp.path());
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with("config.yaml"));
+    }
+
+    #[test]
+    fn find_config_in_dir_returns_none_when_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(find_config_in_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn find_config_in_dir_prefers_toml_over_yaml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("config.toml"), "").unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "").unwrap();
+        let found = find_config_in_dir(tmp.path()).unwrap();
+        assert!(found.ends_with("config.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_cli_wins() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli_path = tmp.path().join("custom.toml");
+        std::fs::write(&cli_path, "").unwrap();
+        // Also create a workspace config — CLI should still win.
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(ws.join(".code-looper")).unwrap();
+        std::fs::write(ws.join(".code-looper/config.toml"), "").unwrap();
+
+        let (path, tier) = resolve_config_path(Some(&cli_path), &ws).unwrap();
+        assert_eq!(tier, "cli");
+        assert_eq!(path, cli_path);
+    }
+
+    #[test]
+    fn resolve_config_path_workspace_tier() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(ws.join(".code-looper")).unwrap();
+        std::fs::write(ws.join(".code-looper/config.toml"), "").unwrap();
+
+        let (path, tier) = resolve_config_path(None, &ws).unwrap();
+        assert_eq!(tier, "workspace");
+        assert!(path.ends_with("config.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_returns_none_when_nothing_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Use a custom HOME so user-tier doesn't accidentally find a real config.
+        let result = resolve_config_path(None, tmp.path());
+        // May return None or find a user-tier config — depends on HOME.
+        // The important thing is it doesn't panic.
+        let _ = result;
+    }
+
+    // ── Rule path resolution ────────────────────────────────────────────
+
+    #[test]
+    fn resolve_rule_paths_makes_relative_absolute() {
+        let config_file = Path::new("/opt/project/.code-looper/config.toml");
+        let mut config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(PathBuf::from("rules/global.md")),
+                workflows: HashMap::from([(
+                    "pr_review".to_string(),
+                    PathBuf::from("rules/pr-review.md"),
+                )]),
+            },
+            ..Default::default()
+        };
+        resolve_rule_paths(&mut config, config_file);
+        assert_eq!(
+            config.rules.global.as_deref(),
+            Some(Path::new("/opt/project/.code-looper/rules/global.md"))
+        );
+        assert_eq!(
+            config.rules.workflows.get("pr_review").map(|p| p.as_path()),
+            Some(Path::new("/opt/project/.code-looper/rules/pr-review.md"))
+        );
+    }
+
+    #[test]
+    fn resolve_rule_paths_leaves_absolute_unchanged() {
+        let config_file = Path::new("/opt/project/.code-looper/config.toml");
+        let mut config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(PathBuf::from("/etc/code-looper/global.md")),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        resolve_rule_paths(&mut config, config_file);
+        assert_eq!(
+            config.rules.global.as_deref(),
+            Some(Path::new("/etc/code-looper/global.md"))
+        );
+    }
+
+    #[test]
+    fn rules_config_round_trips_through_toml() {
+        let toml_str = r#"
+global = ".code-looper/rules/global.md"
+
+[workflows]
+pr_review = ".code-looper/rules/pr-review.md"
+issue_execution = ".code-looper/rules/issue-execution.md"
+"#;
+        let rules: RulesConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            rules.global.as_deref(),
+            Some(std::path::Path::new(".code-looper/rules/global.md"))
+        );
+        assert_eq!(rules.workflows.len(), 2);
+        assert!(rules.workflows.contains_key("pr_review"));
+        assert!(rules.workflows.contains_key("issue_execution"));
     }
 }

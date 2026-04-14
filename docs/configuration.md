@@ -8,6 +8,43 @@ Code Looper can be configured through a config file (TOML or YAML), CLI flags, o
 CLI flags  >  config file (TOML or YAML)  >  built-in defaults
 ```
 
+## Config file resolution (three-tier)
+
+Code Looper searches for a config file in three tiers.  The **first** file
+found wins — tiers are not merged.
+
+| Tier | What | When |
+|------|------|------|
+| **1 — CLI flag** | `--config <path>` | Always checked first |
+| **2 — Workspace** | `<workspace>/.code-looper/config.{toml,yaml,yml}` | When no `--config` flag |
+| **3 — User** | `$XDG_CONFIG_HOME/code-looper/config.{toml,yaml,yml}` | When no workspace config |
+
+Platform-specific user config paths:
+- **Linux:** `$XDG_CONFIG_HOME/code-looper/` (falls back to `~/.config/code-looper/`)
+- **macOS:** `~/Library/Application Support/code-looper/`
+- **Windows:** `%APPDATA%\code-looper\`
+
+When a config file is loaded from a workspace or user directory, **rule file
+paths** (`[rules].global`, `[rules.workflows.*]`) are resolved relative to
+the config file's parent directory, not relative to CWD.
+
+### Using `--workspace-dir` with a central install
+
+If you install Code Looper globally (`cargo install --path .`), you can point
+it at any target repository from anywhere:
+
+```bash
+code-looper --workspace-dir /path/to/target-repo \
+            --config ~/.config/code-looper/config.toml
+```
+
+Or, with automatic workspace-tier resolution (place a config file in the
+target repo's `.code-looper/` directory):
+
+```bash
+code-looper --workspace-dir /path/to/target-repo
+```
+
 ## Loading a config file
 
 Pass `--config path/to/config.toml` (or `.yaml` / `.yml`) to load a base configuration. Any CLI flag explicitly set on the same invocation overrides the corresponding value from the file.
@@ -56,6 +93,14 @@ automatically. If your `.gitignore` contains the older broad `.code-looper/`
 rule, replace it with `.code-looper/runs/` so that config and rule files are
 not hidden from version control.
 
+To scaffold this layout with annotated defaults and example rule files, run:
+
+```bash
+code-looper config bootstrap
+```
+
+See [getting-started.md](getting-started.md#scaffold-a-configuration-directory-optional) for options.
+
 ---
 
 ## Top-level fields
@@ -83,6 +128,49 @@ not hidden from version control.
 
 - `--prompt-inline` and `--prompt-file` are mutually exclusive. Passing both is a validation error.
 - When orchestration is enabled, a prompt is generated automatically; providing `--prompt-inline` or `--prompt-file` alongside `--orchestration` is still valid — the user prompt is appended to the generated preamble.
+
+---
+
+## `[rules]`
+
+User rules: global preamble and per-workflow-branch overrides via markdown files. Rule file contents are **prepended** to the engine-generated prompt (not replacing it), giving users a way to inject standing instructions (coding standards, review checklists, domain context) while preserving the MCP policy and workflow structure.
+
+| TOML key | Type | Default | Description |
+|----------|------|---------|-------------|
+| `rules.global` | path | — | Path to a markdown file prepended to **every** provider prompt, across all workflow branches |
+| `rules.workflows.<branch>` | path | — | Per-workflow-branch rule file. Key is the branch name with underscores (e.g. `pr_review`, `issue_execution`, `backlog_discovery`). Contents are prepended after the global rule and before the engine-generated prompt. |
+
+### Prompt layering order
+
+When user rules are configured, the full prompt seen by the provider is assembled in this order:
+
+| Layer | Source | Customisable? |
+|-------|--------|--------------|
+| MCP-only preamble | `policy_guard.rs` | Only via `allow_direct_github` (unsafe) |
+| User global rules | `[rules].global` config path | Yes — user-authored markdown |
+| User workflow rules | `[rules.workflows].<branch>` | Yes — user-authored markdown |
+| Engine workflow prompt | `orchestration.rs` / `pr_manager.rs` | Per-rule `prompt_override` in config |
+| User iteration prompt | `--prompt-inline` / `--prompt-file` | Yes |
+
+### Example
+
+```toml
+[rules]
+global = ".code-looper/rules/global.md"
+
+[rules.workflows]
+pr_review = ".code-looper/rules/pr-review.md"
+issue_execution = ".code-looper/rules/issue-execution.md"
+backlog_discovery = ".code-looper/rules/backlog-discovery.md"
+```
+
+### Behaviour notes
+
+- Rule files are loaded at startup and **re-read each iteration**, so edits take effect without restarting the loop.
+- Missing file when the key is set → startup error with a remediation message.
+- Empty rule file → valid, treated as no-op (debug log emitted).
+- Soft warning at 16 KB; hard error at 64 KB to prevent accidental prompt bloat.
+- Rule files are config-only — there are no CLI flags to set them.
 
 ---
 

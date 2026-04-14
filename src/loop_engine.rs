@@ -1,4 +1,5 @@
 use crate::branch::BranchManager;
+use crate::config;
 use crate::config::{
     CommentCadence, IssueTrackingMode, LoopConfig, PrMode, PromptSource, ValidatedLoopConfig,
 };
@@ -678,6 +679,15 @@ impl LoopEngine {
             // Apply prompt override from the PR triage plan (multi-PR mode only).
             let raw_prompt = if let Some(ref override_prompt) = pr_plan.prompt_override {
                 override_prompt.clone()
+            } else {
+                raw_prompt
+            };
+
+            // Prepend user rules (global + workflow-specific) to the prompt.
+            let raw_prompt = if let Some(rules_preamble) =
+                config::load_rules_for_branch(&self.config.rules, workflow_branch.as_deref())
+            {
+                format!("{rules_preamble}\n\n{raw_prompt}")
             } else {
                 raw_prompt
             };

@@ -2,6 +2,7 @@ mod bootstrap;
 mod branch;
 mod cli;
 mod config;
+mod config_bootstrap;
 mod error;
 mod issue_tracker;
 mod loop_engine;
@@ -18,6 +19,7 @@ mod workspace;
 
 use anyhow::Context;
 use clap::Parser;
+use std::path::PathBuf;
 use tracing::info;
 
 fn main() -> anyhow::Result<()> {
@@ -58,16 +60,62 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
 
+        Some(cli::Commands::Config(cli::ConfigCommands::Bootstrap {
+            format,
+            dir,
+            dry_run,
+            force,
+        })) => {
+            let target_dir = dir.unwrap_or_else(|| PathBuf::from(".code-looper"));
+            let prefix = if dry_run {
+                "[dry-run]"
+            } else {
+                "[config bootstrap]"
+            };
+            let actions =
+                config_bootstrap::run_config_bootstrap(&target_dir, format, dry_run, force)
+                    .context("config bootstrap failed")?;
+            for action in &actions {
+                let msg = action.to_string();
+                let display = if dry_run {
+                    msg.replacen("[config bootstrap]", prefix, 1)
+                } else {
+                    msg
+                };
+                println!("{display}");
+            }
+            let all_satisfied = actions.iter().all(|a| {
+                matches!(
+                    a,
+                    config_bootstrap::ConfigBootstrapAction::AlreadySatisfied(_)
+                )
+            });
+            if all_satisfied {
+                println!("{prefix} all config files already exist — nothing to do.");
+            } else if !dry_run {
+                // Print next-steps message with the exact command to run.
+                for line in config_bootstrap::next_steps_message(&target_dir, format).lines() {
+                    println!("{line}");
+                }
+            }
+            return Ok(());
+        }
+
         Some(cli::Commands::Serve {
             port,
             ref bind_addr,
             unsafe_bind,
         }) => {
             let bind_addr = bind_addr.clone();
-            // Build config from file / CLI overrides, then hand off to service mode.
-            let base = if let Some(ref path) = cli_args.config {
-                config::LoopConfig::from_file(path)
-                    .with_context(|| format!("failed to load config from {}", path.display()))?
+            // Three-tier config resolution (same as the loop path).
+            let serve_ws = workspace::resolve_workspace_dir(cli_args.workspace_dir.as_deref());
+            let base = if let Some((path, _tier)) =
+                config::resolve_config_path(cli_args.config.as_deref(), &serve_ws)
+            {
+                let mut cfg = config::LoopConfig::from_file(&path)
+                    .with_context(|| format!("failed to load config from {}", path.display()))?;
+                config::resolve_rule_paths(&mut cfg, &path);
+                cfg
             } else {
                 config::LoopConfig::default()
             };
@@ -101,12 +149,18 @@ fn main() -> anyhow::Result<()> {
         None => {}
     }
 
-    // Determine base config: file-loaded or default.
-    let base = if let Some(ref path) = cli_args.config {
-        config::LoopConfig::from_file(path)
-            .with_context(|| format!("failed to load config from {}", path.display()))?
+    // Three-tier config resolution: CLI flag → workspace → user directory.
+    let ws_dir = workspace::resolve_workspace_dir(cli_args.workspace_dir.as_deref());
+    let (base, config_source) = if let Some((path, tier)) =
+        config::resolve_config_path(cli_args.config.as_deref(), &ws_dir)
+    {
+        let mut cfg = config::LoopConfig::from_file(&path)
+            .with_context(|| format!("failed to load config from {}", path.display()))?;
+        // Resolve rule file paths relative to the config file, not CWD.
+        config::resolve_rule_paths(&mut cfg, &path);
+        (cfg, Some((path, tier)))
     } else {
-        config::LoopConfig::default()
+        (config::LoopConfig::default(), None)
     };
 
     // Apply CLI overrides on top of base.
@@ -119,6 +173,15 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&resolved.log_level)),
         )
         .init();
+
+    // Log config source after tracing is initialized.
+    if let Some((ref path, tier)) = config_source {
+        info!(
+            config = %path.display(),
+            tier = tier,
+            "Config loaded"
+        );
+    }
 
     // Fill in repo_owner/repo_name from git remote if not set explicitly.
     resolved.resolve_git_defaults();

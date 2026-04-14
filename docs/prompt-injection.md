@@ -278,11 +278,14 @@ Linked to pull request #<pr_number>.
 
 ---
 
-## How user rules will compose with engine prompts
+## How user rules compose with engine prompts
 
-> This section is a design stub for the user-rules feature (#86).
+User rules (configured via `[rules]` in the config file) are **prepended** to
+the engine workflow prompt, not replacing it.  This ensures the MCP policy and
+workflow structure are always present while giving users a way to inject
+standing instructions (coding standards, review checklists, domain context).
 
-When user rules land, the full prompt layering will be:
+The full prompt layering is:
 
 | Layer | Source | Customisable? |
 |-------|--------|--------------|
@@ -292,4 +295,16 @@ When user rules land, the full prompt layering will be:
 | Engine workflow prompt | `orchestration.rs` / `pr_manager.rs` | Per-rule `prompt_override` in config |
 | User iteration prompt | `--prompt-inline` / `--prompt-file` | Yes |
 
-User rules will be **prepended** to the engine workflow prompt, not replacing it. This ensures the MCP policy and workflow structure are always present while giving users a way to inject standing instructions (coding standards, review checklists, domain context).
+### Implementation details
+
+- **Injection point:** `src/loop_engine.rs`, after the PR triage plan override and
+  before `guard.augment_prompt()`.  The function `config::load_rules_for_branch()`
+  reads rule files and assembles the rules preamble.
+- **Re-read each iteration:** rule files are re-read on every iteration so edits
+  take effect without a restart.  Read errors are logged and the rule is skipped
+  (the last good content is not cached — the file is simply omitted).
+- **Branch name normalisation:** workflow branch names use hyphens in display
+  (`pr-review`) but underscores in config keys (`pr_review`).  The loader
+  normalises hyphens to underscores when looking up `[rules.workflows]` entries.
+- **Size limits:** soft warning at 16 KB, hard error at 64 KB to prevent
+  accidental prompt bloat from paste-mistakes.

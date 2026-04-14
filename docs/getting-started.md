@@ -78,6 +78,50 @@ code-looper bootstrap --dry-run
 
 See [docs/workspace-prerequisites.md](workspace-prerequisites.md) for the full list of checks and remediation options.
 
+## Scaffold a configuration directory (optional)
+
+If you want to customise Code Looper's behaviour with user rules, custom
+prompts, or per-workflow-branch overrides, scaffold the `.code-looper/`
+configuration directory:
+
+```bash
+code-looper config bootstrap
+```
+
+This creates an annotated layout:
+
+```
+.code-looper/
+├── config.toml            # annotated defaults — every field commented
+├── prompts/
+│   └── example.md         # example --prompt-file input
+├── rules/
+│   ├── global.md.example
+│   ├── pr-review.md.example
+│   ├── issue-execution.md.example
+│   ├── backlog-discovery.md.example
+│   └── multi-pr-triage.md.example
+└── runs/                  # runtime artifacts (gitignored)
+```
+
+Rule files are scaffolded with a `.example` suffix.  Rename them to activate:
+
+```bash
+mv .code-looper/rules/global.md.example .code-looper/rules/global.md
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--format toml\|yaml` | Config file format (default: `toml`) |
+| `--dir <path>` | Target directory (default: `.code-looper`) |
+| `--dry-run` | Print what would be created without writing |
+| `--force` | Overwrite existing files |
+
+The command is idempotent — re-running reports existing files without
+overwriting them.
+
 ## Run a minimal loop
 
 The simplest invocation runs one iteration with an inline prompt and streams the provider output to your terminal:
@@ -223,6 +267,34 @@ This is the end-to-end path a UAT tester should run before reporting any bugs. I
 7. **Verify the sandbox is still clean** — `git status` should show no unintended changes unless the prompt asked the agent to edit files.
 
 If any of steps 2–7 fail, capture the output and check [docs/troubleshooting.md](troubleshooting.md) before reporting a bug. The most common first-run issues are provider CLI not on `$PATH` and `.mcp.json` missing the `github` entry (both caught by the startup checks).
+
+## User-directory install
+
+For power users who install Code Looper globally and operate it against many
+repositories:
+
+```bash
+# Install from a checkout.
+cargo install --path .
+
+# Create a central user config.
+code-looper config bootstrap --dir ~/.config/code-looper
+
+# Run against any target repo using --workspace-dir.
+code-looper --workspace-dir ~/src/my-repo \
+            --config ~/.config/code-looper/config.toml
+```
+
+Alternatively, place a `.code-looper/config.toml` inside each target
+repository and let the three-tier resolution find it automatically:
+
+```bash
+code-looper --workspace-dir ~/src/my-repo
+# → picks up ~/src/my-repo/.code-looper/config.toml if it exists
+```
+
+See [docs/configuration.md](configuration.md#config-file-resolution-three-tier)
+for the full resolution order.
 
 ## Next steps
 
