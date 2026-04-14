@@ -84,11 +84,7 @@ impl std::fmt::Display for BootstrapAction {
         match self {
             BootstrapAction::Created(p) => write!(f, "[bootstrap] {}: created", p.display()),
             BootstrapAction::Appended(p) => {
-                write!(
-                    f,
-                    "[bootstrap] {}: appended Code Looper section",
-                    p.display()
-                )
+                write!(f, "[bootstrap] {}: appended entry", p.display())
             }
             BootstrapAction::MergedJson(p) => {
                 write!(
@@ -313,8 +309,8 @@ fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Bo
 }
 
 /// Returns `true` when `.gitignore` already contains a `.code-looper/` or
-/// `.code-looper` entry (with or without trailing slash), anchored at the
-/// start of a line.
+/// `.code-looper` entry (with or without trailing slash), ignoring leading
+/// and trailing whitespace on each line.
 fn has_code_looper_ignore(contents: &str) -> bool {
     contents.lines().any(|line| {
         let trimmed = line.trim();
