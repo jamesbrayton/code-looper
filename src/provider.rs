@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
-use tracing::{trace, warn};
+use tracing::{info, trace, warn};
 
 /// Approved provider executables.
 ///
@@ -120,16 +120,18 @@ pub struct ClaudeAdapter {
 
 /// Build the argument vector passed to the `claude` binary.
 ///
-/// Order is fixed: `-p`, `--dangerously-skip-permissions`, then any
-/// caller-supplied `extra_args`, then the prompt.  Extracted as a free
-/// function so unit tests can verify arg construction without spawning the
-/// real `claude` binary.
+/// Order is fixed: `--output-format`, `stream-json`,
+/// `--dangerously-skip-permissions`, then any caller-supplied `extra_args`,
+/// then `-p` with the prompt.  Extracted as a free function so unit tests
+/// can verify arg construction without spawning the real `claude` binary.
 pub(crate) fn build_claude_args(prompt: &str, extra_args: &[String]) -> Vec<String> {
     let mut args: Vec<String> = vec![
-        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
         "--dangerously-skip-permissions".to_string(),
     ];
     args.extend(extra_args.iter().cloned());
+    args.push("-p".to_string());
     args.push(prompt.to_string());
     args
 }
@@ -142,15 +144,283 @@ impl ProviderAdapter for ClaudeAdapter {
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
         let owned = build_claude_args(prompt, &self.extra_args);
         let args: Vec<&str> = owned.iter().map(String::as_str).collect();
-        run_provider_process(
-            "claude",
-            &args,
-            self.stream_output,
-            self.working_dir.as_deref(),
-            self.timeout_secs,
-            true,
-        )
+        if self.stream_output {
+            run_claude_streaming(&args, self.working_dir.as_deref(), self.timeout_secs)
+        } else {
+            run_provider_process(
+                "claude",
+                &args,
+                false,
+                self.working_dir.as_deref(),
+                self.timeout_secs,
+                true,
+            )
+        }
     }
+}
+
+// ── Claude stream-json helpers ──────────────────────────────────────────────
+
+/// Classification of a parsed stream-json line for display purposes.
+#[derive(Debug, PartialEq)]
+pub(crate) enum StreamEventKind {
+    /// Assistant text delta — display immediately.
+    Text(String),
+    /// Thinking / extended-thinking delta — display with a tag.
+    Thinking(String),
+    /// Tool use started — show tool name.
+    ToolUse { name: String },
+    /// Result message (final JSON blob) — not displayed, only logged.
+    Result,
+    /// Anything else (message_start, content_block_stop, etc.)
+    Other,
+}
+
+/// Parse a single NDJSON line from Claude's `--output-format stream-json`.
+///
+/// Returns a classification plus whether the raw line should be captured
+/// in the full log.  Every valid JSON line is logged; only text/thinking
+/// events are printed to the terminal.
+pub(crate) fn classify_stream_event(line: &str) -> StreamEventKind {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return StreamEventKind::Other;
+    };
+
+    // Result message — the final aggregated response.
+    if v.get("type").and_then(|t| t.as_str()) == Some("result") {
+        return StreamEventKind::Result;
+    }
+
+    // We care about stream_event lines with a nested `event`.
+    let event = match v.get("event") {
+        Some(e) => e,
+        None => return StreamEventKind::Other,
+    };
+
+    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match event_type {
+        // Text delta — the assistant is producing text output.
+        "content_block_delta" => {
+            if let Some(delta) = event.get("delta") {
+                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match delta_type {
+                    "text_delta" => {
+                        let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        StreamEventKind::Text(text.to_string())
+                    }
+                    "thinking_delta" => {
+                        let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                        StreamEventKind::Thinking(text.to_string())
+                    }
+                    _ => StreamEventKind::Other,
+                }
+            } else {
+                StreamEventKind::Other
+            }
+        }
+        // Tool use block started — show which tool the agent is calling.
+        "content_block_start" => {
+            if let Some(cb) = event.get("content_block") {
+                let cb_type = cb.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if cb_type == "tool_use" {
+                    let name = cb.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                    StreamEventKind::ToolUse {
+                        name: name.to_string(),
+                    }
+                } else {
+                    StreamEventKind::Other
+                }
+            } else {
+                StreamEventKind::Other
+            }
+        }
+        _ => StreamEventKind::Other,
+    }
+}
+
+/// Run the `claude` binary with `--output-format stream-json`, parsing the
+/// NDJSON output in real time.
+///
+/// Terminal output (tagged `[claude]`):
+/// - Text deltas from the assistant
+/// - Thinking deltas (tagged `[thinking]`)
+/// - Tool-use start events (one line per tool call)
+///
+/// Full raw JSON is captured for the iteration transcript log.
+/// Reconstructed plain text (from text deltas) is returned in
+/// `ExecutionResult.stdout` so downstream consumers (shippable-marker
+/// detection, etc.) still work.
+fn run_claude_streaming(
+    args: &[&str],
+    working_dir: Option<&std::path::Path>,
+    timeout_secs: Option<u64>,
+) -> Result<ExecutionResult, LooperError> {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    check_allowed_binary("claude")?;
+
+    let start = Instant::now();
+
+    let mut cmd = Command::new("claude");
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(dir) = working_dir {
+        cmd.current_dir(dir);
+    }
+    let mut child = cmd.spawn().map_err(|e| LooperError::ProviderSpawn {
+        binary: "claude".to_string(),
+        source: e,
+    })?;
+
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+
+    let child = Arc::new(std::sync::Mutex::new(child));
+    let timeout_fired = Arc::new(AtomicBool::new(false));
+
+    let watchdog_tx = timeout_secs
+        .map(|secs| spawn_timeout_watchdog(Arc::clone(&child), secs, Arc::clone(&timeout_fired)));
+
+    // Heartbeat: print elapsed time every 30 seconds so the operator knows
+    // the process is still alive even when no streaming events arrive.
+    let heartbeat_done = Arc::new(AtomicBool::new(false));
+    let heartbeat_flag = Arc::clone(&heartbeat_done);
+    let heartbeat_start = start;
+    let heartbeat_handle = std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(30));
+        if heartbeat_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        let elapsed = heartbeat_start.elapsed();
+        let mins = elapsed.as_secs() / 60;
+        let secs = elapsed.as_secs() % 60;
+        eprintln!("[heartbeat] provider running… {mins}m {secs}s elapsed");
+    });
+
+    // Parse NDJSON on the stdout thread.  Accumulate:
+    // - `text_parts`: reconstructed plain text for ExecutionResult.stdout
+    // - `raw_log`: full NDJSON for the iteration transcript
+    let stdout_handle = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout_pipe);
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut raw_log = String::new();
+
+        for line_result in reader.lines() {
+            match line_result {
+                Ok(line) => {
+                    let line = redact_secrets(&line);
+                    // Always capture the full JSON line for the transcript.
+                    raw_log.push_str(&line);
+                    raw_log.push('\n');
+
+                    match classify_stream_event(&line) {
+                        StreamEventKind::Text(t) => {
+                            print!("[claude] {t}");
+                            let _ = std::io::stdout().flush();
+                            trace!(stream = "claude-text", "{}", t);
+                            text_parts.push(t);
+                        }
+                        StreamEventKind::Thinking(t) => {
+                            print!("[thinking] {t}");
+                            let _ = std::io::stdout().flush();
+                            trace!(stream = "claude-thinking", "{}", t);
+                        }
+                        StreamEventKind::ToolUse { name } => {
+                            println!("\n[claude] calling tool: {name}");
+                            info!(stream = "claude-tool", tool = %name, "tool use");
+                        }
+                        StreamEventKind::Result => {
+                            trace!(stream = "claude-result", "result message received");
+                        }
+                        StreamEventKind::Other => {
+                            trace!(stream = "claude-other", "{}", line);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "stdout read error; capture may be truncated"
+                    );
+                    break;
+                }
+            }
+        }
+        // Ensure a trailing newline after streamed text.
+        if !text_parts.is_empty() {
+            println!();
+        }
+        (text_parts.join(""), raw_log)
+    });
+
+    // Drain stderr on the main thread (same as before).
+    let mut stderr_captured = String::new();
+    let stderr_reader = BufReader::new(stderr_pipe);
+    for line_result in stderr_reader.lines() {
+        match line_result {
+            Ok(line) => {
+                let line = redact_secrets(&line);
+                eprintln!("[stderr] {}", line);
+                trace!(stream = "stderr", "{}", line);
+                stderr_captured.push_str(&line);
+                stderr_captured.push('\n');
+            }
+            Err(e) => {
+                warn!(error = %e, "stderr read error; capture may be truncated");
+                break;
+            }
+        }
+    }
+
+    let (reconstructed_text, raw_log) = match stdout_handle.join() {
+        Ok(pair) => pair,
+        Err(_) => {
+            warn!("claude stdout parser thread panicked; returning empty capture");
+            (String::new(), String::new())
+        }
+    };
+
+    // Stop the heartbeat.
+    heartbeat_done.store(true, Ordering::Relaxed);
+    let _ = heartbeat_handle.join();
+
+    let status = {
+        let mut guard = child.lock().map_err(|_| LooperError::ProviderSpawn {
+            binary: "claude".to_string(),
+            source: std::io::Error::other("child mutex poisoned by watchdog"),
+        })?;
+        guard.wait().map_err(|e| LooperError::ProviderSpawn {
+            binary: "claude".to_string(),
+            source: e,
+        })?
+    };
+
+    if let Some(tx) = watchdog_tx {
+        let _ = tx.send(());
+    }
+
+    let duration = start.elapsed();
+
+    if timeout_fired.load(Ordering::Relaxed) {
+        return Err(LooperError::ProviderTimeout {
+            binary: "claude".to_string(),
+            timeout_secs: timeout_secs.unwrap_or(0),
+        });
+    }
+
+    Ok(ExecutionResult {
+        exit_code: status.code(),
+        // stdout holds the reconstructed plain text (for shippable-marker
+        // detection and the "Iteration succeeded" log line).
+        stdout: reconstructed_text,
+        // stderr holds the full raw NDJSON transcript so the iteration log
+        // captures every event for debugging.  The actual stderr output is
+        // appended after a separator.
+        stderr: format!("=== RAW STREAM-JSON ===\n{raw_log}\n=== STDERR ===\n{stderr_captured}"),
+        duration,
+    })
 }
 
 // ── GitHub Copilot CLI adapter ────────────────────────────────────────────────
@@ -778,9 +1048,8 @@ pub mod tests {
     // ── extra_args threading ──────────────────────────────────────────────────
 
     /// Verify that `build_claude_args` threads `extra_args` through in the
-    /// required order: `-p`, `--dangerously-skip-permissions`, *extras*,
-    /// *prompt*.  Exercises the real arg-building helper used by
-    /// `ClaudeAdapter::execute`, without depending on the `claude` binary.
+    /// required order: `--output-format`, `stream-json`,
+    /// `--dangerously-skip-permissions`, *extras*, `-p`, *prompt*.
     #[test]
     fn claude_adapter_includes_extra_args_in_invocation() {
         let extra = vec!["--extra-flag".to_string(), "extra-value".to_string()];
@@ -788,27 +1057,98 @@ pub mod tests {
         assert_eq!(
             args,
             vec![
-                "-p".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "--extra-flag".to_string(),
                 "extra-value".to_string(),
+                "-p".to_string(),
                 "my-prompt".to_string(),
             ]
         );
     }
 
     /// Empty `extra_args` collapses to the canonical Claude invocation:
-    /// `-p --dangerously-skip-permissions <prompt>`.
+    /// `--output-format stream-json --dangerously-skip-permissions -p <prompt>`.
     #[test]
     fn claude_adapter_no_extra_args_uses_canonical_arg_order() {
         let args = super::build_claude_args("hello", &[]);
         assert_eq!(
             args,
             vec![
-                "-p".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
                 "--dangerously-skip-permissions".to_string(),
+                "-p".to_string(),
                 "hello".to_string(),
             ]
+        );
+    }
+
+    // ── classify_stream_event tests ──────────────────────────────────────────
+
+    #[test]
+    fn classify_text_delta() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello world"}}}"#;
+        assert_eq!(
+            super::classify_stream_event(line),
+            super::StreamEventKind::Text("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_thinking_delta() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"Let me think..."}}}"#;
+        assert_eq!(
+            super::classify_stream_event(line),
+            super::StreamEventKind::Thinking("Let me think...".to_string())
+        );
+    }
+
+    #[test]
+    fn classify_tool_use_start() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Read"}}}"#;
+        assert_eq!(
+            super::classify_stream_event(line),
+            super::StreamEventKind::ToolUse {
+                name: "Read".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_result_message() {
+        let line = r#"{"type":"result","result":{"text":"done"}}"#;
+        assert_eq!(
+            super::classify_stream_event(line),
+            super::StreamEventKind::Result
+        );
+    }
+
+    #[test]
+    fn classify_message_start_is_other() {
+        let line =
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg_01"}}}"#;
+        assert_eq!(
+            super::classify_stream_event(line),
+            super::StreamEventKind::Other
+        );
+    }
+
+    #[test]
+    fn classify_invalid_json_is_other() {
+        assert_eq!(
+            super::classify_stream_event("not json at all"),
+            super::StreamEventKind::Other
+        );
+    }
+
+    #[test]
+    fn classify_input_json_delta_is_other() {
+        let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"path\":\"file.txt\"}"}}}"#;
+        assert_eq!(
+            super::classify_stream_event(line),
+            super::StreamEventKind::Other
         );
     }
 

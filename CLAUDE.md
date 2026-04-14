@@ -72,3 +72,27 @@ Configured in `.mcp.json`:
 
 - `docs/PRD.md` — Full product requirements document with architecture, milestones, risks, and success criteria
 - `docs/ADRs/` — ADRs tracking significant architectural decisions
+
+<!-- code-looper begin -->
+## Code Looper
+
+This repository is configured to run with [Code Looper](https://github.com/jamesbrayton/code-looper).
+
+### GitHub mutation policy
+
+All GitHub operations (issue create/update/comment, PR review/comment/merge,
+branch actions) **must** be performed via the GitHub MCP server.  Direct `gh`
+CLI mutations are disabled by default.
+
+### Work-log discipline
+
+During loop runs the agent should:
+- Comment on the linked issue at meaningful milestones (scope clarified, first
+  implementation pass complete, tests added, blocker found, handoff).
+- Keep the issue body current (checklist, decisions, blockers/dependencies).
+- Create new issues (via GitHub MCP) when discovered work falls outside the
+  current issue's scope, using labels: `bug`, `enhancement`, `tech-debt`,
+  `discovered-during-loop`.
+- Close the issue with a summary comment when the checklist is complete and
+  the work is committed.
+<!-- code-looper end -->
