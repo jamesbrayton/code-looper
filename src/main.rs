@@ -251,7 +251,7 @@ fn main() -> anyhow::Result<()> {
 
     info!(
         provider = %validated.provider,
-        iterations = validated.iteration_count.as_raw_i64(),
+        iterations = %validated.iteration_count(),
         "Code Looper initialized"
     );
 

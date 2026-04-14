@@ -319,7 +319,7 @@ impl LoopEngine {
 
     /// Resolve the prompt string from the validated prompt source.
     fn resolve_prompt(&self) -> anyhow::Result<String> {
-        match &self.config.prompt_source {
+        match &self.config.prompt_source() {
             PromptSource::Inline(s) => Ok(s.clone()),
             PromptSource::File(path) => {
                 let content = std::fs::read_to_string(path).map_err(|e| {
@@ -327,7 +327,7 @@ impl LoopEngine {
                 })?;
                 Ok(content)
             }
-            PromptSource::None => Ok(String::new()),
+            PromptSource::Absent => Ok(String::new()),
         }
     }
 
@@ -369,13 +369,10 @@ impl LoopEngine {
             }
         };
 
-        let infinite = self.config.iteration_count.is_infinite();
-        let max = self.config.iteration_count.max_iterations();
-
-        let prompt_source = match &self.config.prompt_source {
+        let prompt_source = match &self.config.prompt_source() {
             PromptSource::File(_) => crate::telemetry::PromptSource::File,
             PromptSource::Inline(_) => crate::telemetry::PromptSource::Inline,
-            PromptSource::None => crate::telemetry::PromptSource::None,
+            PromptSource::Absent => crate::telemetry::PromptSource::Absent,
         };
 
         let mut summary = SessionSummary::default();
@@ -447,22 +444,14 @@ impl LoopEngine {
         info!(
             provider = self.adapter.name(),
             run_id = %artifacts.run_id,
-            iterations = if infinite {
-                "infinite".to_string()
-            } else {
-                max.to_string()
-            },
+            iterations = %self.config.iteration_count(),
             prompt_source = %prompt_source,
             "Loop starting"
         );
 
         // Post run-start comment when a linked issue is configured.
         if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
-            let iter_display = if infinite {
-                "infinite".to_string()
-            } else {
-                max.to_string()
-            };
+            let iter_display = self.config.iteration_count().to_string();
             self.post_comment(&format!(
                 "**Loop run started** — run-id: `{run_id}`, provider: `{provider}`, \
                  iterations: `{iter_display}`, prompt-source: `{prompt_source}`",
@@ -517,7 +506,14 @@ impl LoopEngine {
         // Tracks the body of the most recently posted failure comment for deduplication.
         let mut last_failure_comment: Option<String> = None;
 
-        for i in 1..=max {
+        let mut i: u64 = 0;
+        loop {
+            i += 1;
+            // Check whether we've exceeded the configured iteration count.
+            // is_done uses 0-based indexing, so pass (i - 1).
+            if self.config.iteration_count().is_done(i - 1) {
+                break;
+            }
             if self.interrupted.load(Ordering::SeqCst) {
                 summary.termination_reason = Some(TerminationReason::Interrupted);
                 break;
@@ -625,56 +621,58 @@ impl LoopEngine {
             }
 
             // If orchestration is enabled, select a workflow branch and use its prompt.
-            let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {
-                match engine.select_branch() {
-                    Ok(BranchSelection {
-                        branch,
-                        prompt_override,
-                        ..
-                    }) => {
-                        let branch_name = branch.to_string();
-                        info!(
-                            iteration = i,
-                            provider = self.adapter.name(),
-                            workflow_branch = %branch_name,
-                            "Iteration start"
-                        );
-                        let p =
-                            prompt_override.unwrap_or_else(|| branch.default_prompt().to_string());
-                        (p, Some(branch_name))
+            let (raw_prompt, workflow_branch, workflow_policy) =
+                if let Some(ref engine) = self.policy_engine {
+                    match engine.select_branch() {
+                        Ok(BranchSelection {
+                            branch,
+                            prompt_override,
+                            ..
+                        }) => {
+                            let branch_name = branch.to_string();
+                            let policy_wf = branch.to_policy_workflow();
+                            info!(
+                                iteration = i,
+                                provider = self.adapter.name(),
+                                workflow_branch = %branch_name,
+                                "Iteration start"
+                            );
+                            let p = prompt_override
+                                .unwrap_or_else(|| branch.default_prompt().to_string());
+                            (p, Some(branch_name), Some(policy_wf))
+                        }
+                        Err(e) => {
+                            error!(iteration = i, "Policy engine failed: {e}");
+                            let outcome = IterationOutcome::PolicyGuardBlock {
+                                message: e.to_string(),
+                            };
+                            iteration_records.push(IterationRecord {
+                                iteration: i,
+                                provider: self.config.provider.clone(),
+                                prompt_source: prompt_source.clone(),
+                                workflow_branch: None,
+                                outcome: outcome.clone(),
+                                duration_ms: iter_start.elapsed().as_millis(),
+                                retries: 0,
+                                stderr_excerpt: Some(e.to_string()),
+                                transcript_path: None,
+                                started_at: iter_started_at,
+                            });
+                            summary.iterations_run += 1;
+                            summary.failures += 1;
+                            summary.termination_reason =
+                                Some(TerminationReason::ProviderError(e.to_string()));
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        error!(iteration = i, "Policy engine failed: {e}");
-                        let outcome = IterationOutcome::PolicyGuardBlock {
-                            message: e.to_string(),
-                        };
-                        iteration_records.push(IterationRecord {
-                            iteration: i,
-                            provider: self.config.provider.clone(),
-                            prompt_source: prompt_source.clone(),
-                            workflow_branch: None,
-                            outcome: outcome.clone(),
-                            duration_ms: iter_start.elapsed().as_millis(),
-                            retries: 0,
-                            stderr_excerpt: Some(e.to_string()),
-                            transcript_path: None,
-                            started_at: iter_started_at,
-                        });
-                        summary.iterations_run += 1;
-                        summary.failures += 1;
-                        summary.termination_reason =
-                            Some(TerminationReason::ProviderError(e.to_string()));
-                        break;
-                    }
-                }
-            } else {
-                info!(
-                    iteration = i,
-                    provider = self.adapter.name(),
-                    "Iteration start"
-                );
-                (prompt.clone(), None)
-            };
+                } else {
+                    info!(
+                        iteration = i,
+                        provider = self.adapter.name(),
+                        "Iteration start"
+                    );
+                    (prompt.clone(), None, None)
+                };
 
             // Apply prompt override from the PR triage plan (multi-PR mode only).
             let raw_prompt = if let Some(ref override_prompt) = pr_plan.prompt_override {
@@ -685,7 +683,7 @@ impl LoopEngine {
 
             // Prepend user rules (global + workflow-specific) to the prompt.
             let raw_prompt = if let Some(rules_preamble) =
-                config::load_rules_for_branch(&self.config.rules, workflow_branch.as_deref())
+                config::load_rules_for_branch(&self.config.rules, workflow_policy.as_ref())
             {
                 format!("{rules_preamble}\n\n{raw_prompt}")
             } else {
@@ -1221,7 +1219,7 @@ impl LoopEngine {
             started_at: run_started_at,
             ended_at: Some(run_ended_at),
             provider: self.config.provider.clone(),
-            iterations_requested: self.config.iteration_count.as_raw_i64(),
+            iterations_requested: self.config.iteration_count().as_raw_i64(),
             termination_reason: summary.termination_reason.clone(),
             skipped_decisions: summary.skipped_decisions,
             run_by: resolve_operator(),

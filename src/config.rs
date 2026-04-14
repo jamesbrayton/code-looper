@@ -373,7 +373,7 @@ impl std::fmt::Display for PolicyCondition {
 }
 
 /// Workflow branch to execute when a policy rule matches.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PolicyWorkflow {
     /// Review open pull requests.
@@ -444,10 +444,10 @@ pub struct RulesConfig {
     #[serde(default)]
     pub global: Option<PathBuf>,
 
-    /// Per-workflow-branch rule file overrides.  Keys are workflow branch names
-    /// (e.g. `pr_review`, `issue_execution`, `backlog_discovery`).
+    /// Per-workflow-branch rule file overrides.  Keys are [`PolicyWorkflow`]
+    /// variants (e.g. `pr-review`, `issue-execution`, `backlog-discovery`).
     #[serde(default)]
-    pub workflows: HashMap<String, PathBuf>,
+    pub workflows: HashMap<PolicyWorkflow, PathBuf>,
 }
 
 /// Soft-warning threshold for rule file size (bytes).
@@ -689,6 +689,15 @@ impl IterationCount {
         }
     }
 
+    /// Returns `true` when `iteration` (0-based) has reached or exceeded the
+    /// configured count.  Always returns `false` for [`Infinite`](IterationCount::Infinite).
+    pub fn is_done(&self, iteration: u64) -> bool {
+        match self {
+            IterationCount::Finite(n) => iteration >= u64::from(n.get()),
+            IterationCount::Infinite => false,
+        }
+    }
+
     pub fn is_infinite(&self) -> bool {
         matches!(self, IterationCount::Infinite)
     }
@@ -699,6 +708,15 @@ impl IterationCount {
         match self {
             IterationCount::Finite(n) => i64::from(n.get()),
             IterationCount::Infinite => -1,
+        }
+    }
+}
+
+impl std::fmt::Display for IterationCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IterationCount::Finite(n) => write!(f, "{}", n.get()),
+            IterationCount::Infinite => write!(f, "infinite"),
         }
     }
 }
@@ -715,7 +733,7 @@ pub enum PromptSource {
     /// Prompt loaded from a file path.
     File(PathBuf),
     /// No prompt configured — the orchestration engine or provider decides.
-    None,
+    Absent,
 }
 
 /// A `LoopConfig` that has passed [`LoopConfig::validate`] and carries
@@ -728,9 +746,9 @@ pub enum PromptSource {
 pub struct ValidatedLoopConfig {
     inner: LoopConfig,
     /// Validated iteration count (replaces `inner.iterations`).
-    pub iteration_count: IterationCount,
+    iteration_count: IterationCount,
     /// Validated prompt source (replaces `inner.prompt_inline` / `inner.prompt_file`).
-    pub prompt_source: PromptSource,
+    prompt_source: PromptSource,
 }
 
 impl std::ops::Deref for ValidatedLoopConfig {
@@ -741,6 +759,16 @@ impl std::ops::Deref for ValidatedLoopConfig {
 }
 
 impl ValidatedLoopConfig {
+    /// Read-only access to the validated iteration count.
+    pub fn iteration_count(&self) -> &IterationCount {
+        &self.iteration_count
+    }
+
+    /// Read-only access to the validated prompt source.
+    pub fn prompt_source(&self) -> &PromptSource {
+        &self.prompt_source
+    }
+
     /// Return a clone with a different workspace directory.
     pub fn with_workspace_dir(mut self, dir: PathBuf) -> Self {
         self.inner.workspace_dir = Some(dir);
@@ -876,7 +904,13 @@ pub fn resolve_config_path(
 /// containing the config file (not against CWD).  Absolute paths are left
 /// unchanged.
 pub fn resolve_rule_paths(config: &mut LoopConfig, config_file: &Path) {
-    let config_dir = config_file.parent().unwrap_or_else(|| Path::new("."));
+    let config_dir = config_file.parent().unwrap_or_else(|| {
+        tracing::warn!(
+            config_file = %config_file.display(),
+            "config file has no parent directory — resolving rule paths relative to CWD"
+        );
+        Path::new(".")
+    });
 
     if let Some(ref mut path) = config.rules.global {
         if path.is_relative() {
@@ -884,7 +918,7 @@ pub fn resolve_rule_paths(config: &mut LoopConfig, config_file: &Path) {
         }
     }
 
-    let resolved: HashMap<String, PathBuf> = config
+    let resolved: HashMap<PolicyWorkflow, PathBuf> = config
         .rules
         .workflows
         .iter()
@@ -987,16 +1021,20 @@ impl LoopConfig {
                 }
                 PromptSource::File(p.clone())
             }
-            (None, None) => PromptSource::None,
+            (None, None) => PromptSource::Absent,
         };
 
         // ── Iteration count ─────────────────────────────────────────────
         let iteration_count = if self.iterations == -1 {
             IterationCount::Infinite
         } else if self.iterations > 0 {
-            // Safe: we just checked > 0, and i64 > 0 fits in u32 for any
-            // reasonable iteration count.  Clamp to u32::MAX for safety.
-            let n = u32::try_from(self.iterations).unwrap_or(u32::MAX);
+            let n = u32::try_from(self.iterations).map_err(|_| {
+                LooperError::InvalidArgument(format!(
+                    "--iterations value {} exceeds maximum {}",
+                    self.iterations,
+                    u32::MAX
+                ))
+            })?;
             IterationCount::Finite(NonZeroU32::new(n).expect("n > 0"))
         } else {
             return Err(LooperError::InvalidArgument(
@@ -1154,7 +1192,10 @@ pub fn load_rule_file(path: &Path) -> Result<String, LooperError> {
 /// On read failure, falls back to the last successfully loaded content for
 /// the failing file (cached in `RULES_CACHE`).  This prevents rules from
 /// being silently dropped due to transient I/O errors mid-run.
-pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>) -> Option<String> {
+pub fn load_rules_for_branch(
+    rules: &RulesConfig,
+    workflow: Option<&PolicyWorkflow>,
+) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
 
     if let Some(ref path) = rules.global {
@@ -1172,15 +1213,18 @@ pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>)
                 if let Some(cached) = get_cached_rule(path) {
                     tracing::info!(path = %path.display(), "using cached global rule file content");
                     parts.push(cached);
+                } else {
+                    tracing::error!(
+                        path = %path.display(),
+                        "rule file re-read failed and no cached content available — this iteration will run WITHOUT global rules"
+                    );
                 }
             }
         }
     }
 
-    if let Some(branch) = workflow_branch {
-        // Normalise branch name: "pr-review" → "pr_review" for config lookup.
-        let key = branch.replace('-', "_");
-        if let Some(path) = rules.workflows.get(&key) {
+    if let Some(wf) = workflow {
+        if let Some(path) = rules.workflows.get(wf) {
             match load_rule_file(path) {
                 Ok(content) if !content.trim().is_empty() => {
                     cache_rule(path, &content);
@@ -1190,12 +1234,18 @@ pub fn load_rules_for_branch(rules: &RulesConfig, workflow_branch: Option<&str>)
                 Err(e) => {
                     tracing::warn!(
                         path = %path.display(),
-                        branch = branch,
+                        workflow = %wf,
                         "failed to re-read workflow rule file: {e}"
                     );
                     if let Some(cached) = get_cached_rule(path) {
-                        tracing::info!(path = %path.display(), branch = branch, "using cached workflow rule file content");
+                        tracing::info!(path = %path.display(), workflow = %wf, "using cached workflow rule file content");
                         parts.push(cached);
+                    } else {
+                        tracing::error!(
+                            path = %path.display(),
+                            workflow = %wf,
+                            "rule file re-read failed and no cached content available — this iteration will run WITHOUT workflow rules"
+                        );
                     }
                 }
             }
@@ -1218,21 +1268,39 @@ static RULES_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn cache_rule(path: &Path, content: &str) {
-    if let Ok(mut cache) = RULES_CACHE.lock() {
-        cache.insert(path.to_path_buf(), content.to_string());
+    match RULES_CACHE.lock() {
+        Ok(mut cache) => {
+            cache.insert(path.to_path_buf(), content.to_string());
+        }
+        Err(e) => {
+            tracing::error!(
+                path = %path.display(),
+                "RULES_CACHE mutex poisoned — rule file content not cached: {e}"
+            );
+        }
     }
 }
 
 fn get_cached_rule(path: &Path) -> Option<String> {
-    RULES_CACHE.lock().ok()?.get(path).cloned()
+    match RULES_CACHE.lock() {
+        Ok(cache) => cache.get(path).cloned(),
+        Err(e) => {
+            tracing::error!(
+                path = %path.display(),
+                "RULES_CACHE mutex poisoned — cannot read cached rule: {e}"
+            );
+            None
+        }
+    }
 }
 
 /// Clear the rule cache (for testing).
 #[cfg(test)]
 fn clear_rules_cache() {
-    if let Ok(mut cache) = RULES_CACHE.lock() {
-        cache.clear();
-    }
+    RULES_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 #[cfg(test)]
@@ -2341,7 +2409,7 @@ non_retryable_exit_codes = [2, 126, 127]
     #[test]
     fn validate_returns_none_prompt_source() {
         let validated = LoopConfig::default().validate().unwrap();
-        assert!(matches!(validated.prompt_source, PromptSource::None));
+        assert!(matches!(validated.prompt_source, PromptSource::Absent));
     }
 
     #[test]
@@ -2390,16 +2458,16 @@ non_retryable_exit_codes = [2, 126, 127]
     }
 
     #[test]
-    fn large_iteration_count_is_clamped_to_u32_max() {
-        let validated = LoopConfig {
+    fn large_iteration_count_is_rejected() {
+        let err = LoopConfig {
             iterations: i64::from(u32::MAX) + 1,
             ..Default::default()
         }
         .validate()
-        .unwrap();
-        assert_eq!(
-            validated.iteration_count,
-            IterationCount::Finite(std::num::NonZeroU32::new(u32::MAX).unwrap())
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "expected 'exceeds maximum' error, got: {err}"
         );
     }
 
@@ -2432,7 +2500,7 @@ non_retryable_exit_codes = [2, 126, 127]
             rules: RulesConfig {
                 global: None,
                 workflows: HashMap::from([(
-                    "pr_review".to_string(),
+                    PolicyWorkflow::PrReview,
                     PathBuf::from("/nonexistent/pr-review.md"),
                 )]),
             },
@@ -2440,7 +2508,7 @@ non_retryable_exit_codes = [2, 126, 127]
         };
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("cannot read"));
-        assert!(err.to_string().contains("rules.workflows.pr_review"));
+        assert!(err.to_string().contains("rules.workflows.pr-review"));
     }
 
     #[test]
@@ -2555,12 +2623,12 @@ non_retryable_exit_codes = [2, 126, 127]
         let rules = RulesConfig {
             global: Some(global_file.path().to_path_buf()),
             workflows: HashMap::from([(
-                "pr_review".to_string(),
+                PolicyWorkflow::PrReview,
                 workflow_file.path().to_path_buf(),
             )]),
         };
 
-        let result = load_rules_for_branch(&rules, Some("pr-review")).unwrap();
+        let result = load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).unwrap();
         assert!(result.contains("GLOBAL RULE"));
         assert!(result.contains("PR REVIEW RULE"));
         // Global comes before workflow.
@@ -2570,7 +2638,7 @@ non_retryable_exit_codes = [2, 126, 127]
     #[test]
     fn load_rules_for_branch_returns_none_when_no_rules() {
         let rules = RulesConfig::default();
-        assert!(load_rules_for_branch(&rules, Some("pr-review")).is_none());
+        assert!(load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).is_none());
     }
 
     #[test]
@@ -2583,7 +2651,7 @@ non_retryable_exit_codes = [2, 126, 127]
             workflows: HashMap::new(),
         };
 
-        let result = load_rules_for_branch(&rules, Some("pr-review")).unwrap();
+        let result = load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).unwrap();
         assert!(result.contains("GLOBAL RULE"));
     }
 
@@ -2683,7 +2751,7 @@ non_retryable_exit_codes = [2, 126, 127]
             rules: RulesConfig {
                 global: Some(PathBuf::from("rules/global.md")),
                 workflows: HashMap::from([(
-                    "pr_review".to_string(),
+                    PolicyWorkflow::PrReview,
                     PathBuf::from("rules/pr-review.md"),
                 )]),
             },
@@ -2695,7 +2763,11 @@ non_retryable_exit_codes = [2, 126, 127]
             Some(Path::new("/opt/project/.code-looper/rules/global.md"))
         );
         assert_eq!(
-            config.rules.workflows.get("pr_review").map(|p| p.as_path()),
+            config
+                .rules
+                .workflows
+                .get(&PolicyWorkflow::PrReview)
+                .map(|p| p.as_path()),
             Some(Path::new("/opt/project/.code-looper/rules/pr-review.md"))
         );
     }
@@ -2723,8 +2795,8 @@ non_retryable_exit_codes = [2, 126, 127]
 global = ".code-looper/rules/global.md"
 
 [workflows]
-pr_review = ".code-looper/rules/pr-review.md"
-issue_execution = ".code-looper/rules/issue-execution.md"
+"pr-review" = ".code-looper/rules/pr-review.md"
+"issue-execution" = ".code-looper/rules/issue-execution.md"
 "#;
         let rules: RulesConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
@@ -2732,7 +2804,9 @@ issue_execution = ".code-looper/rules/issue-execution.md"
             Some(std::path::Path::new(".code-looper/rules/global.md"))
         );
         assert_eq!(rules.workflows.len(), 2);
-        assert!(rules.workflows.contains_key("pr_review"));
-        assert!(rules.workflows.contains_key("issue_execution"));
+        assert!(rules.workflows.contains_key(&PolicyWorkflow::PrReview));
+        assert!(rules
+            .workflows
+            .contains_key(&PolicyWorkflow::IssueExecution));
     }
 }

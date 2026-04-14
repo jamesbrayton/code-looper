@@ -6,6 +6,7 @@
 //! prepares a specific configuration layout under `.code-looper/` (or a
 //! user-specified directory).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// A single action taken (or that would be taken) by config bootstrap.
@@ -87,9 +88,9 @@ iterations = 1
 # global = ".code-looper/rules/global.md"
 #
 # [rules.workflows]
-# pr_review = ".code-looper/rules/pr-review.md"
-# issue_execution = ".code-looper/rules/issue-execution.md"
-# backlog_discovery = ".code-looper/rules/backlog-discovery.md"
+# "pr-review" = ".code-looper/rules/pr-review.md"
+# "issue-execution" = ".code-looper/rules/issue-execution.md"
+# "backlog-discovery" = ".code-looper/rules/backlog-discovery.md"
 
 # ── Orchestration ────────────────────────────────────────────────────────
 # Enable the policy engine to auto-select workflow branches.
@@ -145,9 +146,9 @@ iterations: 1
 # rules:
 #   global: ".code-looper/rules/global.md"
 #   workflows:
-#     pr_review: ".code-looper/rules/pr-review.md"
-#     issue_execution: ".code-looper/rules/issue-execution.md"
-#     backlog_discovery: ".code-looper/rules/backlog-discovery.md"
+#     pr-review: ".code-looper/rules/pr-review.md"
+#     issue-execution: ".code-looper/rules/issue-execution.md"
+#     backlog-discovery: ".code-looper/rules/backlog-discovery.md"
 
 # ── Orchestration ────────────────────────────────────────────────────────
 # orchestration:
@@ -273,7 +274,9 @@ pub fn run_config_bootstrap(
             actions.push(ConfigBootstrapAction::AlreadySatisfied(path));
         } else {
             if !dry_run {
-                std::fs::create_dir_all(&path)?;
+                std::fs::create_dir_all(&path).map_err(|e| {
+                    anyhow::anyhow!("failed to create directory '{}': {e}", path.display())
+                })?;
             }
             actions.push(ConfigBootstrapAction::CreatedDir(path));
         }
@@ -345,8 +348,8 @@ pub fn next_steps_message(dir: &Path, format: ConfigFormat) -> String {
 /// Write a scaffold file, respecting dry_run and force flags.
 ///
 /// When overwriting an existing file (`force` is true), uses a
-/// write-to-temp-then-rename pattern so that an interrupted write never
-/// leaves the original file truncated or corrupted.
+/// `NamedTempFile` for atomic writes — the temp file has a unique name
+/// (no collision risk) and is automatically cleaned up on failure.
 fn write_scaffold_file(
     path: &Path,
     content: &str,
@@ -358,17 +361,29 @@ fn write_scaffold_file(
     }
     let overwriting = path.exists() && force;
     if !dry_run {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|e| {
+            anyhow::anyhow!("failed to create directory '{}': {e}", parent.display())
+        })?;
         if overwriting {
-            // Atomic write: write to a temp file then rename, so the
-            // original is never truncated if the process is interrupted.
-            let tmp_path = path.with_extension("tmp");
-            std::fs::write(&tmp_path, content)?;
-            std::fs::rename(&tmp_path, path)?;
+            // Atomic write via NamedTempFile: unique naming avoids
+            // collisions and automatic cleanup handles failures.
+            let mut tmp_file = tempfile::NamedTempFile::new_in(parent).map_err(|e| {
+                anyhow::anyhow!("failed to create temp file in '{}': {e}", parent.display())
+            })?;
+            tmp_file
+                .write_all(content.as_bytes())
+                .map_err(|e| anyhow::anyhow!("failed to write temp file: {e}"))?;
+            tmp_file.persist(path).map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to persist temp file to '{}': {}",
+                    path.display(),
+                    e.error
+                )
+            })?;
         } else {
-            std::fs::write(path, content)?;
+            std::fs::write(path, content)
+                .map_err(|e| anyhow::anyhow!("failed to write '{}': {e}", path.display()))?;
         }
     }
     if overwriting {

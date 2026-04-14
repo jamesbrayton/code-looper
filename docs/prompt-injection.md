@@ -302,9 +302,9 @@ The full prompt layering is:
   reads rule files and assembles the rules preamble.
 - **Re-read each iteration:** rule files are re-read on every iteration so edits
   take effect without a restart.  Read errors are logged and the rule is skipped
-  (the last good content is not cached — the file is simply omitted).
-- **Branch name normalisation:** workflow branch names use hyphens in display
-  (`pr-review`) but underscores in config keys (`pr_review`).  The loader
-  normalises hyphens to underscores when looking up `[rules.workflows]` entries.
+  (the last good content is cached and used as a fallback).
+- **Workflow keys:** `[rules.workflows]` keys are the kebab-case `PolicyWorkflow`
+  enum variants (`"pr-review"`, `"issue-execution"`, `"backlog-discovery"`).
+  Invalid keys are rejected at deserialization time.
 - **Size limits:** soft warning at 16 KB, hard error at 64 KB to prevent
   accidental prompt bloat from paste-mistakes.

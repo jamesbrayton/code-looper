@@ -138,7 +138,7 @@ User rules: global preamble and per-workflow-branch overrides via markdown files
 | TOML key | Type | Default | Description |
 |----------|------|---------|-------------|
 | `rules.global` | path | — | Path to a markdown file prepended to **every** provider prompt, across all workflow branches |
-| `rules.workflows.<branch>` | path | — | Per-workflow-branch rule file. Key is the branch name with underscores (e.g. `pr_review`, `issue_execution`, `backlog_discovery`). Contents are prepended after the global rule and before the engine-generated prompt. |
+| `rules.workflows.<workflow>` | path | — | Per-workflow-branch rule file. Key is the kebab-case workflow name (e.g. `"pr-review"`, `"issue-execution"`, `"backlog-discovery"`). Contents are prepended after the global rule and before the engine-generated prompt. |
 
 ### Prompt layering order
 
@@ -159,9 +159,9 @@ When user rules are configured, the full prompt seen by the provider is assemble
 global = ".code-looper/rules/global.md"
 
 [rules.workflows]
-pr_review = ".code-looper/rules/pr-review.md"
-issue_execution = ".code-looper/rules/issue-execution.md"
-backlog_discovery = ".code-looper/rules/backlog-discovery.md"
+"pr-review" = ".code-looper/rules/pr-review.md"
+"issue-execution" = ".code-looper/rules/issue-execution.md"
+"backlog-discovery" = ".code-looper/rules/backlog-discovery.md"
 ```
 
 ### Behaviour notes

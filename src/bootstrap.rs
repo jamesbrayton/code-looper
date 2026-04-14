@@ -202,11 +202,20 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
     Ok(BootstrapAction::MergedJson(path))
 }
 
-/// Returns `true` when the JSON contains a `"github"` MCP server key.
+/// Returns `true` when the JSON contains a `"github"` MCP server key
+/// under the `"mcpServers"` object.
+///
+/// Uses proper JSON parsing to avoid false positives from `"github"`
+/// appearing in string values or unrelated keys.
 fn has_github_server(json: &str) -> bool {
-    // Same heuristic as workspace.rs — avoids a full JSON parse dependency.
-    let trimmed_key = "\"github\"";
-    json.contains(trimmed_key)
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    v.get("mcpServers")
+        .and_then(|s| s.as_object())
+        .map(|o| o.contains_key("github"))
+        .unwrap_or(false)
 }
 
 /// Strip trailing commas that appear before `}` in a JSON-object tail string.
@@ -389,8 +398,12 @@ pub fn warn_if_broad_ignore_hides_config(workspace_dir: &Path) -> bool {
         return false;
     }
 
-    let Ok(contents) = std::fs::read_to_string(&gitignore_path) else {
-        return false;
+    let contents = match std::fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("warning: could not read {}: {e}", gitignore_path.display());
+            return false;
+        }
     };
 
     if has_broad_code_looper_ignore(&contents) {
@@ -515,6 +528,21 @@ mod tests {
         fs::write(&mcp_path, r#"{"mcpServers":{"github":{}}}"#).unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[1], BootstrapAction::AlreadySatisfied(p) if p == &mcp_path));
+    }
+
+    #[test]
+    fn has_github_server_rejects_false_positive_in_value() {
+        // "github" appearing as a string value, not as an mcpServers key,
+        // must not be treated as a GitHub server entry (#110).
+        assert!(!has_github_server(
+            r#"{"mcpServers":{"myserver":{"description":"see github for details"}}}"#
+        ));
+    }
+
+    #[test]
+    fn has_github_server_rejects_github_outside_mcp_servers() {
+        // "github" as a top-level key (not under mcpServers) must not match.
+        assert!(!has_github_server(r#"{"github":"some-value"}"#));
     }
 
     #[test]
