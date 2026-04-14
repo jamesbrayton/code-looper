@@ -460,7 +460,14 @@ impl LoopEngine {
                 .issue_tracking
                 .comment_issue_number
                 .map(|n| n as u64)
-                .unwrap_or(0);
+                .unwrap_or_else(|| {
+                    warn!(
+                        "single-pr mode active but comment_issue_number is not set; \
+                         using 0 as issue number for branch derivation — \
+                         set issue_tracking.comment_issue_number in config"
+                    );
+                    0
+                });
             match bm.ensure_branch(issue_number, "") {
                 Ok(branch) => {
                     info!(branch = %branch, "single-pr: checked out feature branch");
@@ -472,8 +479,16 @@ impl LoopEngine {
                         "single-pr: could not ensure feature branch; will use current branch"
                     );
                     // Fall back to whatever branch the working directory is on.
-                    crate::branch::current_branch()
-                        .unwrap_or_else(|_| bm.branch_name(issue_number, ""))
+                    crate::branch::current_branch().unwrap_or_else(|e| {
+                        let fallback = bm.branch_name(issue_number, "");
+                        warn!(
+                            error = %e,
+                            fallback_branch = %fallback,
+                            "current_branch() failed; fabricating branch name — \
+                             PR creation may fail"
+                        );
+                        fallback
+                    })
                 }
             }
         } else {
@@ -864,12 +879,20 @@ impl LoopEngine {
                     let branch = if !single_pr_branch.is_empty() {
                         single_pr_branch.clone()
                     } else {
-                        crate::branch::current_branch().unwrap_or_else(|_| {
-                            self.config
+                        crate::branch::current_branch().unwrap_or_else(|e| {
+                            let fallback = self
+                                .config
                                 .pr_management
                                 .branch_prefix
                                 .trim_end_matches('/')
-                                .to_string()
+                                .to_string();
+                            warn!(
+                                error = %e,
+                                fallback_branch = %fallback,
+                                "current_branch() failed; using branch prefix as \
+                                 fallback — PR creation may fail"
+                            );
+                            fallback
                         })
                     };
                     let issue_number = self
@@ -877,8 +900,8 @@ impl LoopEngine {
                         .issue_tracking
                         .comment_issue_number
                         .map(|n| n as u64)
-                        .unwrap_or(0);
-                    // Push the feature branch to origin so `gh pr create` can find it.
+                        .unwrap_or(0); // warn already emitted at loop startup
+                                       // Push the feature branch to origin so `gh pr create` can find it.
                     if let Some(ref bm) = self.branch_manager {
                         if let Err(e) = bm.push_branch(&branch) {
                             warn!(

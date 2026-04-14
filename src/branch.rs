@@ -99,6 +99,7 @@ pub enum BranchError {
     /// Only the single-PR cleanup path reaches this; multi-PR mode uses
     /// [`BranchManager::cleanup_merged_remote_branch`] and never touches
     /// the local branch.
+    #[cfg(test)]
     #[error("branch has uncommitted changes or unmerged commits — refusing to delete '{0}'")]
     UnsafeDelete(String),
 }
@@ -155,7 +156,7 @@ fn remote_branch_exists(name: &str) -> bool {
 }
 
 /// Return `true` if the working tree has uncommitted changes (tracked or staged).
-#[allow(dead_code)]
+#[cfg(test)]
 fn has_uncommitted_changes() -> bool {
     Command::new("git")
         .args(["diff", "--quiet", "HEAD"])
@@ -166,7 +167,7 @@ fn has_uncommitted_changes() -> bool {
 
 /// Return `true` if `branch` contains commits not present in `base_branch`
 /// that are not yet merged (i.e. the branch tip is ahead of `base_branch`).
-#[allow(dead_code)]
+#[cfg(test)]
 fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
     // Count commits in branch that are not in base_branch
     let result = Command::new("git")
@@ -225,7 +226,7 @@ impl BranchManager {
     /// When `false`, `push_branch` is a no-op in `no-pr` mode.  Meant for
     /// tests and for rare configurations that explicitly want the loop to
     /// keep work local.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_no_pr_push(mut self, no_pr_push: bool) -> Self {
         self.no_pr_push = no_pr_push;
         self
@@ -238,7 +239,7 @@ impl BranchManager {
     /// without touching the remote.  This field is destructive and must not
     /// be mutable on a live `BranchManager` — use this builder on a fresh
     /// instance instead.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_delete_remote_branch_on_merge(mut self, enabled: bool) -> Self {
         self.delete_remote_branch_on_merge = enabled;
         self
@@ -380,7 +381,7 @@ impl BranchManager {
     /// out the PR's local branch there, so this method would operate on
     /// whatever branch the engine's CWD happens to be on (see #65).  Use
     /// [`Self::cleanup_merged_remote_branch`] instead for multi-PR merges.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cleanup_branch(&self, branch: &str) -> Result<(), BranchError> {
         // Guard: never delete base_branch
         if branch == self.base() {
