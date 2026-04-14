@@ -209,6 +209,34 @@ fn has_github_server(json: &str) -> bool {
     json.contains(trimmed_key)
 }
 
+/// Strip trailing commas that appear before `}` in a JSON-object tail string.
+///
+/// Only cleans the *last* trailing comma before each `}` — this is enough to
+/// prevent double-comma output when `merge_github_server` inserts a new entry.
+fn strip_trailing_commas_in_object(tail: &str) -> String {
+    let mut result = String::with_capacity(tail.len());
+    let chars: Vec<char> = tail.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == ',' {
+            // Look ahead past whitespace/newlines for `}`. If found, skip this comma.
+            let mut j = i + 1;
+            while j < len && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < len && chars[j] == '}' {
+                // Skip the trailing comma — don't push it.
+                i += 1;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
 /// Insert a `"github"` server entry into a JSON object.
 ///
 /// Supports two layouts:
@@ -216,6 +244,10 @@ fn has_github_server(json: &str) -> bool {
 ///   `{ … }` — inserts directly at the top level
 ///
 /// Returns `None` if the file does not look like a JSON object.
+///
+/// Tolerates trailing commas in the input (e.g. VS Code's JSONC format)
+/// by stripping them before inserting, so the output is always valid JSON.
+/// See #100.
 fn merge_github_server(json: &str) -> Option<String> {
     let github_entry = r#""github": {
       "command": "docker",
@@ -238,9 +270,14 @@ fn merge_github_server(json: &str) -> Option<String> {
         let after_key = &json[mcp_start + "\"mcpServers\"".len()..];
         let brace_offset = after_key.find('{')?;
         let insert_pos = mcp_start + "\"mcpServers\"".len() + brace_offset + 1;
-        // Determine whether there's already content in the object.
-        let inner = &json[insert_pos..];
-        let needs_comma = !inner.trim_start().starts_with('}');
+
+        // Strip trailing commas from existing content so we don't produce
+        // double-comma output (e.g. `"github":{...},,"context7":{},`).
+        // See #100.
+        let tail = &json[insert_pos..];
+        let cleaned_tail = strip_trailing_commas_in_object(tail);
+
+        let needs_comma = !cleaned_tail.trim_start().starts_with('}');
         let comma = if needs_comma { "," } else { "" };
         let indented = github_entry
             .lines()
@@ -250,7 +287,7 @@ fn merge_github_server(json: &str) -> Option<String> {
         let result = format!(
             "{}\n{indented}{comma}{}",
             &json[..insert_pos],
-            &json[insert_pos..]
+            &cleaned_tail
         );
         return Some(result);
     }
@@ -258,14 +295,15 @@ fn merge_github_server(json: &str) -> Option<String> {
     // No mcpServers block: insert at the top-level object.
     let open = json.find('{')?;
     let insert_pos = open + 1;
-    let inner = &json[insert_pos..];
-    let needs_comma = !inner.trim_start().starts_with('}');
+    let tail = &json[insert_pos..];
+    let cleaned_tail = strip_trailing_commas_in_object(tail);
+    let needs_comma = !cleaned_tail.trim_start().starts_with('}');
     let comma = if needs_comma { "," } else { "" };
     let result = format!(
         "{}\n  {}{comma}{}",
         &json[..insert_pos],
         github_entry.lines().collect::<Vec<_>>().join("\n  "),
-        &json[insert_pos..]
+        &cleaned_tail
     );
     Some(result)
 }
@@ -448,6 +486,91 @@ mod tests {
             content.contains("\"context7\""),
             "existing keys must be preserved"
         );
+    }
+
+    // ── merge_github_server unit tests (#100) ────────────────────────────────
+
+    #[test]
+    fn merge_handles_trailing_comma_in_mcp_servers() {
+        let input = r#"{
+  "mcpServers": {
+    "context7": {},
+  }
+}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        // Must be valid JSON (no double commas).
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(
+            servers.contains_key("github"),
+            "github entry must be present"
+        );
+        assert!(
+            servers.contains_key("context7"),
+            "existing keys must be preserved"
+        );
+    }
+
+    #[test]
+    fn merge_handles_no_trailing_comma() {
+        let input = r#"{"mcpServers":{"context7":{}}}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("github"));
+        assert!(servers.contains_key("context7"));
+    }
+
+    #[test]
+    fn merge_handles_empty_mcp_servers() {
+        let input = r#"{"mcpServers":{}}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("github"));
+    }
+
+    #[test]
+    fn merge_handles_multiple_trailing_commas() {
+        // Multiple entries each with trailing commas.
+        let input = r#"{
+  "mcpServers": {
+    "context7": {},
+    "markitdown": {},
+  }
+}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("github"));
+        assert!(servers.contains_key("context7"));
+        assert!(servers.contains_key("markitdown"));
+    }
+
+    #[test]
+    fn merge_top_level_with_trailing_comma() {
+        // No mcpServers block — top-level insertion with trailing comma.
+        let input = r#"{
+  "someKey": "value",
+}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        assert!(!result.contains(",,"), "must not produce double commas");
+        assert!(result.contains("\"github\""));
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_comma_before_brace() {
+        assert_eq!(strip_trailing_commas_in_object(r#""a":{},}"#), r#""a":{}}"#);
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_valid_commas() {
+        let input = r#""a":{}, "b":{}}"#;
+        assert_eq!(strip_trailing_commas_in_object(input), input);
     }
 
     #[test]

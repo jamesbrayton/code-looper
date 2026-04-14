@@ -1674,6 +1674,61 @@ mod tests {
     }
 
     #[test]
+    fn least_conflicts_all_conflicting_preserves_insertion_order() {
+        // When all PRs share the same non-MERGEABLE state, stable sort should
+        // preserve insertion order — the first PR wins.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(10), make_pr(20), make_pr(30)];
+        for n in [10, 20, 30] {
+            mock.states.insert(
+                n,
+                make_state_with_mergeable(
+                    make_pr(n),
+                    PrTriageState::ChecksFailing,
+                    Some("CONFLICTING"),
+                ),
+            );
+        }
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(
+                pr.number, 10,
+                "equal-state PRs should preserve insertion order"
+            );
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
+    fn least_conflicts_both_none_mergeable_preserves_insertion_order() {
+        // Two PRs both missing the `mergeable` field — insertion order wins.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(5), make_pr(6)];
+        for n in [5, 6] {
+            mock.states.insert(
+                n,
+                make_state_with_mergeable(make_pr(n), PrTriageState::ChecksFailing, None),
+            );
+        }
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(
+                pr.number, 5,
+                "both-None PRs should preserve insertion order"
+            );
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
     fn mergeable_sort_key_values() {
         assert_eq!(Mergeable::sort_key(Some(Mergeable::Mergeable)), 0);
         assert_eq!(Mergeable::sort_key(Some(Mergeable::Unknown)), 1);

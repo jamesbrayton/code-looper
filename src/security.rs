@@ -493,6 +493,51 @@ mod tests {
         assert!(output.contains("ghp_[REDACTED]"), "{output}");
     }
 
+    // ── edge-case tests for #70 item 5 ────────────────────────────────────
+
+    #[test]
+    fn empty_env_var_value_is_not_redacted() {
+        // `GH_TOKEN=` with no value after the `=` should pass through unchanged.
+        let input = "GH_TOKEN=";
+        let output = redact_secrets(input);
+        assert_eq!(output, input, "empty env var value must not be redacted");
+
+        let input2 = "GITHUB_TOKEN=";
+        let output2 = redact_secrets(input2);
+        assert_eq!(output2, input2, "empty env var value must not be redacted");
+    }
+
+    #[test]
+    fn multiple_auth_headers_in_multiline_input() {
+        let input = "Authorization: Bearer first_token_aaa\n\
+                     X-Custom: value\n\
+                     Authorization: Bearer second_token_bbb";
+        let output = redact_secrets(input);
+        assert!(
+            !output.contains("first_token_aaa"),
+            "first bearer token must be redacted: {output}"
+        );
+        assert!(
+            !output.contains("second_token_bbb"),
+            "second bearer token must be redacted: {output}"
+        );
+        assert!(
+            output.contains("X-Custom: value"),
+            "non-auth headers preserved"
+        );
+    }
+
+    #[test]
+    fn basic_auth_scheme_is_not_redacted() {
+        // Only Bearer and token schemes are redacted by design.
+        let input = "Authorization: Basic dXNlcjpwYXNz";
+        let output = redact_secrets(input);
+        assert_eq!(
+            output, input,
+            "Basic auth should not be redacted (by current design)"
+        );
+    }
+
     #[test]
     fn ansi_escape_wrapped_token_is_not_split_by_redaction() {
         // ANSI color escapes often wrap log content.  The prefix scanner

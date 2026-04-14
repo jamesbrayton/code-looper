@@ -400,14 +400,26 @@ impl LoopEngine {
                     .repo_owner
                     .as_deref()
                     .or(self.config.orchestration.repo_owner.as_deref())
-                    .unwrap_or("(unknown)");
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "repo_owner is not set for GitHub issue tracking — \
+                             downstream operations may target the wrong repository"
+                        );
+                        "(unknown)"
+                    });
                 let repo = self
                     .config
                     .issue_tracking
                     .repo_name
                     .as_deref()
                     .or(self.config.orchestration.repo_name.as_deref())
-                    .unwrap_or("(unknown)");
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "repo_name is not set for GitHub issue tracking — \
+                             downstream operations may target the wrong repository"
+                        );
+                        "(unknown)"
+                    });
                 info!(
                     issue_tracking_mode = "github",
                     repo = %format!("{owner}/{repo}"),
@@ -900,8 +912,14 @@ impl LoopEngine {
                         .issue_tracking
                         .comment_issue_number
                         .map(|n| n as u64)
-                        .unwrap_or(0); // warn already emitted at loop startup
-                                       // Push the feature branch to origin so `gh pr create` can find it.
+                        .unwrap_or_else(|| {
+                            warn!(
+                                "comment_issue_number is not set; using 0 — \
+                                 PR title may reference issue #0"
+                            );
+                            0
+                        });
+                    // Push the feature branch to origin so `gh pr create` can find it.
                     if let Some(ref bm) = self.branch_manager {
                         if let Err(e) = bm.push_branch(&branch) {
                             warn!(
