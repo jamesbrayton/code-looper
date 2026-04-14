@@ -120,7 +120,7 @@ pub struct ClaudeAdapter {
 
 /// Build the argument vector passed to the `claude` binary.
 ///
-/// Order is fixed: `--output-format`, `stream-json`,
+/// Order is fixed: `--output-format`, `stream-json`, `--verbose`,
 /// `--dangerously-skip-permissions`, then any caller-supplied `extra_args`,
 /// then `-p` with the prompt.  Extracted as a free function so unit tests
 /// can verify arg construction without spawning the real `claude` binary.
@@ -128,6 +128,7 @@ pub(crate) fn build_claude_args(prompt: &str, extra_args: &[String]) -> Vec<Stri
     let mut args: Vec<String> = vec![
         "--output-format".to_string(),
         "stream-json".to_string(),
+        "--verbose".to_string(),
         "--dangerously-skip-permissions".to_string(),
     ];
     args.extend(extra_args.iter().cloned());
@@ -1048,7 +1049,7 @@ pub mod tests {
     // ── extra_args threading ──────────────────────────────────────────────────
 
     /// Verify that `build_claude_args` threads `extra_args` through in the
-    /// required order: `--output-format`, `stream-json`,
+    /// required order: `--output-format`, `stream-json`, `--verbose`,
     /// `--dangerously-skip-permissions`, *extras*, `-p`, *prompt*.
     #[test]
     fn claude_adapter_includes_extra_args_in_invocation() {
@@ -1059,6 +1060,7 @@ pub mod tests {
             vec![
                 "--output-format".to_string(),
                 "stream-json".to_string(),
+                "--verbose".to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "--extra-flag".to_string(),
                 "extra-value".to_string(),
@@ -1069,7 +1071,7 @@ pub mod tests {
     }
 
     /// Empty `extra_args` collapses to the canonical Claude invocation:
-    /// `--output-format stream-json --dangerously-skip-permissions -p <prompt>`.
+    /// `--output-format stream-json --verbose --dangerously-skip-permissions -p <prompt>`.
     #[test]
     fn claude_adapter_no_extra_args_uses_canonical_arg_order() {
         let args = super::build_claude_args("hello", &[]);
@@ -1078,6 +1080,7 @@ pub mod tests {
             vec![
                 "--output-format".to_string(),
                 "stream-json".to_string(),
+                "--verbose".to_string(),
                 "--dangerously-skip-permissions".to_string(),
                 "-p".to_string(),
                 "hello".to_string(),
