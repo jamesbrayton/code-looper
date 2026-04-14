@@ -84,13 +84,15 @@ impl SessionSummary {
 /// exponential backoff: `base_ms * multiplier^attempt` (attempt is 0-indexed).
 ///
 /// With `multiplier = 1.0` this degrades to flat backoff.
+/// Maximum backoff delay in milliseconds (~10 minutes).
+const MAX_BACKOFF_MS: f64 = 600_000.0;
+
 fn compute_backoff_ms(base_ms: u64, multiplier: f64, attempt: u32) -> u64 {
     if multiplier <= 1.0 || attempt == 0 {
         return base_ms;
     }
     let scaled = (base_ms as f64) * multiplier.powi(attempt as i32);
-    // Cap at ~10 minutes to avoid absurdly long sleeps on many retries.
-    scaled.min(600_000.0) as u64
+    scaled.min(MAX_BACKOFF_MS) as u64
 }
 
 fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {

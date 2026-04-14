@@ -10,6 +10,8 @@
 //! | Instruction file lacks a Code Looper section | Append a delimited section |
 //! | `.mcp.json` missing | Create a minimal stub |
 //! | `.mcp.json` lacks a `"github"` key | Merge the entry into the existing file |
+//! | `.gitignore` missing | Create with `.code-looper/` entry |
+//! | `.gitignore` lacks `.code-looper/` | Append the entry |
 //!
 //! All changes are idempotent.  In `--dry-run` mode nothing is written.
 
@@ -112,6 +114,7 @@ pub fn run_bootstrap(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Vec<
     Ok(vec![
         bootstrap_instruction_file(workspace_dir, dry_run)?,
         bootstrap_mcp_config(workspace_dir, dry_run)?,
+        bootstrap_gitignore(workspace_dir, dry_run)?,
     ])
 }
 
@@ -269,6 +272,54 @@ fn merge_github_server(json: &str) -> Option<String> {
         &json[insert_pos..]
     );
     Some(result)
+}
+
+// ── .gitignore ───────────────────────────────────────────────────────────────
+
+/// The gitignore entry appended (or used to seed) `.gitignore`.
+const GITIGNORE_ENTRY: &str = ".code-looper/";
+const GITIGNORE_COMMENT: &str = "# Code Looper run artifacts";
+
+fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<BootstrapAction> {
+    let path = workspace_dir.join(".gitignore");
+
+    if !path.is_file() {
+        if !dry_run {
+            std::fs::write(&path, format!("{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n"))
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
+        }
+        return Ok(BootstrapAction::Created(path));
+    }
+
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+
+    if has_code_looper_ignore(&contents) {
+        return Ok(BootstrapAction::AlreadySatisfied(path));
+    }
+
+    if !dry_run {
+        let separator = if contents.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let updated = format!("{contents}{separator}{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n");
+        std::fs::write(&path, updated)
+            .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+    }
+
+    Ok(BootstrapAction::Appended(path))
+}
+
+/// Returns `true` when `.gitignore` already contains a `.code-looper/` or
+/// `.code-looper` entry (with or without trailing slash), anchored at the
+/// start of a line.
+fn has_code_looper_ignore(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == ".code-looper" || trimmed == ".code-looper/"
+    })
 }
 
 #[cfg(test)]
@@ -432,8 +483,88 @@ mod tests {
             r#"{"mcpServers":{"github":{}}}"#,
         )
         .unwrap();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[0], BootstrapAction::AlreadySatisfied(_)));
         assert!(matches!(&actions[1], BootstrapAction::AlreadySatisfied(_)));
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(_)));
+    }
+
+    // ── .gitignore tests ──────────────────────────────────────────────────────
+
+    fn setup_satisfied_workspace(dir: &std::path::Path) {
+        fs::write(
+            dir.join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
+        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{"github":{}}}"#).unwrap();
+    }
+
+    #[test]
+    fn creates_gitignore_when_missing() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::Created(p) if p == &path));
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains(".code-looper/"));
+        assert!(content.contains("# Code Looper"));
+    }
+
+    #[test]
+    fn appends_to_existing_gitignore_without_entry() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, "node_modules/\n*.log\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::Appended(p) if p == &path));
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("node_modules/"),
+            "existing entries preserved"
+        );
+        assert!(content.contains(".code-looper/"));
+    }
+
+    #[test]
+    fn gitignore_with_entry_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, "*.log\n.code-looper/\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    #[test]
+    fn gitignore_with_entry_no_trailing_slash_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".code-looper\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    #[test]
+    fn second_bootstrap_is_idempotent_on_gitignore() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        run_bootstrap(dir.path(), false).unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(_)));
+    }
+
+    #[test]
+    fn dry_run_does_not_create_gitignore() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        let actions = run_bootstrap(dir.path(), true).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::Created(_)));
+        assert!(!path.exists(), "dry-run must not create .gitignore");
     }
 }

@@ -174,10 +174,17 @@ fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
         .output();
     match result {
         Ok(out) if out.status.success() => {
-            let count: u64 = String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(1);
+            let raw = String::from_utf8_lossy(&out.stdout);
+            let count: u64 = raw.trim().parse().unwrap_or_else(|e| {
+                tracing::warn!(
+                    branch,
+                    base_branch,
+                    raw_output = raw.trim(),
+                    error = %e,
+                    "git rev-list --count returned unparseable output; assuming unmerged"
+                );
+                1
+            });
             count > 0
         }
         _ => true, // assume unmerged on error — fail safe

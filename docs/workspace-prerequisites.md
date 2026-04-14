@@ -209,6 +209,8 @@ produces no changes and exits 0.
 | Instruction file lacks a Code Looper section | Appends a delimited block |
 | `.mcp.json` missing | Creates a minimal stub with the GitHub server entry |
 | `.mcp.json` lacks a `"github"` key | Merges the entry into the existing file |
+| `.gitignore` missing | Creates with a `.code-looper/` entry |
+| `.gitignore` lacks `.code-looper/` | Appends the entry |
 
 ### Dry-run mode
 
