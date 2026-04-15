@@ -11,6 +11,7 @@ User-facing documentation for Code Looper — a pluggable loop engine for coding
 | [Providers](providers.md) | How each provider adapter is invoked, environment requirements, and known limitations |
 | [Orchestration](orchestration.md) | Policy engine, workflow branches, when each branch is selected |
 | [Workspace Prerequisites](workspace-prerequisites.md) | What the prerequisite checker validates and how to fix each diagnostic |
+| [Engine-Injected Prompts](prompt-injection.md) | Every prompt, preamble, and comment template the engine injects programmatically |
 | [Troubleshooting](troubleshooting.md) | Common failure modes and specific remediation steps |
 
 ## Architecture and Design

@@ -8,6 +8,43 @@ Code Looper can be configured through a config file (TOML or YAML), CLI flags, o
 CLI flags  >  config file (TOML or YAML)  >  built-in defaults
 ```
 
+## Config file resolution (three-tier)
+
+Code Looper searches for a config file in three tiers.  The **first** file
+found wins — tiers are not merged.
+
+| Tier | What | When |
+|------|------|------|
+| **1 — CLI flag** | `--config <path>` | Always checked first |
+| **2 — Workspace** | `<workspace>/.code-looper/config.{toml,yaml,yml}` | When no `--config` flag |
+| **3 — User** | `$XDG_CONFIG_HOME/code-looper/config.{toml,yaml,yml}` | When no workspace config |
+
+Platform-specific user config paths:
+- **Linux:** `$XDG_CONFIG_HOME/code-looper/` (falls back to `~/.config/code-looper/`)
+- **macOS:** `~/Library/Application Support/code-looper/`
+- **Windows:** `%APPDATA%\code-looper\`
+
+When a config file is loaded from a workspace or user directory, **rule file
+paths** (`[rules].global`, `[rules.workflows.*]`) are resolved relative to
+the config file's parent directory, not relative to CWD.
+
+### Using `--workspace-dir` with a central install
+
+If you install Code Looper globally (`cargo install --path .`), you can point
+it at any target repository from anywhere:
+
+```bash
+code-looper --workspace-dir /path/to/target-repo \
+            --config ~/.config/code-looper/config.toml
+```
+
+Or, with automatic workspace-tier resolution (place a config file in the
+target repo's `.code-looper/` directory):
+
+```bash
+code-looper --workspace-dir /path/to/target-repo
+```
+
 ## Loading a config file
 
 Pass `--config path/to/config.toml` (or `.yaml` / `.yml`) to load a base configuration. Any CLI flag explicitly set on the same invocation overrides the corresponding value from the file.
@@ -37,6 +74,35 @@ log_level: info
 
 ---
 
+## `.code-looper/` directory layout
+
+Code Looper uses a `.code-looper/` directory in the workspace root for both
+configuration and runtime artifacts. The `runs/` subdirectory is gitignored;
+everything else is intended to be committed to version control.
+
+| Path | Purpose | Version-controlled? |
+|------|---------|---------------------|
+| `.code-looper/config.toml` | Workspace configuration file | Yes |
+| `.code-looper/rules/` | Rule files (global + per-workflow) | Yes |
+| `.code-looper/prompts/` | Prompt templates | Yes |
+| `.code-looper/runs/` | Per-run artifacts (logs, summaries) | **No** — gitignored |
+| `.code-looper/promise.md` | Runtime promise file | **No** — ephemeral |
+
+`code-looper bootstrap` adds `.code-looper/runs/` to `.gitignore`
+automatically. If your `.gitignore` contains the older broad `.code-looper/`
+rule, replace it with `.code-looper/runs/` so that config and rule files are
+not hidden from version control.
+
+To scaffold this layout with annotated defaults and example rule files, run:
+
+```bash
+code-looper config bootstrap
+```
+
+See [getting-started.md](getting-started.md#scaffold-a-configuration-directory-optional) for options.
+
+---
+
 ## Top-level fields
 
 | TOML key | CLI flag | Type | Default | Description |
@@ -54,12 +120,57 @@ log_level: info
 | `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
 | `retry_backoff_multiplier` | `--retry-backoff-multiplier` | float | `1.0` | Exponential backoff multiplier. `1.0` = flat; `2.0` = doubles delay each retry. Delay for attempt N = `retry_backoff_ms × multiplier^(N-1)` |
 | `on_complete` | `--on-complete` | string | — | Shell command to run once after the loop finishes (runs via `sh -c`). **Security note:** the value is passed verbatim to `sh -c`, so any config-file or CLI source that can set this field can execute arbitrary shell on the host. Treat TOML/YAML config files the same way you would treat a shell script committed to the repo. |
+| `iteration_timeout_secs` | `--iteration-timeout-secs` | integer | — | Maximum wall-clock seconds per provider invocation. `0` is treated as no timeout. When exceeded, the provider process is killed and the iteration is recorded as a timeout failure. |
+| `non_retryable_exit_codes` | `--non-retryable-exit-code` (repeatable) | list of integers | `[]` | Provider exit codes that should never be retried, even when `max_retries > 0`. Short-circuits retry logic immediately. |
 | `provider_extra_args` | `--provider-extra-arg` (repeatable) | list of strings | `[]` | Extra arguments appended to the provider CLI invocation, after the adapter's hardcoded flags and before the prompt. Each element is a separate arg (no shell expansion). |
 
 ### Prompt validation
 
 - `--prompt-inline` and `--prompt-file` are mutually exclusive. Passing both is a validation error.
 - When orchestration is enabled, a prompt is generated automatically; providing `--prompt-inline` or `--prompt-file` alongside `--orchestration` is still valid — the user prompt is appended to the generated preamble.
+
+---
+
+## `[rules]`
+
+User rules: global preamble and per-workflow-branch overrides via markdown files. Rule file contents are **prepended** to the engine-generated prompt (not replacing it), giving users a way to inject standing instructions (coding standards, review checklists, domain context) while preserving the MCP policy and workflow structure.
+
+| TOML key | Type | Default | Description |
+|----------|------|---------|-------------|
+| `rules.global` | path | — | Path to a markdown file prepended to **every** provider prompt, across all workflow branches |
+| `rules.workflows.<workflow>` | path | — | Per-workflow-branch rule file. Key is the kebab-case workflow name (e.g. `"pr-review"`, `"issue-execution"`, `"backlog-discovery"`). Contents are prepended after the global rule and before the engine-generated prompt. |
+
+### Prompt layering order
+
+When user rules are configured, the full prompt seen by the provider is assembled in this order:
+
+| Layer | Source | Customisable? |
+|-------|--------|--------------|
+| MCP-only preamble | `policy_guard.rs` | Only via `allow_direct_github` (unsafe) |
+| User global rules | `[rules].global` config path | Yes — user-authored markdown |
+| User workflow rules | `[rules.workflows].<branch>` | Yes — user-authored markdown |
+| Engine workflow prompt | `orchestration.rs` / `pr_manager.rs` | Per-rule `prompt_override` in config |
+| User iteration prompt | `--prompt-inline` / `--prompt-file` | Yes |
+
+### Example
+
+```toml
+[rules]
+global = ".code-looper/rules/global.md"
+
+[rules.workflows]
+"pr-review" = ".code-looper/rules/pr-review.md"
+"issue-execution" = ".code-looper/rules/issue-execution.md"
+"backlog-discovery" = ".code-looper/rules/backlog-discovery.md"
+```
+
+### Behaviour notes
+
+- Rule files are loaded at startup and **re-read each iteration**, so edits take effect without restarting the loop.
+- Missing file when the key is set → startup error with a remediation message.
+- Empty rule file → valid, treated as no-op (debug log emitted).
+- Soft warning at 16 KB; hard error at 64 KB to prevent accidental prompt bloat.
+- Rule files are config-only — there are no CLI flags to set them.
 
 ---
 
@@ -277,6 +388,45 @@ printf '%s\n%s\n' '{"cmd":"status"}' '{"cmd":"status"}' | nc 127.0.0.1 7979
 
 ---
 
+## Git auto-detection
+
+When `issue_tracking.mode = "github"` or `orchestration.enabled = true`, the engine needs `repo_owner` and `repo_name`. These are resolved in this order:
+
+1. **Explicit config** — `issue_tracking.repo_owner` / `issue_tracking.repo_name`
+2. **Inherited** — `orchestration.repo_owner` / `orchestration.repo_name`
+3. **Auto-detected** — parsed from `git remote get-url origin`
+
+Auto-detection supports HTTPS (`https://github.com/owner/repo.git`), SSH (`git@github.com:owner/repo.git`), and `ssh://` URLs. If all three tiers fail when a GitHub mode is enabled, validation returns an error at startup.
+
+## Validation rules
+
+These checks run at startup before the loop begins. Any failure is reported with a specific error message and the process exits.
+
+| Rule | Error |
+|------|-------|
+| `prompt_inline` and `prompt_file` are mutually exclusive | `--prompt-inline and --prompt-file are mutually exclusive` |
+| `iterations` must be > 0 or exactly -1 | `--iterations must be a positive integer or -1 for infinite` |
+| `orchestration.enabled` requires `repo_owner` | `orchestration requires --repo-owner` |
+| `orchestration.enabled` requires `repo_name` | `orchestration requires --repo-name` |
+| `prompt_file` path must exist on disk | `--prompt-file '<path>' does not exist` |
+| `on_complete` must not be whitespace-only | `--on-complete must not be an empty string` |
+| `pr_management.mode = "multi-pr"` requires `issue_tracking.mode = "github"` | `pr_management.mode="multi-pr" requires issue_tracking.mode="github"` |
+| `issue_tracking.mode = "github"` requires `repo_owner` (after auto-detection) | `issue_tracking.mode="github" requires repo_owner` |
+| `issue_tracking.mode = "github"` requires `repo_name` (after auto-detection) | `issue_tracking.mode="github" requires repo_name` |
+
+---
+
+## Example config files
+
+Ready-to-use example config files are available in the [`examples/`](../examples/) directory:
+
+| File | Description |
+|------|-------------|
+| [`simple.toml`](../examples/simple.toml) | Single-iteration run with an inline prompt |
+| [`orchestrated.toml`](../examples/orchestrated.toml) | Full GitHub-integrated orchestration loop |
+| [`orchestrated.yaml`](../examples/orchestrated.yaml) | Same as above in YAML format |
+| [`multi-repo.toml`](../examples/multi-repo.toml) | Run against multiple repositories in sequence |
+
 ## Example TOML config
 
 ```toml
@@ -334,4 +484,115 @@ name = "service-a"
 [[multi_repo]]
 path = "/home/dev/repos/service-b"
 prompt_override = "Apply the same lint fixes as service-a."
+```
+
+---
+
+## Example YAML config
+
+```yaml
+provider: claude
+iterations: -1
+log_level: info
+stop_on_failure: false
+max_retries: 2
+retry_backoff_ms: 500
+retry_backoff_multiplier: 2.0
+on_complete: "echo 'Loop finished' | tee -a loop.log"
+provider_extra_args:
+  - "--model"
+  - "claude-opus-4-5"
+
+orchestration:
+  enabled: true
+  repo_owner: acme
+  repo_name: my-project
+  policies:
+    - condition: has_open_prs
+      workflow: pr-review
+    - condition: has_open_issues
+      workflow: issue-execution
+    - condition: always
+      workflow: backlog-discovery
+
+issue_tracking:
+  mode: github
+  repo_owner: acme
+  repo_name: my-project
+  comment_issue_number: 42
+  comment_cadence: milestones
+  auto_close_owned_issues: false
+
+pr_management:
+  mode: single-pr
+  base_branch: main
+  branch_prefix: "loop/"
+  require_human_review: true
+
+telemetry:
+  stream_output: true
+  keep_runs: 20
+
+# Optional: run against multiple repositories in sequence.
+# When present, the single-repo path is skipped entirely.
+multi_repo:
+  - path: /home/dev/repos/service-a
+    name: service-a
+  - path: /home/dev/repos/service-b
+    prompt_override: "Apply the same lint fixes as service-a."
+```
+
+---
+
+## Minimal config examples
+
+### Simple single-iteration run
+
+```toml
+provider = "claude"
+iterations = 1
+prompt_inline = "Fix the failing test in src/auth.rs"
+```
+
+### Continuous orchestration (GitHub-integrated)
+
+```toml
+provider = "claude"
+iterations = -1
+stop_on_failure = true
+max_retries = 1
+
+[orchestration]
+enabled = true
+# repo_owner and repo_name auto-detected from git remote
+
+[issue_tracking]
+mode = "github"
+comment_cadence = "milestones"
+
+[pr_management]
+mode = "single-pr"
+require_human_review = true
+```
+
+### Multi-PR triage with custom retry
+
+```toml
+provider = "claude"
+iterations = 10
+max_retries = 2
+retry_backoff_ms = 1000
+retry_backoff_multiplier = 2.0
+iteration_timeout_secs = 600
+
+[orchestration]
+enabled = true
+
+[issue_tracking]
+mode = "github"
+
+[pr_management]
+mode = "multi-pr"
+triage_priority = "least-conflicts"
+skip_labels = ["do-not-loop", "wip", "blocked"]
 ```

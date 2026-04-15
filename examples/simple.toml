@@ -1,0 +1,8 @@
+# Simple single-iteration loop — run one prompt and exit.
+#
+# Usage:
+#   code-looper --config examples/simple.toml
+
+provider = "claude"
+iterations = 1
+prompt_inline = "Review the README.md for typos and suggest fixes."

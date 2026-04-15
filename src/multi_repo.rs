@@ -1,27 +1,24 @@
-use crate::config::{LoopConfig, RepoTarget};
+use crate::config::{self, RepoTarget, ValidatedLoopConfig};
 use crate::loop_engine::{LoopEngine, SessionSummary};
 use crate::policy_guard::{PolicyGuard, UnsafeOverrides};
+use crate::provider::{AdapterFactory, DefaultAdapterFactory};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::{info, warn};
 
 /// Result for a single repo target in a multi-repo run.
-#[allow(dead_code)]
 pub struct RepoRunResult {
     /// Display name of the repository (from `RepoTarget::display_name`).
     pub name: String,
-    /// Filesystem path used for this run (for log context).
-    pub path: std::path::PathBuf,
     /// Session summary returned by the loop engine.
     pub summary: SessionSummary,
 }
 
 /// Run the loop for each repo target in sequence.
 ///
-/// For every target a fresh `LoopConfig` is derived from `base_config` with:
+/// For every target a fresh config is derived from `base_config` with:
 /// - `workspace_dir` set to `target.path`
 /// - `prompt_inline` replaced by `target.prompt_override` when present
-/// - `prompt_file` cleared when `prompt_override` is set
 ///
 /// A single SIGINT / Ctrl+C handler is installed for the whole multi-repo
 /// session.  When the signal fires the current repo's iteration runs to
@@ -29,9 +26,22 @@ pub struct RepoRunResult {
 ///
 /// Returns one `RepoRunResult` per target in the same order as `targets`
 /// (fewer entries when interrupted early).
-pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<RepoRunResult> {
-    let interrupted = Arc::new(AtomicBool::new(false));
-    install_signal_handler(Arc::clone(&interrupted));
+pub fn run_multi_repo(
+    base_config: ValidatedLoopConfig,
+    targets: &[RepoTarget],
+) -> Vec<RepoRunResult> {
+    run_multi_repo_with_factory(base_config, targets, &DefaultAdapterFactory)
+}
+
+/// Like [`run_multi_repo`] but accepts an [`AdapterFactory`] for building
+/// provider adapters.  Tests use this to inject fakes without spawning real
+/// provider processes.
+pub fn run_multi_repo_with_factory(
+    base_config: ValidatedLoopConfig,
+    targets: &[RepoTarget],
+    factory: &dyn AdapterFactory,
+) -> Vec<RepoRunResult> {
+    let interrupted = get_or_init_interrupt_flag();
 
     let mut results = Vec::with_capacity(targets.len());
 
@@ -47,42 +57,52 @@ pub fn run_multi_repo(base_config: &LoopConfig, targets: &[RepoTarget]) -> Vec<R
         let name = target.display_name();
         info!(repo = %name, path = %target.path.display(), "Starting multi-repo run");
 
-        let mut repo_config = base_config.clone();
-        repo_config.workspace_dir = Some(target.path.clone());
+        // Clear rules cache between repo runs to prevent cross-repo
+        // contamination from stale cached rule file content (#163).
+        config::clear_rules_cache();
+
+        let mut repo_config = base_config.clone().with_workspace_dir(target.path.clone());
 
         if let Some(ref prompt) = target.prompt_override {
-            repo_config.prompt_inline = Some(prompt.clone());
-            repo_config.prompt_file = None;
+            repo_config = repo_config.with_prompt_override(prompt.clone());
         }
 
         let overrides = UnsafeOverrides {
             allow_direct_github: base_config.allow_direct_github,
         };
         let guard = PolicyGuard::new(overrides);
-        let engine =
-            LoopEngine::new(repo_config, guard).with_shared_interrupt(Arc::clone(&interrupted));
+        let engine = LoopEngine::with_factory(repo_config, guard, factory)
+            .with_shared_interrupt(Arc::clone(&interrupted));
         let summary = engine.run();
 
-        results.push(RepoRunResult {
-            name,
-            path: target.path.clone(),
-            summary,
-        });
+        results.push(RepoRunResult { name, summary });
     }
 
     results
 }
 
-/// Install a process-level SIGINT / Ctrl+C handler that sets `flag` to `true`.
+/// Global interrupt flag shared across all `run_multi_repo_with_factory` calls.
 ///
-/// Logs a warning if the handler cannot be installed (e.g. already registered
-/// by a caller further up the stack), but does not panic.
-fn install_signal_handler(flag: Arc<AtomicBool>) {
-    ctrlc::set_handler(move || {
-        flag.store(true, Ordering::SeqCst);
-        eprintln!("\nInterrupt received — finishing current repo and stopping…");
-    })
-    .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler for multi-repo run: {e}"));
+/// The SIGINT handler is installed exactly once (via `OnceLock`).  Subsequent
+/// invocations reuse the same `AtomicBool`, so an interrupt always reaches the
+/// active run regardless of how many times the function is called (#141).
+static MULTI_REPO_INTERRUPT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+/// Return the global interrupt flag, installing the SIGINT handler on first call.
+fn get_or_init_interrupt_flag() -> Arc<AtomicBool> {
+    Arc::clone(MULTI_REPO_INTERRUPT.get_or_init(|| {
+        let flag = Arc::new(AtomicBool::new(false));
+        let handler_flag = Arc::clone(&flag);
+        ctrlc::set_handler(move || {
+            handler_flag.store(true, Ordering::SeqCst);
+            eprintln!("\nInterrupt received — finishing current repo and stopping…");
+        })
+        .unwrap_or_else(|e| {
+            eprintln!("WARNING: Failed to install Ctrl+C handler for multi-repo run: {e}");
+            warn!("Failed to install Ctrl+C handler for multi-repo run: {e}");
+        });
+        flag
+    }))
 }
 
 /// Print a human-readable summary of all repo run results.
@@ -187,13 +207,17 @@ mod tests {
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-a".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let config_b = LoopConfig {
             iterations: 2,
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-b".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
 
         let summary_a =
             LoopEngine::with_adapter(config_a, Box::new(FakeAdapter::success("fake"))).run();
@@ -202,6 +226,82 @@ mod tests {
 
         assert_eq!(summary_a.successes, 1);
         assert_eq!(summary_b.successes, 2);
+    }
+
+    // ── run_multi_repo_with_factory tests ──────────────────────────────────────
+
+    #[test]
+    fn run_multi_repo_with_factory_collects_results_per_target() {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let base_config = LoopConfig {
+            iterations: 2,
+            prompt_inline: Some("task".to_string()),
+            ..LoopConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        let targets = [
+            make_target("/tmp/repo-a", Some("repo-a"), None),
+            make_target("/tmp/repo-b", Some("repo-b"), None),
+        ];
+
+        let factory = FakeAdapterFactory::success();
+        let results = run_multi_repo_with_factory(base_config, &targets, &factory);
+
+        assert_eq!(results.len(), 2, "should have one result per target");
+        assert_eq!(results[0].name, "repo-a");
+        assert_eq!(results[1].name, "repo-b");
+        assert_eq!(results[0].summary.successes, 2);
+        assert_eq!(results[1].summary.successes, 2);
+    }
+
+    #[test]
+    fn run_multi_repo_with_factory_applies_prompt_override() {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let base_config = LoopConfig {
+            iterations: 1,
+            prompt_inline: Some("base prompt".to_string()),
+            ..LoopConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        let targets = [make_target(
+            "/tmp/repo-a",
+            Some("repo-a"),
+            Some("custom prompt"),
+        )];
+
+        let factory = FakeAdapterFactory::success();
+        let results = run_multi_repo_with_factory(base_config, &targets, &factory);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary.successes, 1);
+    }
+
+    #[test]
+    fn run_multi_repo_with_factory_failure_counts() {
+        use crate::provider::tests::FakeAdapterFactory;
+
+        let base_config = LoopConfig {
+            iterations: 3,
+            prompt_inline: Some("task".to_string()),
+            ..LoopConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        let targets = [make_target("/tmp/repo-a", Some("repo-a"), None)];
+
+        let factory = FakeAdapterFactory::failure();
+        let results = run_multi_repo_with_factory(base_config, &targets, &factory);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].summary.failures, 3);
+        assert_eq!(results[0].summary.successes, 0);
     }
 
     #[test]
@@ -220,7 +320,9 @@ mod tests {
             iterations: 5,
             prompt_inline: Some("task".to_string()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let summary = LoopEngine::with_adapter(config, Box::new(FakeAdapter::success("out")))
             .with_shared_interrupt(Arc::clone(&flag))
             .run();
@@ -248,7 +350,9 @@ mod tests {
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-a".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let summary_a = LoopEngine::with_adapter(config_a, Box::new(FakeAdapter::success("out")))
             .with_shared_interrupt(Arc::clone(&interrupted))
             .run();
@@ -263,7 +367,9 @@ mod tests {
             prompt_inline: Some("task".to_string()),
             workspace_dir: Some("/tmp/repo-b".into()),
             ..LoopConfig::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let summary_b = LoopEngine::with_adapter(config_b, Box::new(FakeAdapter::success("out")))
             .with_shared_interrupt(Arc::clone(&interrupted))
             .run();

@@ -116,7 +116,7 @@ impl MultiPrStrategy<crate::pr_manager::GhPrLifecycle> {
 
 impl<L: PrLifecycleTriage + 'static> MultiPrStrategy<L> {
     /// Build a `MultiPrStrategy` with a custom triage lifecycle (for testing).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_triage(config: PrManagementConfig, triage: PrTriage<L>) -> Self {
         Self { config, triage }
     }
@@ -187,15 +187,6 @@ pub fn build_strategy(config: PrManagementConfig) -> Box<dyn PrStrategy> {
         PrMode::SinglePr => Box::new(SinglePrStrategy::new(config)),
         PrMode::MultiPr => Box::new(MultiPrStrategy::new(config)),
     }
-}
-
-/// Build a `MultiPrStrategy` with a custom triage lifecycle (for testing).
-#[allow(dead_code)]
-pub fn build_multi_pr_strategy_with_triage<L: PrLifecycleTriage + 'static>(
-    config: PrManagementConfig,
-    triage: PrTriage<L>,
-) -> Box<dyn PrStrategy> {
-    Box::new(MultiPrStrategy::with_triage(config, triage))
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

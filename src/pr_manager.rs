@@ -447,13 +447,13 @@ impl<L: PrLifecycle> PrManager<L> {
     }
 
     /// Build a PR title from an issue number and title.
-    fn pr_title(issue_number: u64, issue_title: &str) -> String {
+    fn pr_title(issue_number: u32, issue_title: &str) -> String {
         format!("[LOOPER] #{issue_number}: {issue_title}")
     }
 
     /// Build a PR body linking back to the originating issue and including an
     /// optional agent-provided summary.
-    fn pr_body(issue_number: u64, run_summary: Option<&str>) -> String {
+    fn pr_body(issue_number: u32, run_summary: Option<&str>) -> String {
         let mut body = format!(
             "Closes #{issue_number}\n\n\
              > This pull request was opened automatically by [Code Looper](https://github.com/jamesbrayton/code-looper).\n"
@@ -480,7 +480,7 @@ impl<L: PrLifecycle> PrManager<L> {
     pub fn handle_milestone(
         &self,
         branch: &str,
-        issue_number: u64,
+        issue_number: u32,
         issue_title: &str,
         agent_output: &str,
     ) -> Result<PrAction, PrError> {
@@ -1667,6 +1667,61 @@ mod tests {
             assert_eq!(
                 pr.number, 2,
                 "CONFLICTING (key 2) should be selected before None (key 3)"
+            );
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
+    fn least_conflicts_all_conflicting_preserves_insertion_order() {
+        // When all PRs share the same non-MERGEABLE state, stable sort should
+        // preserve insertion order — the first PR wins.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(10), make_pr(20), make_pr(30)];
+        for n in [10, 20, 30] {
+            mock.states.insert(
+                n,
+                make_state_with_mergeable(
+                    make_pr(n),
+                    PrTriageState::ChecksFailing,
+                    Some("CONFLICTING"),
+                ),
+            );
+        }
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(
+                pr.number, 10,
+                "equal-state PRs should preserve insertion order"
+            );
+        } else {
+            panic!("expected FixChecks action");
+        }
+    }
+
+    #[test]
+    fn least_conflicts_both_none_mergeable_preserves_insertion_order() {
+        // Two PRs both missing the `mergeable` field — insertion order wins.
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.open_prs = vec![make_pr(5), make_pr(6)];
+        for n in [5, 6] {
+            mock.states.insert(
+                n,
+                make_state_with_mergeable(make_pr(n), PrTriageState::ChecksFailing, None),
+            );
+        }
+        let mut cfg = default_config();
+        cfg.triage_priority = TriagePriority::LeastConflicts;
+        let triage = PrTriage::new(cfg, mock);
+
+        if let TriageAction::FixChecks { pr, .. } = triage.select_action() {
+            assert_eq!(
+                pr.number, 5,
+                "both-None PRs should preserve insertion order"
             );
         } else {
             panic!("expected FixChecks action");

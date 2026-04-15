@@ -195,7 +195,13 @@ struct GhUser {
 impl From<GhIssue> for Issue {
     fn from(gh: GhIssue) -> Self {
         Issue {
-            id: gh.id.unwrap_or(0),
+            id: gh.id.unwrap_or_else(|| {
+                tracing::warn!(
+                    issue_number = gh.number,
+                    "GitHub issue missing `id` field; defaulting to 0"
+                );
+                0
+            }),
             number: gh.number,
             title: gh.title,
             body: gh.body.unwrap_or_default(),

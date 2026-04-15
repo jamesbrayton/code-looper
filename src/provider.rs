@@ -63,6 +63,42 @@ pub trait ProviderAdapter: Send + Sync {
     fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError>;
 }
 
+// ── Adapter factory ──────────────────────────────────────────────────────────
+
+/// Factory trait for constructing provider adapters.
+///
+/// Production code uses [`DefaultAdapterFactory`]; tests inject a fake
+/// implementation that returns test doubles without spawning real processes.
+/// This follows the same trait-object pattern used by [`crate::issue_tracker::IssueTracker`]
+/// and [`crate::pr_manager::PrLifecycle`].
+pub trait AdapterFactory: Send + Sync {
+    /// Build a boxed [`ProviderAdapter`] for the given provider kind.
+    fn build(
+        &self,
+        kind: &ProviderKind,
+        stream_output: bool,
+        working_dir: Option<PathBuf>,
+        timeout_secs: Option<u64>,
+        extra_args: Vec<String>,
+    ) -> Box<dyn ProviderAdapter>;
+}
+
+/// Default factory that delegates to [`build_adapter`].
+pub struct DefaultAdapterFactory;
+
+impl AdapterFactory for DefaultAdapterFactory {
+    fn build(
+        &self,
+        kind: &ProviderKind,
+        stream_output: bool,
+        working_dir: Option<PathBuf>,
+        timeout_secs: Option<u64>,
+        extra_args: Vec<String>,
+    ) -> Box<dyn ProviderAdapter> {
+        build_adapter(kind, stream_output, working_dir, timeout_secs, extra_args)
+    }
+}
+
 // ── Adapter constructors ──────────────────────────────────────────────────────
 
 /// Build the concrete adapter for the given `ProviderKind`.
@@ -275,8 +311,20 @@ fn run_claude_streaming(
         source: e,
     })?;
 
-    let stdout_pipe = child.stdout.take().expect("stdout piped");
-    let stderr_pipe = child.stderr.take().expect("stderr piped");
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| LooperError::ProviderSpawn {
+            binary: "claude".to_string(),
+            source: std::io::Error::other("stdout pipe missing after spawn"),
+        })?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| LooperError::ProviderSpawn {
+            binary: "claude".to_string(),
+            source: std::io::Error::other("stderr pipe missing after spawn"),
+        })?;
 
     let child = Arc::new(std::sync::Mutex::new(child));
     let timeout_fired = Arc::new(AtomicBool::new(false));
@@ -442,6 +490,7 @@ impl ProviderAdapter for CopilotAdapter {
         let mut args: Vec<&str> = vec!["copilot", "suggest", "-t", "shell"];
         let extra: Vec<&str> = self.extra_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&extra);
+        args.push("--");
         args.push(prompt);
         run_provider_process(
             "gh",
@@ -472,6 +521,7 @@ impl ProviderAdapter for CodexAdapter {
         let mut args: Vec<&str> = Vec::new();
         let extra: Vec<&str> = self.extra_args.iter().map(String::as_str).collect();
         args.extend_from_slice(&extra);
+        args.push("--");
         args.push(prompt);
         run_provider_process(
             "codex",
@@ -579,8 +629,20 @@ fn run_provider_process(
             source: e,
         })?;
 
-        let stdout_pipe = child.stdout.take().expect("stdout piped");
-        let stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stdout_pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stdout pipe missing after spawn"),
+            })?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stderr pipe missing after spawn"),
+            })?;
 
         // Wrap child in Arc<Mutex> so the optional watchdog thread can kill it.
         let child = std::sync::Arc::new(std::sync::Mutex::new(child));
@@ -691,8 +753,20 @@ fn run_provider_process(
             source: e,
         })?;
 
-        let stdout_pipe = child.stdout.take().expect("stdout piped");
-        let stderr_pipe = child.stderr.take().expect("stderr piped");
+        let stdout_pipe = child
+            .stdout
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stdout pipe missing after spawn"),
+            })?;
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .ok_or_else(|| LooperError::ProviderSpawn {
+                binary: binary.to_string(),
+                source: std::io::Error::other("stderr pipe missing after spawn"),
+            })?;
 
         // Wrap child so the optional watchdog can kill it.
         let child = Arc::new(std::sync::Mutex::new(child));
@@ -788,6 +862,7 @@ fn run_provider_process(
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::time::Duration;
 
     /// A deterministic test adapter that returns either a fixed result or a
@@ -916,6 +991,75 @@ pub mod tests {
                 Ok(r) => Ok(r.clone()),
                 Err(e) => Err(LooperError::InvalidArgument(e.to_string())),
             }
+        }
+    }
+
+    /// A test adapter that records every prompt it receives, so tests can
+    /// assert on prompt content (e.g. rule injection).
+    pub struct CapturingAdapter {
+        pub name: String,
+        pub received_prompts: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl CapturingAdapter {
+        pub fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                received_prompts: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ProviderAdapter for CapturingAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn execute(&self, prompt: &str) -> Result<ExecutionResult, LooperError> {
+            self.received_prompts
+                .lock()
+                .expect("received_prompts mutex poisoned")
+                .push(prompt.to_string());
+            Ok(ExecutionResult {
+                exit_code: Some(0),
+                stdout: "ok".to_string(),
+                stderr: String::new(),
+                duration: Duration::from_millis(5),
+            })
+        }
+    }
+
+    /// A test adapter factory that always returns [`FakeAdapter`] instances,
+    /// ignoring the requested [`ProviderKind`].
+    ///
+    /// The `exit_code` controls the behaviour of every adapter built by this
+    /// factory: `0` means success, anything else means failure.
+    pub struct FakeAdapterFactory {
+        exit_code: i32,
+    }
+
+    impl FakeAdapterFactory {
+        /// Build a factory whose adapters always succeed (exit code 0).
+        pub fn success() -> Self {
+            Self { exit_code: 0 }
+        }
+
+        /// Build a factory whose adapters always fail (exit code 1).
+        pub fn failure() -> Self {
+            Self { exit_code: 1 }
+        }
+    }
+
+    impl super::AdapterFactory for FakeAdapterFactory {
+        fn build(
+            &self,
+            _kind: &ProviderKind,
+            _stream_output: bool,
+            _working_dir: Option<PathBuf>,
+            _timeout_secs: Option<u64>,
+            _extra_args: Vec<String>,
+        ) -> Box<dyn super::ProviderAdapter> {
+            Box::new(FakeAdapter::with_exit_code("fake", self.exit_code))
         }
     }
 

@@ -2,6 +2,8 @@
 
 This document describes how the loop engine selects workflow branches, the shippable-signal protocol, and PR lifecycle management.
 
+> **See also:** [Engine-Injected Prompts](prompt-injection.md) for the exact text of every prompt and comment template the engine generates.
+
 ## Workflow branch selection
 
 Each iteration the orchestration policy engine evaluates the current repository context and selects one of three workflow branches:

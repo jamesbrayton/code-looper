@@ -54,7 +54,7 @@ impl CheckResult {
 /// 1. An instruction file exists (`CLAUDE.md`, `AGENTS.md`, or
 ///    `.github/copilot-instructions.md`).
 /// 2. The instruction file contains the Code Looper section marker
-///    (`<!-- code-looper:begin -->`); skipped when check 1 fails.
+///    (`<!-- code-looper begin -->`); skipped when check 1 fails.
 /// 3. An MCP config file (`.mcp.json`) exists and contains a `"github"` key,
 ///    indicating the GitHub MCP server is configured.
 pub struct PrerequisiteChecker {
@@ -189,16 +189,20 @@ impl PrerequisiteChecker {
     }
 }
 
-/// Returns `true` when the MCP config JSON contains a top-level or nested
-/// `"github"` server key.
+/// Returns `true` when the MCP config JSON contains a `"github"` key
+/// under `"mcpServers"`.
 ///
-/// We deliberately avoid a full JSON parse dependency here: a simple string
-/// search for `"github"` as a JSON key is sufficient for this check.
-fn has_github_server(json: &str) -> bool {
-    // Look for `"github"` as a JSON object key (preceded/followed by typical
-    // JSON delimiters).  This avoids adding a json parsing dependency while
-    // being robust enough for the expected .mcp.json structure.
-    json.contains("\"github\"")
+/// Uses proper JSON parsing to avoid false positives from `"github"`
+/// appearing in string values or unrelated keys.
+pub fn has_github_server(json: &str) -> bool {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    v.get("mcpServers")
+        .and_then(|s| s.as_object())
+        .map(|o| o.contains_key("github"))
+        .unwrap_or(false)
 }
 
 /// Convenience helper — returns the path to use as the workspace dir.
@@ -209,7 +213,11 @@ pub fn resolve_workspace_dir(override_path: Option<&Path>) -> PathBuf {
     if let Some(p) = override_path {
         p.to_path_buf()
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        std::env::current_dir().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Could not determine current working directory; falling back to '.'");
+            eprintln!("[loop] WARNING: could not determine current working directory ({e}); using '.'");
+            PathBuf::from(".")
+        })
     }
 }
 

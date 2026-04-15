@@ -1,11 +1,14 @@
 use crate::branch::BranchManager;
-use crate::config::{CommentCadence, IssueTrackingMode, LoopConfig, PrMode};
+use crate::config;
+use crate::config::{
+    CommentCadence, IssueTrackingMode, LoopConfig, PrMode, PromptInput, ValidatedLoopConfig,
+};
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
 use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrManager, TriageAction};
 use crate::pr_strategy::{build_strategy, PrStrategy};
-use crate::provider::{build_adapter, ProviderAdapter};
+use crate::provider::{AdapterFactory, DefaultAdapterFactory, ProviderAdapter};
 use crate::telemetry::{
     resolve_operator, unix_now, IterationOutcome, IterationRecord, RetryPolicy, RunArtifacts,
     RunManifest,
@@ -52,6 +55,8 @@ pub struct SessionSummary {
     /// (e.g. PR blocked on human review, no actionable PR found).
     pub skipped_decisions: u64,
     pub termination_reason: Option<TerminationReason>,
+    /// Whether the `on_complete` hook exited with non-zero status.
+    pub hook_failed: bool,
 }
 
 impl SessionSummary {
@@ -79,7 +84,9 @@ impl SessionSummary {
     }
 }
 
-/// Construct the appropriate `IssueTracker` from the resolved config.
+/// Maximum backoff delay in milliseconds (~10 minutes).
+const MAX_BACKOFF_MS: f64 = 600_000.0;
+
 /// Compute the delay in milliseconds for a given retry attempt using
 /// exponential backoff: `base_ms * multiplier^attempt` (attempt is 0-indexed).
 ///
@@ -89,10 +96,10 @@ fn compute_backoff_ms(base_ms: u64, multiplier: f64, attempt: u32) -> u64 {
         return base_ms;
     }
     let scaled = (base_ms as f64) * multiplier.powi(attempt as i32);
-    // Cap at ~10 minutes to avoid absurdly long sleeps on many retries.
-    scaled.min(600_000.0) as u64
+    scaled.min(MAX_BACKOFF_MS) as u64
 }
 
+/// Construct the appropriate `IssueTracker` from the resolved config.
 fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
     match config.issue_tracking.mode {
         IssueTrackingMode::Github => {
@@ -101,13 +108,23 @@ fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
                 .repo_owner
                 .clone()
                 .or_else(|| config.orchestration.repo_owner.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    unreachable!(
+                        "repo_owner should be set after validation — \
+                         this is a bug in validate()"
+                    )
+                });
             let repo = config
                 .issue_tracking
                 .repo_name
                 .clone()
                 .or_else(|| config.orchestration.repo_name.clone())
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    unreachable!(
+                        "repo_name should be set after validation — \
+                         this is a bug in validate()"
+                    )
+                });
             Box::new(GitHubIssueTracker::new(owner, repo))
         }
         IssueTrackingMode::Local => {
@@ -123,7 +140,7 @@ fn build_tracker(config: &LoopConfig) -> Box<dyn IssueTracker> {
 
 /// Drives the main iteration loop.
 pub struct LoopEngine {
-    config: LoopConfig,
+    config: ValidatedLoopConfig,
     adapter: Box<dyn ProviderAdapter>,
     /// Optional orchestration policy engine (present when orchestration is enabled).
     policy_engine: Option<PolicyEngine>,
@@ -144,8 +161,19 @@ pub struct LoopEngine {
 }
 
 impl LoopEngine {
-    pub fn new(config: LoopConfig, guard: PolicyGuard) -> Self {
-        let adapter = build_adapter(
+    pub fn new(config: ValidatedLoopConfig, guard: PolicyGuard) -> Self {
+        Self::with_factory(config, guard, &DefaultAdapterFactory)
+    }
+
+    /// Like [`Self::new`] but uses the supplied [`AdapterFactory`] to build the
+    /// provider adapter.  This is the primary injection point for tests that
+    /// need to run the real `LoopEngine` logic with a fake adapter.
+    pub fn with_factory(
+        config: ValidatedLoopConfig,
+        guard: PolicyGuard,
+        factory: &dyn AdapterFactory,
+    ) -> Self {
+        let adapter = factory.build(
             &config.provider,
             config.telemetry.stream_output,
             config.workspace_dir.clone(),
@@ -153,8 +181,20 @@ impl LoopEngine {
             config.provider_extra_args.clone(),
         );
         let policy_engine = if config.orchestration.enabled {
-            let owner = config.orchestration.repo_owner.clone().unwrap_or_default();
-            let repo = config.orchestration.repo_name.clone().unwrap_or_default();
+            let owner = config.orchestration.repo_owner.clone().unwrap_or_else(|| {
+                warn!(
+                    "PolicyEngine constructed with no repo_owner — \
+                     orchestration context resolution will fail"
+                );
+                String::new()
+            });
+            let repo = config.orchestration.repo_name.clone().unwrap_or_else(|| {
+                warn!(
+                    "PolicyEngine constructed with no repo_name — \
+                     orchestration context resolution will fail"
+                );
+                String::new()
+            });
             let rules = config.orchestration.policies.clone();
             Some(PolicyEngine::with_rules(
                 Box::new(GhCliContextResolver { owner, repo }),
@@ -171,7 +211,11 @@ impl LoopEngine {
             None
         };
         let branch_manager = if config.pr_management.mode == PrMode::SinglePr {
-            Some(BranchManager::new(config.pr_management.clone()))
+            let mut bm = BranchManager::new(config.pr_management.clone());
+            if let Some(ref dir) = config.workspace_dir {
+                bm = bm.with_work_dir(dir.clone());
+            }
+            Some(bm)
         } else {
             None
         };
@@ -199,8 +243,8 @@ impl LoopEngine {
     }
 
     /// Constructor that accepts a custom adapter; uses a default (safe) policy guard.
-    #[allow(dead_code)]
-    pub fn with_adapter(config: LoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
+    #[cfg(test)]
+    pub fn with_adapter(config: ValidatedLoopConfig, adapter: Box<dyn ProviderAdapter>) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
@@ -221,7 +265,7 @@ impl LoopEngine {
     /// Constructor that accepts a custom adapter and issue tracker (useful for testing).
     #[cfg(test)]
     pub fn with_adapter_and_tracker(
-        config: LoopConfig,
+        config: ValidatedLoopConfig,
         adapter: Box<dyn ProviderAdapter>,
         tracker: Box<dyn IssueTracker>,
     ) -> Self {
@@ -242,9 +286,9 @@ impl LoopEngine {
     }
 
     /// Constructor that accepts a custom adapter and policy engine (useful for testing).
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_adapter_and_policy(
-        config: LoopConfig,
+        config: ValidatedLoopConfig,
         adapter: Box<dyn ProviderAdapter>,
         policy_engine: PolicyEngine,
     ) -> Self {
@@ -268,7 +312,7 @@ impl LoopEngine {
     /// Constructor that accepts a custom adapter and PR strategy (useful for testing).
     #[cfg(test)]
     pub fn with_adapter_and_pr_strategy(
-        config: LoopConfig,
+        config: ValidatedLoopConfig,
         adapter: Box<dyn ProviderAdapter>,
         pr_strategy: Box<dyn PrStrategy>,
     ) -> Self {
@@ -297,23 +341,28 @@ impl LoopEngine {
             flag.store(true, Ordering::SeqCst);
             eprintln!("\nInterrupt received — finishing current iteration and stopping…");
         })
-        .unwrap_or_else(|e| warn!("Failed to install Ctrl+C handler: {e}"));
+        .unwrap_or_else(|e| {
+            warn!("Failed to install Ctrl+C handler: {e}");
+            eprintln!(
+                "[loop] WARNING: Ctrl+C handler could not be installed ({e}); \
+                 the loop cannot be interrupted gracefully."
+            );
+        });
         Arc::clone(&self.interrupted)
     }
 
-    /// Resolve the prompt string from the config, or return a default.
+    /// Resolve the prompt string from the validated prompt source.
     fn resolve_prompt(&self) -> anyhow::Result<String> {
-        if let Some(inline) = &self.config.prompt_inline {
-            return Ok(inline.clone());
+        match &self.config.prompt_source() {
+            PromptInput::Inline(s) => Ok(s.clone()),
+            PromptInput::File(path) => {
+                let content = std::fs::read_to_string(path).map_err(|e| {
+                    anyhow::anyhow!("failed to read prompt file {}: {e}", path.display())
+                })?;
+                Ok(content)
+            }
+            PromptInput::Absent => Ok(String::new()),
         }
-        if let Some(path) = &self.config.prompt_file {
-            let content = std::fs::read_to_string(path).map_err(|e| {
-                anyhow::anyhow!("failed to read prompt file {}: {e}", path.display())
-            })?;
-            return Ok(content);
-        }
-        // No prompt configured — use empty string; provider decides behaviour.
-        Ok(String::new())
     }
 
     /// Post a comment to the configured issue, logging a warning on failure.
@@ -354,19 +403,10 @@ impl LoopEngine {
             }
         };
 
-        let infinite = self.config.iterations == -1;
-        let max = if infinite {
-            u64::MAX
-        } else {
-            self.config.iterations as u64
-        };
-
-        let prompt_source = if self.config.prompt_file.is_some() {
-            crate::telemetry::PromptSource::File
-        } else if self.config.prompt_inline.is_some() {
-            crate::telemetry::PromptSource::Inline
-        } else {
-            crate::telemetry::PromptSource::None
+        let prompt_source = match &self.config.prompt_source() {
+            PromptInput::File(_) => crate::telemetry::PromptSource::File,
+            PromptInput::Inline(_) => crate::telemetry::PromptSource::Inline,
+            PromptInput::Absent => crate::telemetry::PromptSource::Absent,
         };
 
         let mut summary = SessionSummary::default();
@@ -398,14 +438,26 @@ impl LoopEngine {
                     .repo_owner
                     .as_deref()
                     .or(self.config.orchestration.repo_owner.as_deref())
-                    .unwrap_or("(unknown)");
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "repo_owner is not set for GitHub issue tracking — \
+                             downstream operations may target the wrong repository"
+                        );
+                        "(unknown)"
+                    });
                 let repo = self
                     .config
                     .issue_tracking
                     .repo_name
                     .as_deref()
                     .or(self.config.orchestration.repo_name.as_deref())
-                    .unwrap_or("(unknown)");
+                    .unwrap_or_else(|| {
+                        warn!(
+                            "repo_name is not set for GitHub issue tracking — \
+                             downstream operations may target the wrong repository"
+                        );
+                        "(unknown)"
+                    });
                 info!(
                     issue_tracking_mode = "github",
                     repo = %format!("{owner}/{repo}"),
@@ -426,22 +478,14 @@ impl LoopEngine {
         info!(
             provider = self.adapter.name(),
             run_id = %artifacts.run_id,
-            iterations = if infinite {
-                "infinite".to_string()
-            } else {
-                max.to_string()
-            },
+            iterations = %self.config.iteration_count(),
             prompt_source = %prompt_source,
             "Loop starting"
         );
 
         // Post run-start comment when a linked issue is configured.
         if self.config.issue_tracking.comment_cadence != CommentCadence::OffEngine {
-            let iter_display = if infinite {
-                "infinite".to_string()
-            } else {
-                max.to_string()
-            };
+            let iter_display = self.config.iteration_count().to_string();
             self.post_comment(&format!(
                 "**Loop run started** — run-id: `{run_id}`, provider: `{provider}`, \
                  iterations: `{iter_display}`, prompt-source: `{prompt_source}`",
@@ -453,12 +497,18 @@ impl LoopEngine {
         // Single-PR: ensure the feature branch exists before iterations start.
         // The derived branch name is kept for use in the shippable-signal handler.
         let single_pr_branch: String = if let Some(ref bm) = self.branch_manager {
-            let issue_number = self
-                .config
-                .issue_tracking
-                .comment_issue_number
-                .map(|n| n as u64)
-                .unwrap_or(0);
+            let issue_number = match self.config.issue_tracking.comment_issue_number {
+                Some(n) => n,
+                None => {
+                    let msg = "single-pr mode requires issue_tracking.comment_issue_number \
+                               to be set";
+                    error!("{msg}");
+                    eprintln!("[loop] ERROR: {msg}");
+                    summary.termination_reason =
+                        Some(TerminationReason::ProviderError(msg.to_string()));
+                    return summary;
+                }
+            };
             match bm.ensure_branch(issue_number, "") {
                 Ok(branch) => {
                     info!(branch = %branch, "single-pr: checked out feature branch");
@@ -470,8 +520,16 @@ impl LoopEngine {
                         "single-pr: could not ensure feature branch; will use current branch"
                     );
                     // Fall back to whatever branch the working directory is on.
-                    crate::branch::current_branch()
-                        .unwrap_or_else(|_| bm.branch_name(issue_number, ""))
+                    crate::branch::current_branch().unwrap_or_else(|e| {
+                        let fallback = bm.branch_name(issue_number, "");
+                        warn!(
+                            error = %e,
+                            fallback_branch = %fallback,
+                            "current_branch() failed; fabricating branch name — \
+                             PR creation may fail"
+                        );
+                        fallback
+                    })
                 }
             }
         } else {
@@ -481,7 +539,14 @@ impl LoopEngine {
         // Tracks the body of the most recently posted failure comment for deduplication.
         let mut last_failure_comment: Option<String> = None;
 
-        for i in 1..=max {
+        let mut i: u64 = 0;
+        loop {
+            i += 1;
+            // Check whether we've exceeded the configured iteration count.
+            // is_done uses 0-based indexing, so pass (i - 1).
+            if self.config.iteration_count().is_done(i - 1) {
+                break;
+            }
             if self.interrupted.load(Ordering::SeqCst) {
                 summary.termination_reason = Some(TerminationReason::Interrupted);
                 break;
@@ -513,7 +578,7 @@ impl LoopEngine {
                         let merge_result = Command::new("gh")
                             .args(["pr", "merge", &pr.number.to_string(), "--merge"])
                             .output();
-                        match merge_result {
+                        let (merge_outcome, merge_stderr) = match merge_result {
                             Ok(out) if out.status.success() => {
                                 info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
                                 // Attempt post-merge **remote-only** branch
@@ -527,7 +592,11 @@ impl LoopEngine {
                                 // touches the remote.  Failures are
                                 // non-fatal (PR is already merged).
                                 if let Some(head_ref) = pr.head_ref.as_deref() {
-                                    let bm = BranchManager::new(self.config.pr_management.clone());
+                                    let mut bm =
+                                        BranchManager::new(self.config.pr_management.clone());
+                                    if let Some(ref dir) = self.config.workspace_dir {
+                                        bm = bm.with_work_dir(dir.clone());
+                                    }
                                     match bm.cleanup_merged_remote_branch(head_ref) {
                                         Ok(()) => info!(
                                             iteration = i,
@@ -549,30 +618,49 @@ impl LoopEngine {
                                          skipping remote branch cleanup"
                                     );
                                 }
+                                (IterationOutcome::Success, None)
                             }
                             Ok(out) => {
-                                let stderr = String::from_utf8_lossy(&out.stderr);
+                                let stderr = crate::security::redact_secrets(
+                                    &String::from_utf8_lossy(&out.stderr),
+                                );
                                 warn!(iteration = i, pr = pr.number, stderr = %stderr, "multi-pr: merge failed");
+                                (
+                                    IterationOutcome::NonZeroExit {
+                                        exit_code: out.status.code().unwrap_or(-1),
+                                    },
+                                    Some(stderr),
+                                )
                             }
                             Err(e) => {
                                 warn!(iteration = i, pr = pr.number, error = %e, "multi-pr: failed to spawn gh for merge");
+                                (
+                                    IterationOutcome::SpawnFailure {
+                                        message: e.to_string(),
+                                    },
+                                    None,
+                                )
                             }
-                        }
-                        // Record as a success iteration (merge happened, no agent needed).
+                        };
+                        let merge_succeeded = matches!(merge_outcome, IterationOutcome::Success);
                         iteration_records.push(IterationRecord {
                             iteration: i,
                             provider: self.config.provider.clone(),
                             prompt_source: crate::telemetry::PromptSource::TriageMerge,
                             workflow_branch: None,
-                            outcome: IterationOutcome::Success,
+                            outcome: merge_outcome,
                             duration_ms: iter_start.elapsed().as_millis(),
                             retries: 0,
-                            stderr_excerpt: None,
+                            stderr_excerpt: merge_stderr,
                             transcript_path: None,
                             started_at: iter_started_at,
                         });
                         summary.iterations_run += 1;
-                        summary.successes += 1;
+                        if merge_succeeded {
+                            summary.successes += 1;
+                        } else {
+                            summary.failures += 1;
+                        }
                         continue;
                     }
                     TriageAction::BlockedOnHumanReview { pr } => {
@@ -589,60 +677,71 @@ impl LoopEngine {
             }
 
             // If orchestration is enabled, select a workflow branch and use its prompt.
-            let (raw_prompt, workflow_branch) = if let Some(ref engine) = self.policy_engine {
-                match engine.select_branch() {
-                    Ok(BranchSelection {
-                        branch,
-                        prompt_override,
-                        ..
-                    }) => {
-                        let branch_name = branch.to_string();
-                        info!(
-                            iteration = i,
-                            provider = self.adapter.name(),
-                            workflow_branch = %branch_name,
-                            "Iteration start"
-                        );
-                        let p =
-                            prompt_override.unwrap_or_else(|| branch.default_prompt().to_string());
-                        (p, Some(branch_name))
+            let (raw_prompt, workflow_branch, workflow_policy) =
+                if let Some(ref engine) = self.policy_engine {
+                    match engine.select_branch() {
+                        Ok(BranchSelection {
+                            branch,
+                            prompt_override,
+                            ..
+                        }) => {
+                            let branch_name = branch.to_string();
+                            let policy_wf = branch.to_policy_workflow();
+                            info!(
+                                iteration = i,
+                                provider = self.adapter.name(),
+                                workflow_branch = %branch_name,
+                                "Iteration start"
+                            );
+                            let p = prompt_override
+                                .unwrap_or_else(|| branch.default_prompt().to_string());
+                            (p, Some(branch_name), Some(policy_wf))
+                        }
+                        Err(e) => {
+                            error!(iteration = i, "Policy engine failed: {e}");
+                            let outcome = IterationOutcome::PolicyGuardBlock {
+                                message: e.to_string(),
+                            };
+                            iteration_records.push(IterationRecord {
+                                iteration: i,
+                                provider: self.config.provider.clone(),
+                                prompt_source: prompt_source.clone(),
+                                workflow_branch: None,
+                                outcome: outcome.clone(),
+                                duration_ms: iter_start.elapsed().as_millis(),
+                                retries: 0,
+                                stderr_excerpt: Some(e.to_string()),
+                                transcript_path: None,
+                                started_at: iter_started_at,
+                            });
+                            summary.iterations_run += 1;
+                            summary.failures += 1;
+                            summary.termination_reason =
+                                Some(TerminationReason::ProviderError(e.to_string()));
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        error!(iteration = i, "Policy engine failed: {e}");
-                        let outcome = IterationOutcome::PolicyGuardBlock {
-                            message: e.to_string(),
-                        };
-                        iteration_records.push(IterationRecord {
-                            iteration: i,
-                            provider: self.config.provider.clone(),
-                            prompt_source: prompt_source.clone(),
-                            workflow_branch: None,
-                            outcome: outcome.clone(),
-                            duration_ms: iter_start.elapsed().as_millis(),
-                            retries: 0,
-                            stderr_excerpt: Some(e.to_string()),
-                            transcript_path: None,
-                            started_at: iter_started_at,
-                        });
-                        summary.iterations_run += 1;
-                        summary.failures += 1;
-                        summary.termination_reason =
-                            Some(TerminationReason::ProviderError(e.to_string()));
-                        break;
-                    }
-                }
-            } else {
-                info!(
-                    iteration = i,
-                    provider = self.adapter.name(),
-                    "Iteration start"
-                );
-                (prompt.clone(), None)
-            };
+                } else {
+                    info!(
+                        iteration = i,
+                        provider = self.adapter.name(),
+                        "Iteration start"
+                    );
+                    (prompt.clone(), None, None)
+                };
 
             // Apply prompt override from the PR triage plan (multi-PR mode only).
             let raw_prompt = if let Some(ref override_prompt) = pr_plan.prompt_override {
                 override_prompt.clone()
+            } else {
+                raw_prompt
+            };
+
+            // Prepend user rules (global + workflow-specific) to the prompt.
+            let raw_prompt = if let Some(rules_preamble) =
+                config::load_rules_for_branch(&self.config.rules, workflow_policy.as_ref())
+            {
+                format!("{rules_preamble}\n\n{raw_prompt}")
             } else {
                 raw_prompt
             };
@@ -862,20 +961,33 @@ impl LoopEngine {
                     let branch = if !single_pr_branch.is_empty() {
                         single_pr_branch.clone()
                     } else {
-                        crate::branch::current_branch().unwrap_or_else(|_| {
-                            self.config
+                        crate::branch::current_branch().unwrap_or_else(|e| {
+                            let fallback = self
+                                .config
                                 .pr_management
                                 .branch_prefix
                                 .trim_end_matches('/')
-                                .to_string()
+                                .to_string();
+                            warn!(
+                                error = %e,
+                                fallback_branch = %fallback,
+                                "current_branch() failed; using branch prefix as \
+                                 fallback — PR creation may fail"
+                            );
+                            fallback
                         })
                     };
                     let issue_number = self
                         .config
                         .issue_tracking
                         .comment_issue_number
-                        .map(|n| n as u64)
-                        .unwrap_or(0);
+                        .unwrap_or_else(|| {
+                            warn!(
+                                "comment_issue_number is not set; using 0 — \
+                                 PR title may reference issue #0"
+                            );
+                            0
+                        });
                     // Push the feature branch to origin so `gh pr create` can find it.
                     if let Some(ref bm) = self.branch_manager {
                         if let Err(e) = bm.push_branch(&branch) {
@@ -1162,7 +1274,7 @@ impl LoopEngine {
             started_at: run_started_at,
             ended_at: Some(run_ended_at),
             provider: self.config.provider.clone(),
-            iterations_requested: self.config.iterations,
+            iterations_requested: self.config.iteration_count().as_raw_i64(),
             termination_reason: summary.termination_reason.clone(),
             skipped_decisions: summary.skipped_decisions,
             run_by: resolve_operator(),
@@ -1194,15 +1306,20 @@ impl LoopEngine {
                     if status.success() {
                         info!(command = %cmd, "on_complete hook succeeded");
                     } else {
+                        let code = status.code().unwrap_or(-1);
                         warn!(
                             command = %cmd,
-                            exit_code = status.code().unwrap_or(-1),
+                            exit_code = code,
                             "on_complete hook exited with non-zero status"
                         );
+                        eprintln!("[loop] WARNING: on_complete hook exited with code {code}");
+                        summary.hook_failed = true;
                     }
                 }
                 Err(e) => {
                     error!(command = %cmd, error = %e, "Failed to spawn on_complete hook");
+                    eprintln!("[loop] ERROR: Failed to spawn on_complete hook: {e}");
+                    summary.hook_failed = true;
                 }
             }
         }
@@ -1217,7 +1334,7 @@ impl LoopEngine {
 mod tests {
     use super::*;
     use crate::config::{LoopConfig, Provider};
-    use crate::provider::tests::FakeAdapter;
+    use crate::provider::tests::{CapturingAdapter, FakeAdapter};
 
     // ── compute_backoff_ms ────────────────────────────────────────────────────
 
@@ -1243,13 +1360,15 @@ mod tests {
         assert_eq!(capped, 600_000);
     }
 
-    fn config_with_iterations(n: i64) -> LoopConfig {
+    fn config_with_iterations(n: i64) -> ValidatedLoopConfig {
         LoopConfig {
             iterations: n,
             provider: Provider::Claude,
             prompt_inline: Some("test".to_string()),
             ..Default::default()
         }
+        .validate()
+        .unwrap()
     }
 
     #[test]
@@ -1348,7 +1467,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             stop_on_failure: true,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::failure("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1368,7 +1489,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             stop_on_failure: false,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::failure("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1409,7 +1532,9 @@ mod tests {
             max_retries: 2,
             retry_backoff_ms: 0, // no sleep in tests
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(AlwaysFailAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
@@ -1451,7 +1576,9 @@ mod tests {
             max_retries: 3,
             retry_backoff_ms: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let calls = Arc::new(AtomicU32::new(0));
         let adapter = FlipFlopAdapter { calls };
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
@@ -1471,7 +1598,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             on_complete: Some("true".to_string()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::success("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1479,6 +1608,32 @@ mod tests {
         assert_eq!(
             summary.termination_reason,
             Some(TerminationReason::Completed)
+        );
+        assert!(!summary.hook_failed);
+    }
+
+    #[test]
+    fn on_complete_hook_failure_sets_hook_failed() {
+        // Use a shell command that always fails (exit 1).
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            on_complete: Some("false".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let adapter = FakeAdapter::success("fake");
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Completed)
+        );
+        assert!(
+            summary.hook_failed,
+            "hook_failed should be true when on_complete exits non-zero"
         );
     }
 
@@ -1490,7 +1645,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             max_retries: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::failure("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1512,7 +1669,9 @@ mod tests {
             retry_backoff_ms: 0,
             non_retryable_exit_codes: vec![2],
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::with_exit_code("fake", 2);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1538,7 +1697,9 @@ mod tests {
             retry_backoff_ms: 0,
             non_retryable_exit_codes: vec![2],
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::with_exit_code("fake", 1);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1559,7 +1720,9 @@ mod tests {
             retry_backoff_ms: 0,
             non_retryable_exit_codes: vec![],
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::with_exit_code("fake", 99);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1582,7 +1745,9 @@ mod tests {
             max_retries: 2,
             retry_backoff_ms: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         // First call: exit 1 (transient) → retried. Second call: exit 0 → success.
         let adapter = FakeAdapter::sequence("fake", vec![1, 0]);
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
@@ -1605,7 +1770,9 @@ mod tests {
             provider: Provider::Claude,
             prompt_inline: Some("hello world".to_string()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::success("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1625,7 +1792,9 @@ mod tests {
             provider: Provider::Claude,
             prompt_file: Some(f.path().to_path_buf()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let adapter = FakeAdapter::success("fake");
         let engine = LoopEngine::with_adapter(config, Box::new(adapter));
         let summary = engine.run();
@@ -1648,7 +1817,9 @@ mod tests {
                 ..OrchestrationConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let resolver = StubContextResolver {
             context: RepoContext {
                 open_pr_count: 0,
@@ -1690,7 +1861,9 @@ mod tests {
                 ..OrchestrationConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_policy(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1712,7 +1885,7 @@ mod tests {
     use crate::issue_tracker::{MockCall, MockIssueTracker};
     use std::sync::Arc;
 
-    fn github_tracker_config(issue: u32, cadence: CommentCadence) -> LoopConfig {
+    fn github_tracker_config(issue: u32, cadence: CommentCadence) -> ValidatedLoopConfig {
         LoopConfig {
             iterations: 2,
             provider: Provider::Claude,
@@ -1727,6 +1900,8 @@ mod tests {
             },
             ..Default::default()
         }
+        .validate()
+        .unwrap()
     }
 
     #[test]
@@ -1867,7 +2042,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1904,7 +2081,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1935,7 +2114,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -1970,7 +2151,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2015,7 +2198,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2048,7 +2233,9 @@ mod tests {
                 ..Default::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_tracker(
             config,
             Box::new(FakeAdapter::failure("fake")),
@@ -2091,8 +2278,14 @@ mod tests {
                 branch_prefix: "loop/".to_string(),
                 ..PrManagementConfig::default()
             },
+            issue_tracking: crate::config::IssueTrackingConfig {
+                comment_issue_number: Some(42),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         // Build a production engine; we check the branch_manager field directly.
         // We can't run the loop (it would spawn 'claude'), so we just verify
         // construction succeeds and branch_manager is present.
@@ -2130,7 +2323,9 @@ mod tests {
                 ..PrManagementConfig::default()
             },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let guard =
             crate::policy_guard::PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let engine = LoopEngine::new(config, guard);
@@ -2175,8 +2370,16 @@ mod tests {
                 mode: PrMode::MultiPr,
                 ..PrManagementConfig::default()
             },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_pr_strategy(
             config,
             Box::new(FakeAdapter::success("fake")),
@@ -2202,7 +2405,9 @@ mod tests {
             provider: Provider::Claude,
             prompt_inline: Some("test".to_string()),
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 3);
@@ -2228,7 +2433,9 @@ mod tests {
             max_retries: 2,
             retry_backoff_ms: 0,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
@@ -2246,7 +2453,9 @@ mod tests {
             prompt_inline: Some("test".to_string()),
             stop_on_failure: true,
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter(config, Box::new(TimeoutAdapter));
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1, "should stop after first timeout");
@@ -2258,11 +2467,9 @@ mod tests {
 
     // ── Multi-PR merge path ───────────────────────────────────────────────────
 
-    /// Verify that `TriageAction::Merge` is handled without panicking and the
-    /// iteration is always recorded as a success (regardless of whether `gh pr
-    /// merge` succeeds in the test environment — no real GitHub connection is
-    /// available).  Post-merge branch cleanup is attempted but the failure is
-    /// non-fatal; the summary must still show one success.
+    /// Verify that `TriageAction::Merge` handles a failed `gh pr merge`
+    /// without panicking and records the iteration as a failure.  Post-merge
+    /// branch cleanup is attempted but the failure is non-fatal.
     #[test]
     fn merge_triage_action_is_handled_gracefully() {
         use crate::config::{PrManagementConfig, PrMode};
@@ -2295,18 +2502,26 @@ mod tests {
                 mode: PrMode::MultiPr,
                 ..PrManagementConfig::default()
             },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_pr_strategy(
             config,
             Box::new(FakeAdapter::success("fake")),
             Box::new(MergeStrategy),
         );
         // `gh pr merge` will fail (no real GitHub), but the engine must not
-        // panic and must record the iteration as a success.
+        // panic.  The failed merge is correctly recorded as a failure (#126).
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
-        assert_eq!(summary.successes, 1);
+        assert_eq!(summary.failures, 1);
     }
 
     /// When `head_ref` is empty the cleanup branch is skipped entirely.
@@ -2342,15 +2557,80 @@ mod tests {
                 mode: PrMode::MultiPr,
                 ..PrManagementConfig::default()
             },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
             ..Default::default()
-        };
+        }
+        .validate()
+        .unwrap();
         let engine = LoopEngine::with_adapter_and_pr_strategy(
             config,
             Box::new(FakeAdapter::success("fake")),
             Box::new(MergeNoRefStrategy),
         );
+        // `gh pr merge` fails (no real GitHub) — correctly recorded as failure (#126).
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+    }
+
+    // ── Rules injection into adapter prompt (#166) ───────────────────────────
+
+    #[test]
+    fn rules_are_prepended_to_adapter_prompt() {
+        use crate::config::RulesConfig;
+        use std::io::Write;
+
+        // Create a temporary rule file with known content.
+        let dir = tempfile::tempdir().unwrap();
+        let rule_path = dir.path().join("global.md");
+        {
+            let mut f = std::fs::File::create(&rule_path).unwrap();
+            writeln!(f, "RULE: always use snake_case").unwrap();
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("do the thing".to_string()),
+            rules: RulesConfig {
+                global: Some(rule_path),
+                workflows: Default::default(),
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+
+        // Clear the rules cache so the test starts fresh.
+        crate::config::clear_rules_cache();
+
+        let adapter = CapturingAdapter::new("fake");
+        let prompts = std::sync::Arc::clone(&adapter.received_prompts);
+        let engine = LoopEngine::with_adapter(config, Box::new(adapter));
+        let summary = engine.run();
+
+        assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.successes, 1);
+
+        let captured = prompts.lock().unwrap();
+        assert_eq!(captured.len(), 1, "adapter should have been called once");
+        assert!(
+            captured[0].contains("RULE: always use snake_case"),
+            "adapter prompt should contain rule content, got: {}",
+            captured[0]
+        );
+        assert!(
+            captured[0].contains("do the thing"),
+            "adapter prompt should contain the original prompt, got: {}",
+            captured[0]
+        );
+
+        // Clean up cache.
+        crate::config::clear_rules_cache();
     }
 }

@@ -10,10 +10,32 @@
 //! | Instruction file lacks a Code Looper section | Append a delimited section |
 //! | `.mcp.json` missing | Create a minimal stub |
 //! | `.mcp.json` lacks a `"github"` key | Merge the entry into the existing file |
+//! | `.gitignore` missing | Create with `.code-looper/runs/` entry |
+//! | `.gitignore` lacks `.code-looper/runs/` | Append the entry |
 //!
 //! All changes are idempotent.  In `--dry-run` mode nothing is written.
 
+use crate::workspace::has_github_server;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+/// Atomically write `contents` to `path` using a temp file + rename.
+///
+/// The file is first written to a `NamedTempFile` in the same directory as
+/// `path`, then atomically renamed via `persist`.  This prevents partial
+/// writes from power loss or process kills.
+fn atomic_write(path: &Path, contents: &str) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let existing_perms = std::fs::metadata(path).ok().map(|m| m.permissions());
+    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
+    tmp.write_all(contents.as_bytes())?;
+    if let Some(perms) = existing_perms {
+        tmp.as_file().set_permissions(perms)?;
+    }
+    tmp.as_file().sync_all()?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
 
 pub const SECTION_BEGIN: &str = "<!-- code-looper begin -->";
 pub const SECTION_END: &str = "<!-- code-looper end -->";
@@ -82,11 +104,7 @@ impl std::fmt::Display for BootstrapAction {
         match self {
             BootstrapAction::Created(p) => write!(f, "[bootstrap] {}: created", p.display()),
             BootstrapAction::Appended(p) => {
-                write!(
-                    f,
-                    "[bootstrap] {}: appended Code Looper section",
-                    p.display()
-                )
+                write!(f, "[bootstrap] {}: appended entry", p.display())
             }
             BootstrapAction::MergedJson(p) => {
                 write!(
@@ -112,6 +130,7 @@ pub fn run_bootstrap(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<Vec<
     Ok(vec![
         bootstrap_instruction_file(workspace_dir, dry_run)?,
         bootstrap_mcp_config(workspace_dir, dry_run)?,
+        bootstrap_gitignore(workspace_dir, dry_run)?,
     ])
 }
 
@@ -138,9 +157,9 @@ fn bootstrap_instruction_file(
             // No instruction file at all → create CLAUDE.md.
             let path = workspace_dir.join("CLAUDE.md");
             if !dry_run {
-                std::fs::write(
+                atomic_write(
                     &path,
-                    format!("# Project Instructions\n\n{CLAUDE_MD_SECTION}\n"),
+                    &format!("# Project Instructions\n\n{CLAUDE_MD_SECTION}\n"),
                 )
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
             }
@@ -162,7 +181,7 @@ fn bootstrap_instruction_file(
                         "\n\n"
                     };
                     let updated = format!("{contents}{separator}{CLAUDE_MD_SECTION}\n");
-                    std::fs::write(&path, updated)
+                    atomic_write(&path, &updated)
                         .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
                 }
                 Ok(BootstrapAction::Appended(path))
@@ -178,7 +197,7 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
 
     if !path.is_file() {
         if !dry_run {
-            std::fs::write(&path, MCP_STUB)
+            atomic_write(&path, MCP_STUB)
                 .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
         }
         return Ok(BootstrapAction::Created(path));
@@ -196,18 +215,39 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
         .ok_or_else(|| anyhow::anyhow!("could not parse {} as a JSON object", path.display()))?;
 
     if !dry_run {
-        std::fs::write(&path, merged)
+        atomic_write(&path, &merged)
             .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
     }
 
     Ok(BootstrapAction::MergedJson(path))
 }
 
-/// Returns `true` when the JSON contains a `"github"` MCP server key.
-fn has_github_server(json: &str) -> bool {
-    // Same heuristic as workspace.rs — avoids a full JSON parse dependency.
-    let trimmed_key = "\"github\"";
-    json.contains(trimmed_key)
+/// Strip trailing commas that appear before `}` in a JSON-object tail string.
+///
+/// Only cleans the *last* trailing comma before each `}` — this is enough to
+/// prevent double-comma output when `merge_github_server` inserts a new entry.
+fn strip_trailing_commas_in_object(tail: &str) -> String {
+    let mut result = String::with_capacity(tail.len());
+    let chars: Vec<char> = tail.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == ',' {
+            // Look ahead past whitespace/newlines for `}`. If found, skip this comma.
+            let mut j = i + 1;
+            while j < len && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < len && chars[j] == '}' {
+                // Skip the trailing comma — don't push it.
+                i += 1;
+                continue;
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
 }
 
 /// Insert a `"github"` server entry into a JSON object.
@@ -217,6 +257,10 @@ fn has_github_server(json: &str) -> bool {
 ///   `{ … }` — inserts directly at the top level
 ///
 /// Returns `None` if the file does not look like a JSON object.
+///
+/// Tolerates trailing commas in the input (e.g. VS Code's JSONC format)
+/// by stripping them before inserting, so the output is always valid JSON.
+/// See #100.
 fn merge_github_server(json: &str) -> Option<String> {
     let github_entry = r#""github": {
       "command": "docker",
@@ -239,9 +283,20 @@ fn merge_github_server(json: &str) -> Option<String> {
         let after_key = &json[mcp_start + "\"mcpServers\"".len()..];
         let brace_offset = after_key.find('{')?;
         let insert_pos = mcp_start + "\"mcpServers\"".len() + brace_offset + 1;
-        // Determine whether there's already content in the object.
-        let inner = &json[insert_pos..];
-        let needs_comma = !inner.trim_start().starts_with('}');
+
+        // Guard against non-ASCII input: if `insert_pos` lands inside a
+        // multi-byte UTF-8 sequence, bail out rather than panicking.
+        if !json.is_char_boundary(insert_pos) {
+            return None;
+        }
+
+        // Strip trailing commas from existing content so we don't produce
+        // double-comma output (e.g. `"github":{...},,"context7":{},`).
+        // See #100.
+        let tail = &json[insert_pos..];
+        let cleaned_tail = strip_trailing_commas_in_object(tail);
+
+        let needs_comma = !cleaned_tail.trim_start().starts_with('}');
         let comma = if needs_comma { "," } else { "" };
         let indented = github_entry
             .lines()
@@ -251,7 +306,7 @@ fn merge_github_server(json: &str) -> Option<String> {
         let result = format!(
             "{}\n{indented}{comma}{}",
             &json[..insert_pos],
-            &json[insert_pos..]
+            &cleaned_tail
         );
         return Some(result);
     }
@@ -259,16 +314,130 @@ fn merge_github_server(json: &str) -> Option<String> {
     // No mcpServers block: insert at the top-level object.
     let open = json.find('{')?;
     let insert_pos = open + 1;
-    let inner = &json[insert_pos..];
-    let needs_comma = !inner.trim_start().starts_with('}');
+    // Guard against non-ASCII input at top-level insertion point.
+    if !json.is_char_boundary(insert_pos) {
+        return None;
+    }
+    let tail = &json[insert_pos..];
+    let cleaned_tail = strip_trailing_commas_in_object(tail);
+    let needs_comma = !cleaned_tail.trim_start().starts_with('}');
     let comma = if needs_comma { "," } else { "" };
     let result = format!(
         "{}\n  {}{comma}{}",
         &json[..insert_pos],
         github_entry.lines().collect::<Vec<_>>().join("\n  "),
-        &json[insert_pos..]
+        &cleaned_tail
     );
     Some(result)
+}
+
+// ── .gitignore ───────────────────────────────────────────────────────────────
+
+/// The gitignore entry appended (or used to seed) `.gitignore`.
+///
+/// Only the `runs/` subdirectory is ignored — config, rules, and prompts
+/// under `.code-looper/` are intended to be committed to version control.
+const GITIGNORE_ENTRY: &str = ".code-looper/runs/";
+const GITIGNORE_COMMENT: &str = "# Code Looper run artifacts";
+
+fn bootstrap_gitignore(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<BootstrapAction> {
+    let path = workspace_dir.join(".gitignore");
+
+    if !path.is_file() {
+        if !dry_run {
+            atomic_write(&path, &format!("{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n"))
+                .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", path.display()))?;
+        }
+        return Ok(BootstrapAction::Created(path));
+    }
+
+    let contents = std::fs::read_to_string(&path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+
+    if has_code_looper_ignore(&contents) {
+        return Ok(BootstrapAction::AlreadySatisfied(path));
+    }
+
+    if !dry_run {
+        let separator = if contents.ends_with('\n') {
+            "\n"
+        } else {
+            "\n\n"
+        };
+        let updated = format!("{contents}{separator}{GITIGNORE_COMMENT}\n{GITIGNORE_ENTRY}\n");
+        atomic_write(&path, &updated)
+            .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+    }
+
+    Ok(BootstrapAction::Appended(path))
+}
+
+/// Returns `true` when `.gitignore` already contains a Code Looper ignore
+/// entry — either the narrow `.code-looper/runs/` rule or the legacy broad
+/// `.code-looper/` rule (with or without trailing slash).  Ignores leading
+/// and trailing whitespace on each line.
+fn has_code_looper_ignore(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == ".code-looper"
+            || trimmed == ".code-looper/"
+            || trimmed == ".code-looper/runs"
+            || trimmed == ".code-looper/runs/"
+    })
+}
+
+/// Returns `true` when `.gitignore` contains the broad `.code-looper/` rule
+/// (as opposed to the narrower `.code-looper/runs/` rule).
+///
+/// When this returns `true` **and** a `.code-looper/config.toml` exists,
+/// callers should warn the user that the broad rule will hide version-
+/// controlled config files.
+pub fn has_broad_code_looper_ignore(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim();
+        trimmed == ".code-looper" || trimmed == ".code-looper/"
+    })
+}
+
+/// Emit a warning when a broad `.code-looper/` gitignore rule coexists with
+/// a `.code-looper/config.toml` in the workspace.  The broad rule would
+/// silently hide version-controlled config, rules, and prompt files.
+///
+/// Returns `true` if the warning was emitted.
+pub fn warn_if_broad_ignore_hides_config(workspace_dir: &Path) -> bool {
+    let gitignore_path = workspace_dir.join(".gitignore");
+
+    // Check all config file candidates, not just config.toml (#118).
+    let config_exists = ["config.toml", "config.yaml", "config.yml"]
+        .iter()
+        .any(|f| workspace_dir.join(".code-looper").join(f).is_file());
+
+    if !config_exists || !gitignore_path.is_file() {
+        return false;
+    }
+
+    let contents = match std::fs::read_to_string(&gitignore_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(path = %gitignore_path.display(), "could not read .gitignore: {e}");
+            eprintln!(
+                "[bootstrap] warning: could not read {}: {e}",
+                gitignore_path.display()
+            );
+            return false;
+        }
+    };
+
+    if has_broad_code_looper_ignore(&contents) {
+        eprintln!(
+            "warning: .gitignore contains a broad \".code-looper/\" rule that hides \
+             .code-looper/config.toml and other version-controlled files.\n  \
+             → Replace \".code-looper/\" with \".code-looper/runs/\" in your .gitignore."
+        );
+        return true;
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -384,6 +553,21 @@ mod tests {
     }
 
     #[test]
+    fn has_github_server_rejects_false_positive_in_value() {
+        // "github" appearing as a string value, not as an mcpServers key,
+        // must not be treated as a GitHub server entry (#110).
+        assert!(!has_github_server(
+            r#"{"mcpServers":{"myserver":{"description":"see github for details"}}}"#
+        ));
+    }
+
+    #[test]
+    fn has_github_server_rejects_github_outside_mcp_servers() {
+        // "github" as a top-level key (not under mcpServers) must not match.
+        assert!(!has_github_server(r#"{"github":"some-value"}"#));
+    }
+
+    #[test]
     fn mcp_json_without_github_key_gets_merged() {
         let dir = tmp();
         fs::write(
@@ -401,6 +585,100 @@ mod tests {
             content.contains("\"context7\""),
             "existing keys must be preserved"
         );
+    }
+
+    // ── merge_github_server unit tests (#100) ────────────────────────────────
+
+    #[test]
+    fn merge_handles_trailing_comma_in_mcp_servers() {
+        let input = r#"{
+  "mcpServers": {
+    "context7": {},
+  }
+}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        // Must be valid JSON (no double commas).
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(
+            servers.contains_key("github"),
+            "github entry must be present"
+        );
+        assert!(
+            servers.contains_key("context7"),
+            "existing keys must be preserved"
+        );
+    }
+
+    #[test]
+    fn merge_handles_no_trailing_comma() {
+        let input = r#"{"mcpServers":{"context7":{}}}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("github"));
+        assert!(servers.contains_key("context7"));
+    }
+
+    #[test]
+    fn merge_handles_empty_mcp_servers() {
+        let input = r#"{"mcpServers":{}}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("github"));
+    }
+
+    #[test]
+    fn merge_handles_multiple_trailing_commas() {
+        // Multiple entries each with trailing commas.
+        let input = r#"{
+  "mcpServers": {
+    "context7": {},
+    "markitdown": {},
+  }
+}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result).expect("output must be valid JSON");
+        let servers = parsed["mcpServers"].as_object().unwrap();
+        assert!(servers.contains_key("github"));
+        assert!(servers.contains_key("context7"));
+        assert!(servers.contains_key("markitdown"));
+    }
+
+    #[test]
+    fn merge_top_level_with_trailing_comma() {
+        // No mcpServers block — top-level insertion with trailing comma.
+        let input = r#"{
+  "someKey": "value",
+}"#;
+        let result = merge_github_server(input).expect("should produce output");
+        assert!(!result.contains(",,"), "must not produce double commas");
+        assert!(result.contains("\"github\""));
+    }
+
+    #[test]
+    fn merge_handles_non_ascii_content_before_mcp_servers() {
+        // Non-ASCII characters (a comment value) before the mcpServers key.
+        // The byte-offset arithmetic must not panic on valid UTF-8.
+        let input = "{\n  \"description\": \"Ünïcödé ☕\",\n  \"mcpServers\": {\n    \"context7\": {}\n  }\n}";
+        let result = merge_github_server(input).expect("should produce output with non-ASCII");
+        assert!(result.contains("\"github\""));
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_comma_before_brace() {
+        assert_eq!(strip_trailing_commas_in_object(r#""a":{},}"#), r#""a":{}}"#);
+    }
+
+    #[test]
+    fn strip_trailing_commas_preserves_valid_commas() {
+        let input = r#""a":{}, "b":{}}"#;
+        assert_eq!(strip_trailing_commas_in_object(input), input);
     }
 
     #[test]
@@ -432,8 +710,166 @@ mod tests {
             r#"{"mcpServers":{"github":{}}}"#,
         )
         .unwrap();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
         let actions = run_bootstrap(dir.path(), false).unwrap();
         assert!(matches!(&actions[0], BootstrapAction::AlreadySatisfied(_)));
         assert!(matches!(&actions[1], BootstrapAction::AlreadySatisfied(_)));
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(_)));
+    }
+
+    // ── .gitignore tests ──────────────────────────────────────────────────────
+
+    fn setup_satisfied_workspace(dir: &std::path::Path) {
+        fs::write(
+            dir.join("CLAUDE.md"),
+            format!("{SECTION_BEGIN}\n{SECTION_END}\n"),
+        )
+        .unwrap();
+        fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{"github":{}}}"#).unwrap();
+    }
+
+    #[test]
+    fn creates_gitignore_when_missing() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::Created(p) if p == &path));
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains(".code-looper/runs/"),
+            "must write narrow .code-looper/runs/ rule"
+        );
+        assert!(content.contains("# Code Looper"));
+    }
+
+    #[test]
+    fn appends_to_existing_gitignore_without_entry() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, "node_modules/\n*.log\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::Appended(p) if p == &path));
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            content.contains("node_modules/"),
+            "existing entries preserved"
+        );
+        assert!(
+            content.contains(".code-looper/runs/"),
+            "must write narrow .code-looper/runs/ rule"
+        );
+    }
+
+    #[test]
+    fn gitignore_with_entry_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, "*.log\n.code-looper/\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    #[test]
+    fn gitignore_with_entry_no_trailing_slash_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".code-looper\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    #[test]
+    fn second_bootstrap_is_idempotent_on_gitignore() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        run_bootstrap(dir.path(), false).unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(_)));
+    }
+
+    #[test]
+    fn dry_run_does_not_create_gitignore() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        let actions = run_bootstrap(dir.path(), true).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::Created(_)));
+        assert!(!path.exists(), "dry-run must not create .gitignore");
+    }
+
+    #[test]
+    fn gitignore_with_narrow_runs_entry_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".code-looper/runs/\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    #[test]
+    fn gitignore_with_narrow_runs_entry_no_trailing_slash_is_satisfied() {
+        let dir = tmp();
+        setup_satisfied_workspace(dir.path());
+        let path = dir.path().join(".gitignore");
+        fs::write(&path, ".code-looper/runs\n").unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[2], BootstrapAction::AlreadySatisfied(p) if p == &path));
+    }
+
+    // ── Broad-rule detection tests (#88) ─────────────────────────────────────
+
+    #[test]
+    fn has_broad_detects_legacy_broad_rule() {
+        assert!(has_broad_code_looper_ignore(".code-looper/\n"));
+        assert!(has_broad_code_looper_ignore(".code-looper\n"));
+        assert!(has_broad_code_looper_ignore(
+            "*.log\n.code-looper/\nnode_modules/\n"
+        ));
+    }
+
+    #[test]
+    fn has_broad_does_not_flag_narrow_rule() {
+        assert!(!has_broad_code_looper_ignore(".code-looper/runs/\n"));
+        assert!(!has_broad_code_looper_ignore(".code-looper/runs\n"));
+    }
+
+    #[test]
+    fn warn_if_broad_ignore_no_config_file_returns_false() {
+        let dir = tmp();
+        // Broad rule in .gitignore but no config.toml — no warning.
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
+        assert!(!warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    #[test]
+    fn warn_if_broad_ignore_with_config_file_returns_true() {
+        let dir = tmp();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
+        fs::write(dir.path().join(".code-looper/config.toml"), "").unwrap();
+        assert!(warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    #[test]
+    fn warn_if_broad_ignore_with_yaml_config_file_returns_true() {
+        let dir = tmp();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
+        fs::write(dir.path().join(".code-looper/config.yaml"), "").unwrap();
+        assert!(warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    #[test]
+    fn warn_if_narrow_ignore_with_config_file_returns_false() {
+        let dir = tmp();
+        fs::write(dir.path().join(".gitignore"), ".code-looper/runs/\n").unwrap();
+        fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
+        fs::write(dir.path().join(".code-looper/config.toml"), "").unwrap();
+        assert!(!warn_if_broad_ignore_hides_config(dir.path()));
     }
 }

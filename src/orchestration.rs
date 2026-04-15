@@ -62,6 +62,15 @@ impl WorkflowBranch {
             }
         }
     }
+
+    /// Convert to the corresponding [`PolicyWorkflow`] variant.
+    pub fn to_policy_workflow(&self) -> PolicyWorkflow {
+        match self {
+            WorkflowBranch::PrReview => PolicyWorkflow::PrReview,
+            WorkflowBranch::IssueExecution => PolicyWorkflow::IssueExecution,
+            WorkflowBranch::BacklogDiscovery => PolicyWorkflow::BacklogDiscovery,
+        }
+    }
 }
 
 impl std::fmt::Display for WorkflowBranch {

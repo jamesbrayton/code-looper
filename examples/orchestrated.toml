@@ -1,0 +1,57 @@
+# Orchestrated loop with GitHub integration.
+#
+# The policy engine selects a workflow branch each iteration based on
+# repository state (open PRs, open issues, or idle). Run-lifecycle
+# comments are posted to the specified GitHub issue.
+#
+# Prerequisites:
+#   - GITHUB_TOKEN environment variable set
+#   - MCP GitHub server configured (run `code-looper bootstrap` first)
+#
+# Usage:
+#   code-looper --config examples/orchestrated.toml
+
+provider = "claude"
+iterations = -1            # Run indefinitely until interrupted
+stop_on_failure = true     # Halt on first unrecoverable failure
+max_retries = 1
+retry_backoff_ms = 1000
+retry_backoff_multiplier = 2.0
+iteration_timeout_secs = 600  # 10 minute timeout per iteration
+
+[orchestration]
+enabled = true
+# repo_owner and repo_name are auto-detected from `git remote get-url origin`.
+# Uncomment to override:
+# repo_owner = "your-org"
+# repo_name = "your-repo"
+
+# Default policy chain: PRs first, then issues, then backlog discovery.
+# Customize by uncommenting and editing:
+# [[orchestration.policies]]
+# condition = "has_open_prs"
+# workflow = "pr-review"
+#
+# [[orchestration.policies]]
+# condition = "has_open_issues"
+# workflow = "issue-execution"
+#
+# [[orchestration.policies]]
+# condition = "always"
+# workflow = "backlog-discovery"
+
+[issue_tracking]
+mode = "github"
+# comment_issue_number = 42  # Uncomment to post lifecycle comments to a specific issue
+comment_cadence = "milestones"
+auto_close_owned_issues = false
+
+[pr_management]
+mode = "single-pr"
+base_branch = "main"
+branch_prefix = "loop/"
+require_human_review = true
+
+[telemetry]
+stream_output = true
+keep_runs = 20

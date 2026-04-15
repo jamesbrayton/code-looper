@@ -37,7 +37,7 @@ const DEFAULT_MAX_SLUG_LEN: usize = 40;
 /// ```
 pub fn derive_branch_name(
     prefix: &str,
-    issue_number: u64,
+    issue_number: u32,
     title: &str,
     max_slug_length: usize,
 ) -> String {
@@ -99,15 +99,20 @@ pub enum BranchError {
     /// Only the single-PR cleanup path reaches this; multi-PR mode uses
     /// [`BranchManager::cleanup_merged_remote_branch`] and never touches
     /// the local branch.
+    #[cfg(test)]
     #[error("branch has uncommitted changes or unmerged commits — refusing to delete '{0}'")]
     UnsafeDelete(String),
 }
 
-/// Run a git command and return trimmed stdout on success, or a `BranchError`
-/// on non-zero exit.
-fn git(args: &[&str]) -> Result<String, BranchError> {
-    let out = Command::new("git")
-        .args(args)
+/// Run a git command in an optional working directory and return trimmed
+/// stdout on success, or a `BranchError` on non-zero exit.
+fn git_in_dir(dir: Option<&std::path::Path>, args: &[&str]) -> Result<String, BranchError> {
+    let mut cmd = Command::new("git");
+    cmd.args(args);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    let out = cmd
         .output()
         .map_err(|e| BranchError::GitCommand(format!("failed to spawn git: {e}")))?;
     if out.status.success() {
@@ -121,41 +126,59 @@ fn git(args: &[&str]) -> Result<String, BranchError> {
     }
 }
 
+/// Convenience wrapper that runs git in the process CWD.
+fn git(args: &[&str]) -> Result<String, BranchError> {
+    git_in_dir(None, args)
+}
+
+/// CWD-based wrappers used by free functions and tests.
+#[cfg(test)]
+fn local_branch_exists(name: &str) -> bool {
+    local_branch_exists_in(None, name)
+}
+
+#[cfg(test)]
+fn remote_branch_exists(name: &str) -> bool {
+    remote_branch_exists_in(None, name)
+}
+
 /// Return the name of the currently checked-out branch.
 pub fn current_branch() -> Result<String, BranchError> {
     git(&["rev-parse", "--abbrev-ref", "HEAD"])
 }
 
 /// Return `true` if a local branch with `name` exists.
-fn local_branch_exists(name: &str) -> bool {
-    Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{name}"),
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn local_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/heads/{name}"),
+    ]);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Return `true` if a remote-tracking branch `origin/{name}` exists.
-fn remote_branch_exists(name: &str) -> bool {
-    Command::new("git")
-        .args([
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/remotes/origin/{name}"),
-        ])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+fn remote_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "show-ref",
+        "--verify",
+        "--quiet",
+        &format!("refs/remotes/origin/{name}"),
+    ]);
+    if let Some(d) = dir {
+        cmd.current_dir(d);
+    }
+    cmd.status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Return `true` if the working tree has uncommitted changes (tracked or staged).
-#[allow(dead_code)]
+#[cfg(test)]
 fn has_uncommitted_changes() -> bool {
     Command::new("git")
         .args(["diff", "--quiet", "HEAD"])
@@ -166,7 +189,7 @@ fn has_uncommitted_changes() -> bool {
 
 /// Return `true` if `branch` contains commits not present in `base_branch`
 /// that are not yet merged (i.e. the branch tip is ahead of `base_branch`).
-#[allow(dead_code)]
+#[cfg(test)]
 fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
     // Count commits in branch that are not in base_branch
     let result = Command::new("git")
@@ -174,10 +197,17 @@ fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
         .output();
     match result {
         Ok(out) if out.status.success() => {
-            let count: u64 = String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(1);
+            let raw = String::from_utf8_lossy(&out.stdout);
+            let count: u64 = raw.trim().parse().unwrap_or_else(|e| {
+                tracing::warn!(
+                    branch,
+                    base_branch,
+                    raw_output = raw.trim(),
+                    error = %e,
+                    "git rev-list --count returned unparseable output; assuming unmerged"
+                );
+                1
+            });
             count > 0
         }
         _ => true, // assume unmerged on error — fail safe
@@ -200,6 +230,8 @@ pub struct BranchManager {
     no_pr_push: bool,
     /// Delete the remote branch after a PR merge (default: `true`).
     delete_remote_branch_on_merge: bool,
+    /// Working directory for git operations.  When `None`, uses the process CWD.
+    work_dir: Option<std::path::PathBuf>,
 }
 
 impl BranchManager {
@@ -210,7 +242,14 @@ impl BranchManager {
             max_slug_length: DEFAULT_MAX_SLUG_LEN,
             no_pr_push: true,
             delete_remote_branch_on_merge: true,
+            work_dir: None,
         }
+    }
+
+    /// Set the working directory for all git operations.
+    pub fn with_work_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.work_dir = Some(dir);
+        self
     }
 
     /// Override the `no_pr_push` flag at construction time.
@@ -218,7 +257,7 @@ impl BranchManager {
     /// When `false`, `push_branch` is a no-op in `no-pr` mode.  Meant for
     /// tests and for rare configurations that explicitly want the loop to
     /// keep work local.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_no_pr_push(mut self, no_pr_push: bool) -> Self {
         self.no_pr_push = no_pr_push;
         self
@@ -231,10 +270,25 @@ impl BranchManager {
     /// without touching the remote.  This field is destructive and must not
     /// be mutable on a live `BranchManager` — use this builder on a fresh
     /// instance instead.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn with_delete_remote_branch_on_merge(mut self, enabled: bool) -> Self {
         self.delete_remote_branch_on_merge = enabled;
         self
+    }
+
+    /// Run a git command in this manager's working directory.
+    fn git(&self, args: &[&str]) -> Result<String, BranchError> {
+        git_in_dir(self.work_dir.as_deref(), args)
+    }
+
+    /// Check if a local branch exists in this manager's repo.
+    fn local_branch_exists(&self, name: &str) -> bool {
+        local_branch_exists_in(self.work_dir.as_deref(), name)
+    }
+
+    /// Check if a remote-tracking branch exists in this manager's repo.
+    fn remote_branch_exists(&self, name: &str) -> bool {
+        remote_branch_exists_in(self.work_dir.as_deref(), name)
     }
 
     /// The base branch name (e.g. `"main"`).
@@ -243,7 +297,7 @@ impl BranchManager {
     }
 
     /// Derive the feature branch name for this issue.
-    pub fn branch_name(&self, issue_number: u64, title: &str) -> String {
+    pub fn branch_name(&self, issue_number: u32, title: &str) -> String {
         derive_branch_name(
             &self.config.branch_prefix,
             issue_number,
@@ -257,7 +311,7 @@ impl BranchManager {
     /// reuses it without creating a duplicate.
     ///
     /// Returns the branch name.
-    pub fn ensure_branch(&self, issue_number: u64, title: &str) -> Result<String, BranchError> {
+    pub fn ensure_branch(&self, issue_number: u32, title: &str) -> Result<String, BranchError> {
         let branch = self.branch_name(issue_number, title);
 
         // Guard: never operate on base_branch
@@ -265,20 +319,20 @@ impl BranchManager {
             return Err(BranchError::BaseBranchProtected(branch));
         }
 
-        if local_branch_exists(&branch) {
+        if self.local_branch_exists(&branch) {
             // Already exists locally — just switch to it
             tracing::debug!(
                 branch,
                 "feature branch already exists locally; checking out"
             );
-            git(&["checkout", &branch])?;
-        } else if remote_branch_exists(&branch) {
+            self.git(&["checkout", &branch])?;
+        } else if self.remote_branch_exists(&branch) {
             // Exists on remote but not locally — create tracking branch
             tracing::debug!(
                 branch,
                 "feature branch exists on remote; creating local tracking branch"
             );
-            git(&["checkout", "-b", &branch, &format!("origin/{branch}")])?;
+            self.git(&["checkout", "-b", &branch, &format!("origin/{branch}")])?;
         } else {
             // New branch — create from latest base_branch.
             //
@@ -289,9 +343,12 @@ impl BranchManager {
             // `origin/{base}` is the classic source of "why are my PRs full
             // of conflicts" debugging sessions (see #68).
             tracing::debug!(branch, base = self.base(), "creating new feature branch");
-            let fetch_status = Command::new("git")
-                .args(["fetch", "origin", self.base()])
-                .status();
+            let mut fetch_cmd = Command::new("git");
+            fetch_cmd.args(["fetch", "origin", self.base()]);
+            if let Some(d) = &self.work_dir {
+                fetch_cmd.current_dir(d);
+            }
+            let fetch_status = fetch_cmd.status();
             match fetch_status {
                 Ok(status) if status.success() => {}
                 Ok(status) => {
@@ -313,7 +370,7 @@ impl BranchManager {
                     );
                 }
             }
-            git(&[
+            self.git(&[
                 "checkout",
                 "-b",
                 &branch,
@@ -354,7 +411,7 @@ impl BranchManager {
             force = self.config.allow_force_push,
             "pushing feature branch"
         );
-        git(&args).map(|_| ())
+        self.git(&args).map(|_| ())
     }
 
     /// Delete a feature branch that the engine itself checked out locally
@@ -373,7 +430,7 @@ impl BranchManager {
     /// out the PR's local branch there, so this method would operate on
     /// whatever branch the engine's CWD happens to be on (see #65).  Use
     /// [`Self::cleanup_merged_remote_branch`] instead for multi-PR merges.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn cleanup_branch(&self, branch: &str) -> Result<(), BranchError> {
         // Guard: never delete base_branch
         if branch == self.base() {
@@ -394,15 +451,16 @@ impl BranchManager {
 
         // Switch away from the branch before deleting it (if currently on it)
         if current_branch().ok().as_deref() == Some(branch) {
-            git(&["checkout", self.base()])?;
+            self.git(&["checkout", self.base()])?;
         }
 
         tracing::info!(branch, "deleting local feature branch after merge");
-        git(&["branch", "-d", branch])?;
+        self.git(&["branch", "-d", branch])?;
 
-        if self.delete_remote_branch_on_merge && remote_branch_exists(branch) {
+        if self.delete_remote_branch_on_merge && self.remote_branch_exists(branch) {
             tracing::info!(branch, "deleting remote feature branch after merge");
-            git(&["push", "origin", "--delete", branch]).map(|_| ())?;
+            self.git(&["push", "origin", "--delete", branch])
+                .map(|_| ())?;
         }
 
         Ok(())
@@ -434,7 +492,7 @@ impl BranchManager {
             );
             return Ok(());
         }
-        if !remote_branch_exists(branch) {
+        if !self.remote_branch_exists(branch) {
             tracing::debug!(
                 branch,
                 "remote branch no longer exists; skipping remote cleanup"
@@ -445,7 +503,8 @@ impl BranchManager {
             branch,
             "deleting remote feature branch after multi-PR merge"
         );
-        git(&["push", "origin", "--delete", branch]).map(|_| ())
+        self.git(&["push", "origin", "--delete", branch])
+            .map(|_| ())
     }
 }
 
@@ -538,6 +597,28 @@ mod tests {
         // Non-ASCII replaced with '-'
         assert!(!name.contains(' '));
         assert!(name.starts_with("loop/99-"));
+    }
+
+    /// Pin the invariant that slug bytes are always ASCII after non-ASCII
+    /// replacement.  The truncation path uses `slug[..max_slug]` which would
+    /// panic on a multi-byte char boundary if non-ASCII survived.
+    #[test]
+    fn unicode_title_truncated_at_max_slug_is_safe() {
+        // Title entirely non-ASCII — all chars become '-', collapsed to empty slug.
+        let name = derive_branch_name("loop/", 1, "日本語テスト", 5);
+        assert!(name.starts_with("loop/1"));
+        // Slug must be ASCII-only (the implementation replaces non-ASCII with '-').
+        let slug = name.trim_start_matches("loop/1-");
+        assert!(
+            slug.is_ascii(),
+            "slug must be ASCII-only after non-ASCII replacement: {slug:?}"
+        );
+
+        // Mixed ASCII + multi-byte, truncated mid-slug to verify no byte-boundary panic.
+        let name2 = derive_branch_name("loop/", 2, "fix 日本語 auth 🔒 flow", 8);
+        let slug2 = name2.trim_start_matches("loop/2-");
+        assert!(slug2.len() <= 8, "slug exceeds max_slug: {slug2:?}");
+        assert!(slug2.is_ascii(), "slug must be ASCII: {slug2:?}");
     }
 
     #[test]
@@ -659,5 +740,312 @@ mod tests {
         let mgr = BranchManager::new(config());
         let name = mgr.branch_name(0, "");
         assert!(name.starts_with("loop/0"));
+    }
+
+    // ── Git-repo integration tests ───────────────────────────────────────────
+    //
+    // These tests create real git repos in temp directories and exercise branch
+    // lifecycle operations (cleanup_branch, cleanup_merged_remote_branch,
+    // has_uncommitted_changes, has_unmerged_commits, ensure_branch, push_branch).
+    //
+    // Because the functions under test use process-global CWD (via
+    // `Command::new("git")` without `.current_dir()`), each test acquires
+    // `CWD_LOCK` and saves/restores CWD.  This means these tests are
+    // serialised with respect to each other — keep them focused.
+
+    use std::sync::Mutex;
+
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Run git in a specific directory (without changing process CWD).
+    fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap_or_else(|e| panic!("git {} failed to spawn: {e}", args.join(" ")));
+        assert!(
+            out.status.success(),
+            "git {} failed in {}: {}",
+            args.join(" "),
+            dir.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Set up a bare "remote" and a working clone with one commit on `main`.
+    /// Returns `(bare_dir, clone_dir)` — both are `TempDir` so they are
+    /// cleaned up when dropped.
+    fn setup_repo_with_remote() -> (tempfile::TempDir, tempfile::TempDir) {
+        let bare = tempfile::tempdir().unwrap();
+        git_in(bare.path(), &["init", "--bare", "--initial-branch=main"]);
+
+        let clone = tempfile::tempdir().unwrap();
+        let bare_url = bare.path().to_str().unwrap();
+        Command::new("git")
+            .args(["clone", bare_url, "."])
+            .current_dir(clone.path())
+            .output()
+            .expect("git clone failed");
+        git_in(clone.path(), &["config", "user.email", "test@test.com"]);
+        git_in(clone.path(), &["config", "user.name", "Test"]);
+
+        // Initial commit on main so the branch exists.
+        std::fs::write(clone.path().join("README.md"), "init").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "initial"]);
+        git_in(clone.path(), &["push", "origin", "main"]);
+
+        (bare, clone)
+    }
+
+    /// RAII guard that saves the current directory and restores it on drop.
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+    impl CwdGuard {
+        fn new(target: &std::path::Path) -> Self {
+            let original = std::env::current_dir().expect("failed to read CWD");
+            std::env::set_current_dir(target).expect("failed to set CWD");
+            Self { original }
+        }
+    }
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
+    // ── cleanup_branch (single-PR flow) ──────────────────────────────────────
+
+    #[test]
+    fn cleanup_branch_refuses_unmerged_commits() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Create a feature branch with a commit not in main.
+        git_in(clone.path(), &["checkout", "-b", "feat/1-unmerged"]);
+        std::fs::write(clone.path().join("new.txt"), "wip").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "wip"]);
+        // Switch back to main so cleanup_branch doesn't hit the
+        // "uncommitted changes on current branch" check.
+        git_in(clone.path(), &["checkout", "main"]);
+
+        let mgr = BranchManager::new(config());
+        let result = mgr.cleanup_branch("feat/1-unmerged");
+        assert!(
+            matches!(result, Err(BranchError::UnsafeDelete(_))),
+            "cleanup_branch should refuse a branch with unmerged commits: {result:?}"
+        );
+        // Branch must still exist.
+        assert!(
+            local_branch_exists("feat/1-unmerged"),
+            "branch must not be deleted when cleanup_branch returns UnsafeDelete"
+        );
+    }
+
+    #[test]
+    fn cleanup_branch_succeeds_after_merge() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Create a feature branch with a commit, then merge it into main.
+        git_in(clone.path(), &["checkout", "-b", "feat/2-merged"]);
+        std::fs::write(clone.path().join("feature.txt"), "done").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "add feature"]);
+        git_in(clone.path(), &["checkout", "main"]);
+        git_in(clone.path(), &["merge", "feat/2-merged"]);
+
+        let mgr = BranchManager::new(config()).with_delete_remote_branch_on_merge(false);
+        let result = mgr.cleanup_branch("feat/2-merged");
+        assert!(
+            result.is_ok(),
+            "cleanup_branch should succeed for a fully merged branch: {result:?}"
+        );
+        assert!(
+            !local_branch_exists("feat/2-merged"),
+            "local branch should be deleted after successful cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_branch_switches_away_from_current_branch() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Create, commit, merge — then stay on the feature branch.
+        git_in(clone.path(), &["checkout", "-b", "feat/3-current"]);
+        std::fs::write(clone.path().join("f.txt"), "data").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "commit"]);
+        git_in(clone.path(), &["checkout", "main"]);
+        git_in(clone.path(), &["merge", "feat/3-current"]);
+        // Switch back to the feature branch — cleanup must switch away first.
+        git_in(clone.path(), &["checkout", "feat/3-current"]);
+
+        let mgr = BranchManager::new(config()).with_delete_remote_branch_on_merge(false);
+        let result = mgr.cleanup_branch("feat/3-current");
+        assert!(result.is_ok(), "cleanup should succeed: {result:?}");
+        assert_eq!(
+            current_branch().unwrap(),
+            "main",
+            "cleanup should have switched to base branch"
+        );
+        assert!(!local_branch_exists("feat/3-current"));
+    }
+
+    // ── has_uncommitted_changes / has_unmerged_commits ────────────────────────
+
+    #[test]
+    fn has_uncommitted_changes_detects_dirty_worktree() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Clean state.
+        assert!(
+            !has_uncommitted_changes(),
+            "clean worktree should report no uncommitted changes"
+        );
+        // Dirty state.
+        std::fs::write(clone.path().join("dirty.txt"), "x").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        assert!(
+            has_uncommitted_changes(),
+            "staged change should be detected as uncommitted"
+        );
+    }
+
+    #[test]
+    fn has_unmerged_commits_tracks_ahead_behind() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        git_in(clone.path(), &["checkout", "-b", "feat/4-ahead"]);
+        std::fs::write(clone.path().join("ahead.txt"), "x").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "ahead"]);
+
+        assert!(
+            has_unmerged_commits("feat/4-ahead", "main"),
+            "branch with commits not in main should be reported as unmerged"
+        );
+
+        // Merge and re-check.
+        git_in(clone.path(), &["checkout", "main"]);
+        git_in(clone.path(), &["merge", "feat/4-ahead"]);
+        assert!(
+            !has_unmerged_commits("feat/4-ahead", "main"),
+            "fully merged branch should not be reported as unmerged"
+        );
+    }
+
+    // ── cleanup_merged_remote_branch (multi-PR flow) ─────────────────────────
+
+    #[test]
+    fn cleanup_merged_remote_branch_deletes_remote_after_merge() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Create and push a feature branch.
+        git_in(clone.path(), &["checkout", "-b", "feat/5-remote"]);
+        std::fs::write(clone.path().join("r.txt"), "x").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "remote feature"]);
+        git_in(clone.path(), &["push", "-u", "origin", "feat/5-remote"]);
+        git_in(clone.path(), &["checkout", "main"]);
+
+        assert!(
+            remote_branch_exists("feat/5-remote"),
+            "remote branch should exist before cleanup"
+        );
+
+        let mgr = BranchManager::new(config());
+        let result = mgr.cleanup_merged_remote_branch("feat/5-remote");
+        assert!(
+            result.is_ok(),
+            "cleanup_merged_remote_branch should succeed: {result:?}"
+        );
+        assert!(
+            !remote_branch_exists("feat/5-remote"),
+            "remote branch should be deleted after cleanup"
+        );
+        // Local branch must still exist — multi-PR cleanup is remote-only.
+        assert!(
+            local_branch_exists("feat/5-remote"),
+            "local branch must not be touched by remote-only cleanup"
+        );
+    }
+
+    #[test]
+    fn cleanup_merged_remote_branch_skips_nonexistent_remote() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Branch exists locally but was never pushed.
+        git_in(clone.path(), &["checkout", "-b", "feat/6-local-only"]);
+        git_in(clone.path(), &["checkout", "main"]);
+
+        let mgr = BranchManager::new(config());
+        let result = mgr.cleanup_merged_remote_branch("feat/6-local-only");
+        assert!(
+            result.is_ok(),
+            "should silently succeed when remote branch does not exist: {result:?}"
+        );
+    }
+
+    // ── ensure_branch + push_branch ──────────────────────────────────────────
+
+    #[test]
+    fn ensure_branch_creates_and_push_branch_pushes() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        let mgr = BranchManager::new(config());
+        let branch = mgr.ensure_branch(7, "new feature").unwrap();
+        assert_eq!(branch, "loop/7-new-feature");
+        assert_eq!(current_branch().unwrap(), branch);
+
+        // Make a commit so we have something to push.
+        std::fs::write(clone.path().join("work.txt"), "wip").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "work"]);
+
+        mgr.push_branch(&branch).unwrap();
+        // Fetch remote refs so show-ref sees the remote branch.
+        git_in(clone.path(), &["fetch", "origin"]);
+        assert!(
+            remote_branch_exists(&branch),
+            "branch should exist on remote after push"
+        );
+    }
+
+    #[test]
+    fn ensure_branch_reuses_existing_local_branch() {
+        let _lock = CWD_LOCK.lock().unwrap();
+        let (_bare, clone) = setup_repo_with_remote();
+        let _cwd = CwdGuard::new(clone.path());
+
+        // Create the branch manually, then verify ensure_branch reuses it.
+        git_in(clone.path(), &["checkout", "-b", "loop/8-existing"]);
+        std::fs::write(clone.path().join("e.txt"), "x").unwrap();
+        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["commit", "-m", "existing"]);
+        git_in(clone.path(), &["checkout", "main"]);
+
+        let mgr = BranchManager::new(config());
+        let branch = mgr.ensure_branch(8, "existing").unwrap();
+        assert_eq!(branch, "loop/8-existing");
+        assert_eq!(current_branch().unwrap(), "loop/8-existing");
     }
 }

@@ -68,6 +68,7 @@ This is idempotent and safe to run multiple times. It will:
 
 - Create `CLAUDE.md` with a Code Looper section if no instruction file exists, or append the section to an existing `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md`.
 - Create `.mcp.json` with a GitHub MCP server stub (Docker-based by default) if one does not already exist, or merge the `github` entry into an existing file.
+- Add `.code-looper/runs/` to `.gitignore` so run artifacts do not clutter `git status`. Config, rules, and prompts under `.code-looper/` are intended to be committed. If you are **not** running bootstrap, append `.code-looper/runs/` to your `.gitignore` manually.
 
 Preview what would change without writing anything:
 
@@ -76,6 +77,50 @@ code-looper bootstrap --dry-run
 ```
 
 See [docs/workspace-prerequisites.md](workspace-prerequisites.md) for the full list of checks and remediation options.
+
+## Scaffold a configuration directory (optional)
+
+If you want to customise Code Looper's behaviour with user rules, custom
+prompts, or per-workflow-branch overrides, scaffold the `.code-looper/`
+configuration directory:
+
+```bash
+code-looper config bootstrap
+```
+
+This creates an annotated layout:
+
+```
+.code-looper/
+├── config.toml            # annotated defaults — every field commented
+├── prompts/
+│   └── example.md         # example --prompt-file input
+├── rules/
+│   ├── global.md.example
+│   ├── pr-review.md.example
+│   ├── issue-execution.md.example
+│   ├── backlog-discovery.md.example
+│   └── multi-pr-triage.md.example
+└── runs/                  # runtime artifacts (gitignored)
+```
+
+Rule files are scaffolded with a `.example` suffix.  Rename them to activate:
+
+```bash
+mv .code-looper/rules/global.md.example .code-looper/rules/global.md
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--format toml\|yaml` | Config file format (default: `toml`) |
+| `--dir <path>` | Target directory (default: `.code-looper`) |
+| `--dry-run` | Print what would be created without writing |
+| `--force` | Overwrite existing files |
+
+The command is idempotent — re-running reports existing files without
+overwriting them.
 
 ## Run a minimal loop
 
@@ -223,11 +268,40 @@ This is the end-to-end path a UAT tester should run before reporting any bugs. I
 
 If any of steps 2–7 fail, capture the output and check [docs/troubleshooting.md](troubleshooting.md) before reporting a bug. The most common first-run issues are provider CLI not on `$PATH` and `.mcp.json` missing the `github` entry (both caught by the startup checks).
 
+## User-directory install
+
+For power users who install Code Looper globally and operate it against many
+repositories:
+
+```bash
+# Install from a checkout.
+cargo install --path .
+
+# Create a central user config.
+code-looper config bootstrap --dir ~/.config/code-looper
+
+# Run against any target repo using --workspace-dir.
+code-looper --workspace-dir ~/src/my-repo \
+            --config ~/.config/code-looper/config.toml
+```
+
+Alternatively, place a `.code-looper/config.toml` inside each target
+repository and let the three-tier resolution find it automatically:
+
+```bash
+code-looper --workspace-dir ~/src/my-repo
+# → picks up ~/src/my-repo/.code-looper/config.toml if it exists
+```
+
+See [docs/configuration.md](configuration.md#config-file-resolution-three-tier)
+for the full resolution order.
+
 ## Next steps
 
 - [docs/configuration.md](configuration.md) — Every config field, CLI flag, default, and precedence rule
 - [docs/providers.md](providers.md) — Provider adapter invocation, environment requirements, and known limitations
 - [docs/orchestration.md](orchestration.md) — Workflow branches, shippable signal, PR lifecycle, multi-PR triage
+- [docs/prompt-injection.md](prompt-injection.md) — Every prompt, preamble, and comment template the engine injects
 - [docs/workspace-prerequisites.md](workspace-prerequisites.md) — What the prerequisite checker validates and how to fix each diagnostic
 - [docs/troubleshooting.md](troubleshooting.md) — Common failure modes and remediation steps
 - [docs/PRD.md](PRD.md) — Full product requirements and roadmap

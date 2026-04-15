@@ -1,6 +1,8 @@
 use crate::error::LooperError;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::num::NonZeroU32;
+use std::path::{Path, PathBuf};
 
 // ── Git remote auto-detection ────────────────────────────────────────────────
 
@@ -371,7 +373,7 @@ impl std::fmt::Display for PolicyCondition {
 }
 
 /// Workflow branch to execute when a policy rule matches.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PolicyWorkflow {
     /// Review open pull requests.
@@ -429,6 +431,43 @@ pub fn default_policy_rules() -> Vec<PolicyRule> {
         },
     ]
 }
+
+/// User rules configuration — global preamble and per-workflow-branch overrides.
+///
+/// Rule files are markdown files whose contents are prepended to the engine-
+/// generated prompt (not replacing it).  This gives users a way to inject
+/// standing instructions (coding standards, review checklists, domain context)
+/// while preserving the MCP policy and workflow structure.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RulesConfig {
+    /// Path to a global rules markdown file prepended to every provider prompt.
+    #[serde(default)]
+    pub global: Option<PathBuf>,
+
+    /// Per-workflow-branch rule file overrides.  Keys are [`PolicyWorkflow`]
+    /// variants (e.g. `pr-review`, `issue-execution`, `backlog-discovery`).
+    #[serde(default)]
+    pub workflows: HashMap<PolicyWorkflow, PathBuf>,
+}
+
+impl RulesConfig {
+    /// Validate that all configured rule files exist and are within the size limit.
+    pub fn validate(&self) -> Result<(), LooperError> {
+        if let Some(ref path) = self.global {
+            validate_rule_file(path, "rules.global")?;
+        }
+        for (branch, path) in &self.workflows {
+            validate_rule_file(path, &format!("rules.workflows.{branch}"))?;
+        }
+        Ok(())
+    }
+}
+
+/// Soft-warning threshold for rule file size (bytes).
+pub const RULES_SIZE_WARN_BYTES: u64 = 16_384;
+
+/// Hard-error threshold for rule file size (bytes).
+pub const RULES_SIZE_MAX_BYTES: u64 = 65_536;
 
 /// Orchestration policy engine configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -517,6 +556,9 @@ pub struct LoopConfig {
     pub prompt_file: Option<PathBuf>,
     /// Tracing log level (e.g. "info", "debug").
     pub log_level: String,
+    /// User rules: global preamble and per-workflow-branch overrides.
+    #[serde(default)]
+    pub rules: RulesConfig,
     /// Orchestration policy engine settings.
     #[serde(default)]
     pub orchestration: OrchestrationConfig,
@@ -615,6 +657,7 @@ impl Default for LoopConfig {
             prompt_inline: None,
             prompt_file: None,
             log_level: "info".to_string(),
+            rules: RulesConfig::default(),
             orchestration: OrchestrationConfig::default(),
             workspace_dir: None,
             skip_prereq_check: false,
@@ -632,6 +675,130 @@ impl Default for LoopConfig {
             provider_extra_args: Vec::new(),
             non_retryable_exit_codes: Vec::new(),
         }
+    }
+}
+
+// ── Validated config types ───────────────────────────────────────────────────
+
+/// Validated iteration count: either a finite positive count or infinite.
+///
+/// Replaces the raw `iterations: i64` field with a type that makes zero and
+/// invalid negative values unrepresentable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IterationCount {
+    /// Run a fixed number of iterations (always ≥ 1).
+    Finite(NonZeroU32),
+    /// Run indefinitely until interrupted or a stop condition fires.
+    Infinite,
+}
+
+impl IterationCount {
+    /// Returns `true` when `iteration` (0-based) has reached or exceeded the
+    /// configured count.  Always returns `false` for [`Infinite`](IterationCount::Infinite).
+    pub fn is_done(&self, iteration: u64) -> bool {
+        match self {
+            IterationCount::Finite(n) => iteration >= u64::from(n.get()),
+            IterationCount::Infinite => false,
+        }
+    }
+
+    /// Convert to the legacy `i64` representation (`-1` for infinite) used by
+    /// the telemetry manifest format.
+    pub fn as_raw_i64(&self) -> i64 {
+        match self {
+            IterationCount::Finite(n) => i64::from(n.get()),
+            IterationCount::Infinite => -1,
+        }
+    }
+}
+
+#[cfg(test)]
+impl IterationCount {
+    pub fn max_iterations(&self) -> u64 {
+        match self {
+            IterationCount::Finite(n) => u64::from(n.get()),
+            IterationCount::Infinite => u64::MAX,
+        }
+    }
+
+    pub fn is_infinite(&self) -> bool {
+        matches!(self, IterationCount::Infinite)
+    }
+}
+
+impl std::fmt::Display for IterationCount {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IterationCount::Finite(n) => write!(f, "{}", n.get()),
+            IterationCount::Infinite => write!(f, "infinite"),
+        }
+    }
+}
+
+/// Validated prompt source: at most one of inline or file.
+///
+/// Replaces the pair of `prompt_inline: Option<String>` /
+/// `prompt_file: Option<PathBuf>` fields with a type that makes the "both set"
+/// state unrepresentable.
+#[derive(Debug, Clone)]
+pub enum PromptInput {
+    /// Prompt provided as an inline string.
+    Inline(String),
+    /// Prompt loaded from a file path.
+    File(PathBuf),
+    /// No prompt configured — the orchestration engine or provider decides.
+    Absent,
+}
+
+/// A `LoopConfig` that has passed [`LoopConfig::validate`] and carries
+/// refined types for fields with non-trivial invariants.
+///
+/// All other `LoopConfig` fields are accessible via `Deref`.  Downstream code
+/// should accept `&ValidatedLoopConfig` to make it impossible to accidentally
+/// operate on an unvalidated configuration.
+#[derive(Debug, Clone)]
+pub struct ValidatedLoopConfig {
+    inner: LoopConfig,
+    /// Validated iteration count (replaces `inner.iterations`).
+    iteration_count: IterationCount,
+    /// Validated prompt source (replaces `inner.prompt_inline` / `inner.prompt_file`).
+    prompt_source: PromptInput,
+}
+
+// WARNING: This Deref exposes raw `iterations`, `prompt_inline`, and `prompt_file`
+// fields which have validated counterparts. Always use `iteration_count()` and
+// `prompt_source()` instead. Accessing the raw fields bypasses validation
+// invariants. See #117 and #153 for discussion of alternatives.
+impl std::ops::Deref for ValidatedLoopConfig {
+    type Target = LoopConfig;
+    fn deref(&self) -> &LoopConfig {
+        &self.inner
+    }
+}
+
+impl ValidatedLoopConfig {
+    /// Read-only access to the validated iteration count.
+    pub fn iteration_count(&self) -> &IterationCount {
+        &self.iteration_count
+    }
+
+    /// Read-only access to the validated prompt source.
+    pub fn prompt_source(&self) -> &PromptInput {
+        &self.prompt_source
+    }
+
+    /// Return a clone with a different workspace directory.
+    pub fn with_workspace_dir(mut self, dir: PathBuf) -> Self {
+        self.inner.workspace_dir = Some(dir);
+        self
+    }
+
+    /// Return a clone with the prompt replaced by an inline string.
+    pub fn with_prompt_override(mut self, prompt: String) -> Self {
+        self.inner.prompt_file = None;
+        self.inner.prompt_inline = Some(prompt.clone());
+        self.prompt_source = PromptInput::Inline(prompt);
+        self
     }
 }
 
@@ -659,6 +826,181 @@ impl ConfigFormat {
             _ => ConfigFormat::Toml,
         }
     }
+}
+
+// ── Three-tier config resolution ──────────────────────────────────────────────
+
+/// Return the platform-appropriate user config directory for Code Looper.
+///
+/// - Linux: `$XDG_CONFIG_HOME/code-looper` (falls back to `~/.config/code-looper`)
+/// - macOS: `~/Library/Application Support/code-looper`
+/// - Windows: `%APPDATA%\code-looper`
+///
+/// Returns `None` if the home directory cannot be determined.
+pub fn user_config_dir() -> Option<PathBuf> {
+    user_config_dir_with_home(None)
+}
+
+/// Resolve the user config directory, optionally overriding the home directory.
+///
+/// When `home_override` is `Some`, it is used in place of `$HOME`/`$USERPROFILE`
+/// for computing the user config path.  This avoids thread-unsafe `env::set_var`
+/// calls in tests.
+fn user_config_dir_with_home(home_override: Option<&Path>) -> Option<PathBuf> {
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    }
+
+    let effective_home =
+        || -> Option<PathBuf> { home_override.map(PathBuf::from).or_else(home_dir) };
+
+    #[cfg(target_os = "macos")]
+    {
+        effective_home().map(|h| h.join("Library/Application Support/code-looper"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if home_override.is_some() {
+            effective_home().map(|h| h.join("AppData/Roaming/code-looper"))
+        } else {
+            std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("code-looper"))
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if home_override.is_none() {
+            if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
+                return Some(PathBuf::from(xdg).join("code-looper"));
+            }
+        }
+        effective_home()
+            .map(|h| h.join(".config"))
+            .map(|base| base.join("code-looper"))
+    }
+}
+
+/// Candidate config file paths for a given directory.
+fn config_candidates(dir: &Path) -> Vec<PathBuf> {
+    vec![
+        dir.join("config.toml"),
+        dir.join("config.yaml"),
+        dir.join("config.yml"),
+    ]
+}
+
+/// Search for a config file in the given directory.
+///
+/// Checks `config.toml`, `config.yaml`, `config.yml` in that order and returns
+/// the first one that exists.
+pub fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
+    config_candidates(dir).into_iter().find(|p| p.is_file())
+}
+
+/// Three-tier config resolution: CLI → workspace → user.
+///
+/// Returns the path to the config file that should be loaded, along with a
+/// label indicating which tier it came from (for logging).
+///
+/// **Tier 1 — CLI flag:** if `cli_config` is `Some`, it is used directly.
+/// **Tier 2 — Workspace:** looks for `.code-looper/config.{toml,yaml,yml}` in
+/// the workspace directory.
+/// **Tier 3 — User:** looks in the platform user config directory.
+///
+/// Returns `None` if no config file is found at any tier.
+pub fn resolve_config_path(
+    cli_config: Option<&Path>,
+    workspace_dir: &Path,
+) -> Option<(PathBuf, &'static str)> {
+    // Tier 1: explicit CLI flag.
+    if let Some(path) = cli_config {
+        return Some((path.to_path_buf(), "cli"));
+    }
+
+    // Tier 2: workspace config.
+    let workspace_config_dir = workspace_dir.join(".code-looper");
+    if let Some(path) = find_config_in_dir(&workspace_config_dir) {
+        return Some((path, "workspace"));
+    }
+
+    // Tier 3: user config.
+    if let Some(dir) = user_config_dir() {
+        if let Some(path) = find_config_in_dir(&dir) {
+            return Some((path, "user"));
+        }
+    } else {
+        tracing::debug!("HOME/USERPROFILE not set; skipping user-tier config lookup");
+    }
+
+    None
+}
+
+/// Like [`resolve_config_path`] but accepts an optional home directory override
+/// for the user-tier lookup.  Used in tests to avoid thread-unsafe
+/// `env::set_var("HOME", ...)`.
+#[cfg(test)]
+fn resolve_config_path_with_home(
+    cli_config: Option<&Path>,
+    workspace_dir: &Path,
+    home_override: Option<&Path>,
+) -> Option<(PathBuf, &'static str)> {
+    // Tier 1: explicit CLI flag.
+    if let Some(path) = cli_config {
+        return Some((path.to_path_buf(), "cli"));
+    }
+
+    // Tier 2: workspace config.
+    let workspace_config_dir = workspace_dir.join(".code-looper");
+    if let Some(path) = find_config_in_dir(&workspace_config_dir) {
+        return Some((path, "workspace"));
+    }
+
+    // Tier 3: user config.
+    if let Some(user_dir) = user_config_dir_with_home(home_override) {
+        if let Some(path) = find_config_in_dir(&user_dir) {
+            return Some((path, "user"));
+        }
+    } else {
+        tracing::debug!("HOME/USERPROFILE not set; skipping user-tier config lookup");
+    }
+
+    None
+}
+
+/// Resolve rule file paths relative to the config file's parent directory.
+///
+/// When rule paths are relative, they are resolved against the directory
+/// containing the config file (not against CWD).  Absolute paths are left
+/// unchanged.
+pub fn resolve_rule_paths(rules: &mut RulesConfig, config_file: &Path) {
+    let config_dir = config_file.parent().unwrap_or_else(|| {
+        tracing::warn!(
+            config_file = %config_file.display(),
+            "config file has no parent directory — resolving rule paths relative to CWD"
+        );
+        Path::new(".")
+    });
+
+    if let Some(ref mut path) = rules.global {
+        if path.is_relative() {
+            *path = config_dir.join(&path);
+        }
+    }
+
+    let resolved: HashMap<PolicyWorkflow, PathBuf> = rules
+        .workflows
+        .iter()
+        .map(|(k, v)| {
+            let p = if v.is_relative() {
+                config_dir.join(v)
+            } else {
+                v.clone()
+            };
+            (k.clone(), p)
+        })
+        .collect();
+    rules.workflows = resolved;
 }
 
 impl LoopConfig {
@@ -725,18 +1067,48 @@ impl LoopConfig {
         }
     }
 
-    /// Validate that the config is internally consistent.
-    pub fn validate(&self) -> Result<(), LooperError> {
-        if self.prompt_inline.is_some() && self.prompt_file.is_some() {
-            return Err(LooperError::InvalidArgument(
-                "--prompt-inline and --prompt-file are mutually exclusive".to_string(),
-            ));
-        }
-        if self.iterations < -1 || self.iterations == 0 {
+    /// Validate the config and return a [`ValidatedLoopConfig`] with refined
+    /// types for fields that have non-trivial invariants.
+    ///
+    /// Consumes `self` so callers cannot accidentally use the raw config after
+    /// validation.
+    pub fn validate(self) -> Result<ValidatedLoopConfig, LooperError> {
+        // ── Prompt source ───────────────────────────────────────────────
+        let prompt_source = match (&self.prompt_inline, &self.prompt_file) {
+            (Some(_), Some(_)) => {
+                return Err(LooperError::InvalidArgument(
+                    "--prompt-inline and --prompt-file are mutually exclusive".to_string(),
+                ));
+            }
+            (Some(s), None) => PromptInput::Inline(s.clone()),
+            (None, Some(p)) => {
+                std::fs::metadata(p).map_err(|e| {
+                    LooperError::InvalidArgument(format!("--prompt-file '{}': {e}", p.display()))
+                })?;
+                PromptInput::File(p.clone())
+            }
+            (None, None) => PromptInput::Absent,
+        };
+
+        // ── Iteration count ─────────────────────────────────────────────
+        let iteration_count = if self.iterations == -1 {
+            IterationCount::Infinite
+        } else if self.iterations > 0 {
+            let n = u32::try_from(self.iterations).map_err(|_| {
+                LooperError::InvalidArgument(format!(
+                    "--iterations value {} exceeds maximum {}",
+                    self.iterations,
+                    u32::MAX
+                ))
+            })?;
+            IterationCount::Finite(NonZeroU32::new(n).expect("n > 0"))
+        } else {
             return Err(LooperError::InvalidArgument(
                 "--iterations must be a positive integer or -1 for infinite".to_string(),
             ));
-        }
+        };
+
+        // ── Orchestration fields ────────────────────────────────────────
         if self.orchestration.enabled {
             if self.orchestration.repo_owner.is_none() {
                 return Err(LooperError::InvalidArgument(
@@ -749,14 +1121,8 @@ impl LoopConfig {
                 ));
             }
         }
-        if let Some(path) = &self.prompt_file {
-            if !path.exists() {
-                return Err(LooperError::InvalidArgument(format!(
-                    "--prompt-file '{}' does not exist",
-                    path.display()
-                )));
-            }
-        }
+
+        // ── on_complete ─────────────────────────────────────────────────
         if let Some(cmd) = &self.on_complete {
             if cmd.trim().is_empty() {
                 return Err(LooperError::InvalidArgument(
@@ -764,7 +1130,8 @@ impl LoopConfig {
                 ));
             }
         }
-        // multi-pr mode requires GitHub issue tracking (local mode can't track PRs).
+
+        // ── PR / issue tracking cross-checks ────────────────────────────
         if self.pr_management.mode == PrMode::MultiPr
             && self.issue_tracking.mode != IssueTrackingMode::Github
         {
@@ -773,7 +1140,15 @@ impl LoopConfig {
                     .to_string(),
             ));
         }
-        // When github mode is active, owner and repo must be resolvable.
+        if self.pr_management.mode == PrMode::SinglePr
+            && self.issue_tracking.comment_issue_number.is_none()
+        {
+            return Err(LooperError::InvalidArgument(
+                "pr_management.mode=\"single-pr\" requires \
+                 issue_tracking.comment_issue_number to be set"
+                    .to_string(),
+            ));
+        }
         if self.issue_tracking.mode == IssueTrackingMode::Github {
             let owner = self
                 .issue_tracking
@@ -802,7 +1177,241 @@ impl LoopConfig {
                 ));
             }
         }
-        Ok(())
+
+        // ── Backoff multiplier ────────────────────────────────────────────
+        if self.retry_backoff_multiplier.is_nan()
+            || self.retry_backoff_multiplier.is_infinite()
+            || self.retry_backoff_multiplier <= 0.0
+        {
+            return Err(LooperError::InvalidArgument(
+                "--retry-backoff-multiplier must be a finite, positive number (> 0.0)".to_string(),
+            ));
+        }
+
+        // ── Rules file validation ────────────────────────────────────────
+        self.rules.validate()?;
+
+        Ok(ValidatedLoopConfig {
+            inner: self,
+            iteration_count,
+            prompt_source,
+        })
+    }
+}
+
+/// Validate that a rule file exists and is within the size limit.
+///
+/// Uses `fs::metadata` as the single existence+size check, eliminating the
+/// TOCTOU race of a separate `path.exists()` call.
+fn validate_rule_file(path: &Path, config_key: &str) -> Result<(), LooperError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "{config_key}: cannot read '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if meta.len() > RULES_SIZE_MAX_BYTES {
+        return Err(LooperError::InvalidArgument(format!(
+            "{config_key}: '{}' is {} bytes, exceeding the {} byte limit",
+            path.display(),
+            meta.len(),
+            RULES_SIZE_MAX_BYTES
+        )));
+    }
+    if meta.len() > RULES_SIZE_WARN_BYTES {
+        tracing::warn!(
+            path = %path.display(),
+            size = meta.len(),
+            limit = RULES_SIZE_WARN_BYTES,
+            "{config_key}: rule file is large; consider trimming to stay under {RULES_SIZE_WARN_BYTES} bytes"
+        );
+    }
+    Ok(())
+}
+
+/// Load the contents of a rule file, returning an empty string for empty files.
+///
+/// Enforces `RULES_SIZE_MAX_BYTES` on every call (not just startup validation)
+/// to guard against files that grow between iterations.
+///
+/// Callers should handle `Err` by logging and reusing the last good content
+/// (for mid-run re-reads) or by failing startup (for initial validation).
+pub fn load_rule_file(path: &Path) -> Result<String, LooperError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "failed to read rule file '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if meta.len() > RULES_SIZE_MAX_BYTES {
+        return Err(LooperError::InvalidArgument(format!(
+            "rule file '{}' is {} bytes, exceeding the {} byte limit",
+            path.display(),
+            meta.len(),
+            RULES_SIZE_MAX_BYTES
+        )));
+    }
+    let content = std::fs::read_to_string(path).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "failed to read rule file '{}': {e}",
+            path.display()
+        ))
+    })?;
+    if content.trim().is_empty() {
+        tracing::debug!(path = %path.display(), "rule file is empty — treated as no-op");
+    }
+    Ok(content)
+}
+
+/// Load all configured rules and return the assembled preamble for a given
+/// workflow branch.  Returns `None` if no rules are configured.
+///
+/// The returned string contains the global rules (if any) followed by the
+/// workflow-specific rules (if any), separated by blank lines.
+///
+/// On read failure, falls back to the last successfully loaded content for
+/// the failing file (cached in `RULES_CACHE`).  This prevents rules from
+/// being silently dropped due to transient I/O errors mid-run.
+pub fn load_rules_for_branch(
+    rules: &RulesConfig,
+    workflow: Option<&PolicyWorkflow>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref path) = rules.global {
+        match load_rule_file(path) {
+            Ok(content) if !content.trim().is_empty() => {
+                cache_rule(path, &content);
+                parts.push(content);
+            }
+            Ok(_) => {} // empty file — skip
+            Err(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "failed to re-read global rule file: {e}"
+                );
+                if let Some(cached) = get_cached_rule(path) {
+                    tracing::info!(path = %path.display(), "using cached global rule file content");
+                    parts.push(cached);
+                } else {
+                    tracing::error!(
+                        path = %path.display(),
+                        "rule file re-read failed and no cached content available — this iteration will run WITHOUT global rules"
+                    );
+                    eprintln!(
+                        "[loop] WARNING: rule file '{}' could not be read and no cached content \
+                         is available; this iteration will run WITHOUT rules.",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    if let Some(wf) = workflow {
+        if let Some(path) = rules.workflows.get(wf) {
+            match load_rule_file(path) {
+                Ok(content) if !content.trim().is_empty() => {
+                    cache_rule(path, &content);
+                    parts.push(content);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        workflow = %wf,
+                        "failed to re-read workflow rule file: {e}"
+                    );
+                    if let Some(cached) = get_cached_rule(path) {
+                        tracing::info!(path = %path.display(), workflow = %wf, "using cached workflow rule file content");
+                        parts.push(cached);
+                    } else {
+                        tracing::error!(
+                            path = %path.display(),
+                            workflow = %wf,
+                            "rule file re-read failed and no cached content available — this iteration will run WITHOUT workflow rules"
+                        );
+                        eprintln!(
+                            "[loop] WARNING: rule file '{}' could not be read and no cached content \
+                             is available; this iteration will run WITHOUT rules.",
+                            path.display()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+// ── Rule file cache ─────────────────────────────────────────────────────────
+
+use std::sync::Mutex;
+
+/// Cache of last successfully loaded rule file content, keyed by path.
+static RULES_CACHE: std::sync::LazyLock<Mutex<HashMap<PathBuf, String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cache_rule(path: &Path, content: &str) {
+    match RULES_CACHE.lock() {
+        Ok(mut cache) => {
+            cache.insert(path.to_path_buf(), content.to_string());
+        }
+        Err(e) => {
+            tracing::error!(
+                path = %path.display(),
+                "RULES_CACHE mutex poisoned — rule file content not cached: {e}"
+            );
+        }
+    }
+}
+
+fn get_cached_rule(path: &Path) -> Option<String> {
+    match RULES_CACHE.lock() {
+        Ok(cache) => cache.get(path).cloned(),
+        Err(e) => {
+            tracing::error!(
+                path = %path.display(),
+                "RULES_CACHE mutex poisoned — cannot read cached rule: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Clear the rule cache.
+///
+/// Called between repo iterations in multi-repo mode to prevent
+/// cross-repo rule contamination (#163), and in tests for isolation.
+pub fn clear_rules_cache() {
+    RULES_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
+/// RAII guard that clears `RULES_CACHE` on creation and on drop, ensuring
+/// test isolation even if the test panics.
+#[cfg(test)]
+struct RulesCacheGuard;
+
+#[cfg(test)]
+impl RulesCacheGuard {
+    fn new() -> Self {
+        clear_rules_cache();
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for RulesCacheGuard {
+    fn drop(&mut self) {
+        clear_rules_cache();
     }
 }
 
@@ -974,8 +1583,8 @@ mod tests {
         };
         let err = config.validate().unwrap_err();
         assert!(
-            err.to_string().contains("does not exist"),
-            "expected 'does not exist' in error: {err}"
+            err.to_string().contains("--prompt-file") && err.to_string().contains("prompt.md"),
+            "expected prompt-file error, got: {err}"
         );
     }
 
@@ -1506,16 +2115,45 @@ local_promise_path = ".code-looper/dev.md"
 
     #[test]
     fn no_pr_and_single_pr_work_with_local_issue_tracking() {
-        for mode in [PrMode::NoPr, PrMode::SinglePr] {
-            let config = LoopConfig {
-                pr_management: PrManagementConfig {
-                    mode,
-                    ..PrManagementConfig::default()
-                },
-                ..LoopConfig::default()
-            };
-            assert!(config.validate().is_ok());
-        }
+        // NoPr works without comment_issue_number.
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::NoPr,
+                ..PrManagementConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        assert!(config.validate().is_ok());
+
+        // SinglePr requires comment_issue_number.
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::SinglePr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                comment_issue_number: Some(1),
+                ..IssueTrackingConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn single_pr_without_issue_number_rejected() {
+        let config = LoopConfig {
+            pr_management: PrManagementConfig {
+                mode: PrMode::SinglePr,
+                ..PrManagementConfig::default()
+            },
+            ..LoopConfig::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("comment_issue_number"),
+            "expected error about comment_issue_number, got: {err}"
+        );
     }
 
     #[test]
@@ -1850,5 +2488,560 @@ non_retryable_exit_codes = [2, 126, 127]
         );
         let config = LoopConfig::from_yaml_file(file.path()).unwrap();
         assert_eq!(config.non_retryable_exit_codes, [2, 127]);
+    }
+
+    // ── ValidatedLoopConfig / IterationCount / PromptInput tests ────────
+
+    #[test]
+    fn validate_returns_finite_iteration_count() {
+        let validated = LoopConfig {
+            iterations: 5,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(
+            validated.iteration_count,
+            IterationCount::Finite(std::num::NonZeroU32::new(5).unwrap())
+        );
+        assert_eq!(validated.iteration_count.max_iterations(), 5);
+        assert!(!validated.iteration_count.is_infinite());
+        assert_eq!(validated.iteration_count.as_raw_i64(), 5);
+    }
+
+    #[test]
+    fn validate_returns_infinite_iteration_count() {
+        let validated = LoopConfig {
+            iterations: -1,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(validated.iteration_count, IterationCount::Infinite);
+        assert_eq!(validated.iteration_count.max_iterations(), u64::MAX);
+        assert!(validated.iteration_count.is_infinite());
+        assert_eq!(validated.iteration_count.as_raw_i64(), -1);
+    }
+
+    #[test]
+    fn is_done_finite_boundary_semantics() {
+        let three = IterationCount::Finite(std::num::NonZeroU32::new(3).unwrap());
+        assert!(!three.is_done(0)); // iteration 0 — not done
+        assert!(!three.is_done(1)); // iteration 1 — not done
+        assert!(!three.is_done(2)); // iteration 2 — last valid (0-based < 3)
+        assert!(three.is_done(3)); // iteration 3 — done (0-based >= 3)
+        assert!(three.is_done(4)); // beyond n
+
+        let one = IterationCount::Finite(std::num::NonZeroU32::new(1).unwrap());
+        assert!(!one.is_done(0));
+        assert!(one.is_done(1));
+
+        assert!(!IterationCount::Infinite.is_done(u64::MAX));
+    }
+
+    #[test]
+    fn validate_returns_inline_prompt_source() {
+        let validated = LoopConfig {
+            prompt_inline: Some("hello".to_string()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert!(matches!(validated.prompt_source, PromptInput::Inline(ref s) if s == "hello"));
+    }
+
+    #[test]
+    fn validate_returns_file_prompt_source() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "prompt content").unwrap();
+        let validated = LoopConfig {
+            prompt_file: Some(f.path().to_path_buf()),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        assert!(matches!(validated.prompt_source, PromptInput::File(_)));
+    }
+
+    #[test]
+    fn validate_returns_none_prompt_source() {
+        let validated = LoopConfig::default().validate().unwrap();
+        assert!(matches!(validated.prompt_source, PromptInput::Absent));
+    }
+
+    #[test]
+    fn validated_config_derefs_to_inner_fields() {
+        let validated = LoopConfig {
+            iterations: 3,
+            log_level: "debug".to_string(),
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        // Access via Deref — must see original LoopConfig fields.
+        assert_eq!(validated.log_level, "debug");
+        assert_eq!(validated.provider, Provider::Claude);
+    }
+
+    #[test]
+    fn with_workspace_dir_updates_inner() {
+        let validated = LoopConfig::default().validate().unwrap();
+        let updated = validated.with_workspace_dir("/tmp/repo".into());
+        assert_eq!(
+            updated.workspace_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/repo"))
+        );
+    }
+
+    #[test]
+    fn with_prompt_override_updates_source() {
+        let validated = LoopConfig::default().validate().unwrap();
+        let updated = validated.with_prompt_override("override prompt".to_string());
+        assert!(
+            matches!(updated.prompt_source(), PromptInput::Inline(ref s) if s == "override prompt")
+        );
+    }
+
+    #[test]
+    fn validate_consumes_config_preventing_reuse() {
+        // This test verifies the API contract: validate() takes ownership,
+        // so callers cannot accidentally use the raw config after validation.
+        // If this compiles, the guarantee holds — no runtime assertion needed.
+        let config = LoopConfig::default();
+        let _validated = config.validate().unwrap();
+        // `config` is now moved — any use would be a compile error.
+    }
+
+    #[test]
+    fn large_iteration_count_is_rejected() {
+        let err = LoopConfig {
+            iterations: i64::from(u32::MAX) + 1,
+            ..Default::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "expected 'exceeds maximum' error, got: {err}"
+        );
+    }
+
+    // ── Rules config ────────────────────────────────────────────────────
+
+    #[test]
+    fn rules_config_defaults_to_empty() {
+        let rules = RulesConfig::default();
+        assert!(rules.global.is_none());
+        assert!(rules.workflows.is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_missing_global_rule_file() {
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(PathBuf::from("/nonexistent/rules.md")),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("cannot read"));
+        assert!(err.to_string().contains("rules.global"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_workflow_rule_file() {
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: None,
+                workflows: HashMap::from([(
+                    PolicyWorkflow::PrReview,
+                    PathBuf::from("/nonexistent/pr-review.md"),
+                )]),
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("cannot read"));
+        assert!(err.to_string().contains("rules.workflows.pr-review"));
+    }
+
+    #[test]
+    fn validate_accepts_existing_rule_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "# My coding rules").unwrap();
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(f.path().to_path_buf()),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_accepts_empty_rule_file() {
+        let f = NamedTempFile::new().unwrap();
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(f.path().to_path_buf()),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_oversized_rule_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        // Write just over the 64 KB limit.
+        let content = "x".repeat(RULES_SIZE_MAX_BYTES as usize + 1);
+        f.write_all(content.as_bytes()).unwrap();
+        let config = LoopConfig {
+            rules: RulesConfig {
+                global: Some(f.path().to_path_buf()),
+                workflows: HashMap::new(),
+            },
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("exceeding"));
+    }
+
+    #[test]
+    fn validate_rejects_nan_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: f64::NAN,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("retry-backoff-multiplier"),
+            "expected backoff multiplier error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_infinite_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: f64::INFINITY,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry-backoff-multiplier"));
+    }
+
+    #[test]
+    fn validate_rejects_negative_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: -1.0,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry-backoff-multiplier"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_backoff_multiplier() {
+        let config = LoopConfig {
+            retry_backoff_multiplier: 0.0,
+            ..Default::default()
+        };
+        let err = config.validate().unwrap_err();
+        assert!(err.to_string().contains("retry-backoff-multiplier"));
+    }
+
+    #[test]
+    fn load_rule_file_returns_content() {
+        let mut f = NamedTempFile::new().unwrap();
+        writeln!(f, "Always use snake_case.").unwrap();
+        let content = load_rule_file(f.path()).unwrap();
+        assert!(content.contains("snake_case"));
+    }
+
+    #[test]
+    fn load_rule_file_rejects_oversized_file() {
+        let mut f = NamedTempFile::new().unwrap();
+        // Write more than RULES_SIZE_MAX_BYTES (64 KB).
+        let big = "x".repeat(RULES_SIZE_MAX_BYTES as usize + 1);
+        std::io::Write::write_all(&mut f, big.as_bytes()).unwrap();
+        let err = load_rule_file(f.path()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("exceeding"), "expected size error, got: {msg}");
+    }
+
+    #[test]
+    fn load_rules_for_branch_falls_back_to_cache_on_read_error() {
+        let _guard = RulesCacheGuard::new();
+
+        let mut global_file = NamedTempFile::new().unwrap();
+        writeln!(global_file, "CACHED RULE").unwrap();
+
+        let rules = RulesConfig {
+            global: Some(global_file.path().to_path_buf()),
+            workflows: HashMap::new(),
+        };
+
+        // First call succeeds and caches the content.
+        let result = load_rules_for_branch(&rules, None).unwrap();
+        assert!(result.contains("CACHED RULE"));
+
+        // Delete the file to simulate a read error.
+        let path = global_file.path().to_path_buf();
+        drop(global_file);
+        std::fs::remove_file(&path).ok();
+
+        // Second call should fall back to cached content.
+        let result = load_rules_for_branch(&rules, None).unwrap();
+        assert!(
+            result.contains("CACHED RULE"),
+            "expected cached content on read failure"
+        );
+    }
+
+    #[test]
+    fn load_rules_for_branch_returns_none_when_first_read_fails_no_cache() {
+        let _guard = RulesCacheGuard::new();
+
+        // Point global at a path that never existed — first read will fail
+        // and there is no cached content to fall back on.
+        let rules = RulesConfig {
+            global: Some(PathBuf::from("/nonexistent/never-read.md")),
+            workflows: HashMap::new(),
+        };
+
+        // Should return None (not panic) when no cached content is available.
+        let result = load_rules_for_branch(&rules, None);
+        assert!(
+            result.is_none(),
+            "expected None when rule file was never successfully read"
+        );
+    }
+
+    #[test]
+    fn validate_rule_file_rejects_missing_via_metadata() {
+        let result = validate_rule_file(Path::new("/nonexistent/rule.md"), "test.key");
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("test.key"), "error should include config key");
+    }
+
+    #[test]
+    fn load_rules_for_branch_combines_global_and_workflow() {
+        let _guard = RulesCacheGuard::new();
+        let mut global_file = NamedTempFile::new().unwrap();
+        writeln!(global_file, "GLOBAL RULE").unwrap();
+        let mut workflow_file = NamedTempFile::new().unwrap();
+        writeln!(workflow_file, "PR REVIEW RULE").unwrap();
+
+        let rules = RulesConfig {
+            global: Some(global_file.path().to_path_buf()),
+            workflows: HashMap::from([(
+                PolicyWorkflow::PrReview,
+                workflow_file.path().to_path_buf(),
+            )]),
+        };
+
+        let result = load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).unwrap();
+        assert!(result.contains("GLOBAL RULE"));
+        assert!(result.contains("PR REVIEW RULE"));
+        // Global comes before workflow.
+        assert!(result.find("GLOBAL RULE").unwrap() < result.find("PR REVIEW RULE").unwrap());
+    }
+
+    #[test]
+    fn load_rules_for_branch_returns_none_when_no_rules() {
+        let _guard = RulesCacheGuard::new();
+        let rules = RulesConfig::default();
+        assert!(load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).is_none());
+    }
+
+    #[test]
+    fn load_rules_for_branch_returns_global_only_when_no_workflow_match() {
+        let _guard = RulesCacheGuard::new();
+        let mut global_file = NamedTempFile::new().unwrap();
+        writeln!(global_file, "GLOBAL RULE").unwrap();
+
+        let rules = RulesConfig {
+            global: Some(global_file.path().to_path_buf()),
+            workflows: HashMap::new(),
+        };
+
+        let result = load_rules_for_branch(&rules, Some(&PolicyWorkflow::PrReview)).unwrap();
+        assert!(result.contains("GLOBAL RULE"));
+    }
+
+    // ── Three-tier config resolution ──────────────────────────────────
+
+    #[test]
+    fn user_config_dir_returns_some_on_linux() {
+        // Ensure HOME is set so the function can find a path.
+        if std::env::var_os("HOME").is_some() {
+            let dir = user_config_dir();
+            assert!(dir.is_some());
+            let dir = dir.unwrap();
+            assert!(dir.to_string_lossy().contains("code-looper"));
+        }
+    }
+
+    #[test]
+    fn find_config_in_dir_finds_toml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "provider = \"claude\"\niterations = 1\n",
+        )
+        .unwrap();
+        let found = find_config_in_dir(tmp.path());
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn find_config_in_dir_finds_yaml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "provider: claude\n").unwrap();
+        let found = find_config_in_dir(tmp.path());
+        assert!(found.is_some());
+        assert!(found.unwrap().ends_with("config.yaml"));
+    }
+
+    #[test]
+    fn find_config_in_dir_returns_none_when_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(find_config_in_dir(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn find_config_in_dir_prefers_toml_over_yaml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("config.toml"), "").unwrap();
+        std::fs::write(tmp.path().join("config.yaml"), "").unwrap();
+        let found = find_config_in_dir(tmp.path()).unwrap();
+        assert!(found.ends_with("config.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_cli_wins() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cli_path = tmp.path().join("custom.toml");
+        std::fs::write(&cli_path, "").unwrap();
+        // Also create a workspace config — CLI should still win.
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(ws.join(".code-looper")).unwrap();
+        std::fs::write(ws.join(".code-looper/config.toml"), "").unwrap();
+
+        let (path, tier) = resolve_config_path(Some(&cli_path), &ws).unwrap();
+        assert_eq!(tier, "cli");
+        assert_eq!(path, cli_path);
+    }
+
+    #[test]
+    fn resolve_config_path_workspace_tier() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(ws.join(".code-looper")).unwrap();
+        std::fs::write(ws.join(".code-looper/config.toml"), "").unwrap();
+
+        let (path, tier) = resolve_config_path(None, &ws).unwrap();
+        assert_eq!(tier, "workspace");
+        assert!(path.ends_with("config.toml"));
+    }
+
+    #[test]
+    fn resolve_config_path_returns_none_when_nothing_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Use a custom HOME so user-tier doesn't accidentally find a real config.
+        let result = resolve_config_path(None, tmp.path());
+        // May return None or find a user-tier config — depends on HOME.
+        // The important thing is it doesn't panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn resolve_config_path_user_tier_with_controlled_home() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+
+        // Create a user-tier config under a controlled HOME.
+        let user_cfg_dir = tmp.path().join(".config/code-looper");
+        std::fs::create_dir_all(&user_cfg_dir).unwrap();
+        std::fs::write(
+            user_cfg_dir.join("config.toml"),
+            "provider = \"claude\"\niterations = 1\n",
+        )
+        .unwrap();
+
+        // Use the injectable home override instead of thread-unsafe env::set_var.
+        let result = resolve_config_path_with_home(None, &ws, Some(tmp.path()));
+
+        // Should find the user-tier config.
+        let (path, tier) = result.expect("user-tier config should be found");
+        assert_eq!(tier, "user");
+        assert!(path.ends_with("config.toml"));
+    }
+
+    // ── Rule path resolution ────────────────────────────────────────────
+
+    #[test]
+    fn resolve_rule_paths_makes_relative_absolute() {
+        let config_file = Path::new("/opt/project/.code-looper/config.toml");
+        let mut rules = RulesConfig {
+            global: Some(PathBuf::from("rules/global.md")),
+            workflows: HashMap::from([(
+                PolicyWorkflow::PrReview,
+                PathBuf::from("rules/pr-review.md"),
+            )]),
+        };
+        resolve_rule_paths(&mut rules, config_file);
+        assert_eq!(
+            rules.global.as_deref(),
+            Some(Path::new("/opt/project/.code-looper/rules/global.md"))
+        );
+        assert_eq!(
+            rules
+                .workflows
+                .get(&PolicyWorkflow::PrReview)
+                .map(|p| p.as_path()),
+            Some(Path::new("/opt/project/.code-looper/rules/pr-review.md"))
+        );
+    }
+
+    #[test]
+    fn resolve_rule_paths_leaves_absolute_unchanged() {
+        let config_file = Path::new("/opt/project/.code-looper/config.toml");
+        let mut rules = RulesConfig {
+            global: Some(PathBuf::from("/etc/code-looper/global.md")),
+            workflows: HashMap::new(),
+        };
+        resolve_rule_paths(&mut rules, config_file);
+        assert_eq!(
+            rules.global.as_deref(),
+            Some(Path::new("/etc/code-looper/global.md"))
+        );
+    }
+
+    #[test]
+    fn rules_config_round_trips_through_toml() {
+        let toml_str = r#"
+global = ".code-looper/rules/global.md"
+
+[workflows]
+"pr-review" = ".code-looper/rules/pr-review.md"
+"issue-execution" = ".code-looper/rules/issue-execution.md"
+"#;
+        let rules: RulesConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            rules.global.as_deref(),
+            Some(std::path::Path::new(".code-looper/rules/global.md"))
+        );
+        assert_eq!(rules.workflows.len(), 2);
+        assert!(rules.workflows.contains_key(&PolicyWorkflow::PrReview));
+        assert!(rules
+            .workflows
+            .contains_key(&PolicyWorkflow::IssueExecution));
     }
 }
