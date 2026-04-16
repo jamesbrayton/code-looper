@@ -1237,26 +1237,20 @@ fn validate_rule_file(path: &Path, config_key: &str) -> Result<(), LooperError> 
 /// Callers should handle `Err` by logging and reusing the last good content
 /// (for mid-run re-reads) or by failing startup (for initial validation).
 pub fn load_rule_file(path: &Path) -> Result<String, LooperError> {
-    let meta = std::fs::metadata(path).map_err(|e| {
-        LooperError::InvalidArgument(format!(
-            "failed to read rule file '{}': {e}",
-            path.display()
-        ))
-    })?;
-    if meta.len() > RULES_SIZE_MAX_BYTES {
-        return Err(LooperError::InvalidArgument(format!(
-            "rule file '{}' is {} bytes, exceeding the {} byte limit",
-            path.display(),
-            meta.len(),
-            RULES_SIZE_MAX_BYTES
-        )));
-    }
     let content = std::fs::read_to_string(path).map_err(|e| {
         LooperError::InvalidArgument(format!(
             "failed to read rule file '{}': {e}",
             path.display()
         ))
     })?;
+    if content.len() as u64 > RULES_SIZE_MAX_BYTES {
+        return Err(LooperError::InvalidArgument(format!(
+            "rule file '{}' is {} bytes, exceeding the {} byte limit",
+            path.display(),
+            content.len(),
+            RULES_SIZE_MAX_BYTES
+        )));
+    }
     if content.trim().is_empty() {
         tracing::debug!(path = %path.display(), "rule file is empty — treated as no-op");
     }

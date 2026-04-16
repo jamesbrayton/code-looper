@@ -697,32 +697,28 @@ impl PrLifecycleTriage for GhPrLifecycle {
         let prs: Vec<serde_json::Value> =
             serde_json::from_str(&stdout).map_err(|e| PrError::ParseError(e.to_string()))?;
 
-        prs.into_iter()
-            .map(|v| {
-                let number = v["number"]
-                    .as_u64()
-                    .ok_or_else(|| PrError::ParseError("missing number".into()))?
-                    as u32;
-                let url = v["url"]
-                    .as_str()
-                    .ok_or_else(|| PrError::ParseError("missing url".into()))?
-                    .to_string();
-                let title = v["title"]
-                    .as_str()
-                    .ok_or_else(|| PrError::ParseError("missing title".into()))?
-                    .to_string();
-                let head_ref = v["headRefName"]
-                    .as_str()
-                    .map(|s| s.to_string())
-                    .ok_or_else(|| PrError::ParseError("missing 'headRefName' field".into()))?;
-                Ok(PrInfo {
+        let result = prs
+            .into_iter()
+            .filter_map(|v| {
+                let number = v["number"].as_u64()? as u32;
+                let url = v["url"].as_str()?.to_string();
+                let title = v["title"].as_str()?.to_string();
+                let head_ref = match v["headRefName"].as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        tracing::warn!(pr = number, "skipping PR — missing headRefName field");
+                        None
+                    }
+                };
+                Some(PrInfo {
                     number,
                     url,
                     title,
-                    head_ref: Some(head_ref),
+                    head_ref,
                 })
             })
-            .collect()
+            .collect();
+        Ok(result)
     }
 
     fn get_pr_state(&self, pr_number: u32, skip_labels: &[String]) -> Result<PrWithState, PrError> {
@@ -802,7 +798,16 @@ impl PrLifecycleTriage for GhPrLifecycle {
                 checks.iter().any(|c| {
                     c["conclusion"]
                         .as_str()
-                        .map(|s| s == "FAILURE")
+                        .map(|s| {
+                            matches!(
+                                s,
+                                "FAILURE"
+                                    | "TIMED_OUT"
+                                    | "CANCELLED"
+                                    | "ACTION_REQUIRED"
+                                    | "STARTUP_FAILURE"
+                            )
+                        })
                         .unwrap_or(false)
                 })
             })
@@ -821,7 +826,8 @@ impl PrLifecycleTriage for GhPrLifecycle {
         let review_decision = v["reviewDecision"].as_str().unwrap_or("");
         let state = match review_decision {
             "CHANGES_REQUESTED" => PrTriageState::ChangesRequested,
-            "APPROVED" | "" => PrTriageState::ReadyToMerge,
+            "APPROVED" => PrTriageState::ReadyToMerge,
+            "" => PrTriageState::NeedsReview,
             "REVIEW_REQUIRED" => PrTriageState::NeedsReview,
             _ => PrTriageState::NeedsReview,
         };
@@ -1761,5 +1767,58 @@ mod tests {
         assert_eq!(Mergeable::from_gh_str("mergeable"), None); // wrong case
         assert_eq!(Mergeable::from_gh_str(""), None);
         assert_eq!(Mergeable::from_gh_str("something-else"), None);
+    }
+
+    // ── #167: CI conclusion edge cases ───────────────────────────────────────
+
+    #[test]
+    fn triage_checks_failing_maps_to_fix_checks() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(40);
+        mock.open_prs = vec![pr.clone()];
+        mock.states
+            .insert(40, make_state(pr, PrTriageState::ChecksFailing));
+        let triage = PrTriage::new(default_config(), mock);
+        let action = triage.select_action();
+        if let TriageAction::FixChecks { pr, .. } = action {
+            assert_eq!(pr.number, 40);
+        } else {
+            panic!("expected FixChecks for ChecksFailing PR");
+        }
+    }
+
+    // ── #168: Empty reviewDecision → NeedsReview ─────────────────────────────
+
+    #[test]
+    fn triage_needs_review_does_not_merge() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(50);
+        mock.open_prs = vec![pr.clone()];
+        mock.states
+            .insert(50, make_state(pr, PrTriageState::NeedsReview));
+        let triage = PrTriage::new(default_config(), mock);
+        let action = triage.select_action();
+        assert!(
+            !matches!(action, TriageAction::Merge { .. }),
+            "NeedsReview should not produce Merge"
+        );
+    }
+
+    #[test]
+    fn triage_approved_pr_produces_merge() {
+        let mut mock = MockPrLifecycleTriage::new();
+        let pr = make_pr(51);
+        mock.open_prs = vec![pr.clone()];
+        mock.states
+            .insert(51, make_state(pr, PrTriageState::ReadyToMerge));
+        let mut config = default_config();
+        config.require_human_review = false;
+        let triage = PrTriage::new(config, mock);
+        let action = triage.select_action();
+        if let TriageAction::Merge { pr } = action {
+            assert_eq!(pr.number, 51);
+        } else {
+            panic!("APPROVED with require_human_review=false should produce Merge");
+        }
     }
 }
