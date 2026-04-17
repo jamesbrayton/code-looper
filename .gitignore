@@ -10,6 +10,9 @@ target
 
 .claude/settings.local.json
 
+# Ralph Loop iteration logs (local run artifacts)
+.claude/ralph-loop-logs/
+
 # Code Looper run artifacts (manifest, summaries, per-iteration logs).
 # Config, rules, and prompts under .code-looper/ are intended to be committed.
 .code-looper/runs/

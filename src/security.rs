@@ -217,16 +217,28 @@ fn redact_env_var_value(s: String, var_name: &str) -> String {
     while let Some(pos) = remaining.find(needle.as_str()) {
         result.push_str(&remaining[..pos + needle.len()]);
         let after_eq = &remaining[pos + needle.len()..];
-        // Value ends at the first whitespace byte or end-of-string.  We measure
-        // the length in *bytes* (not chars) so the resulting split is a valid
-        // UTF-8 boundary even when the value contains multi-byte characters —
-        // ASCII whitespace bytes cannot appear inside a multi-byte UTF-8
-        // sequence, so the first such byte is always on a char boundary.
         let after_bytes = after_eq.as_bytes();
-        let value_len = after_bytes
-            .iter()
-            .position(u8::is_ascii_whitespace)
-            .unwrap_or(after_bytes.len());
+
+        // If the value starts with a quote, scan to the matching closing quote
+        // (or end-of-string for unclosed quotes).
+        let value_len = if after_bytes.first() == Some(&b'"') || after_bytes.first() == Some(&b'\'')
+        {
+            let quote = after_bytes[0];
+            // Find the closing quote; if absent, consume to end of string.
+            after_bytes
+                .iter()
+                .skip(1)
+                .position(|&b| b == quote)
+                .map(|p| p + 2) // +1 for skipped opening quote, +1 to include closing quote
+                .unwrap_or(after_bytes.len())
+        } else {
+            // Unquoted: value ends at the first whitespace byte or end-of-string.
+            after_bytes
+                .iter()
+                .position(u8::is_ascii_whitespace)
+                .unwrap_or(after_bytes.len())
+        };
+
         if value_len > 0 {
             result.push_str(REDACTED);
             remaining = &after_eq[value_len..];
@@ -578,6 +590,44 @@ mod tests {
         let input = "sk-ant-short123";
         let output = redact_secrets(input);
         assert_eq!(output, input, "Short suffix should NOT be redacted");
+    }
+
+    // ── #173: Quoted env var values ─────────────────────────────────────────
+
+    #[test]
+    fn redacts_double_quoted_env_var_value() {
+        let input = r#"GITHUB_TOKEN="ghp_secret value" rest"#.to_string();
+        let output = redact_env_var_value(input, "GITHUB_TOKEN");
+        assert_eq!(output, "GITHUB_TOKEN=[REDACTED] rest");
+        assert!(!output.contains("secret"), "leaked secret: {output}");
+    }
+
+    #[test]
+    fn redacts_single_quoted_env_var_value() {
+        let input = "GITHUB_TOKEN='ghp_secret value' rest".to_string();
+        let output = redact_env_var_value(input, "GITHUB_TOKEN");
+        assert_eq!(output, "GITHUB_TOKEN=[REDACTED] rest");
+        assert!(!output.contains("secret"), "leaked secret: {output}");
+    }
+
+    #[test]
+    fn redacts_unclosed_quoted_env_var_value() {
+        let input = r#"GITHUB_TOKEN="ghp_secret value"#.to_string();
+        let output = redact_env_var_value(input, "GITHUB_TOKEN");
+        assert_eq!(output, "GITHUB_TOKEN=[REDACTED]");
+        assert!(!output.contains("secret"), "leaked secret: {output}");
+    }
+
+    #[test]
+    fn redacts_quoted_value_with_embedded_spaces() {
+        let input = r#"export GITHUB_TOKEN="ghp_abc 123 xyz" && echo done"#.to_string();
+        let output = redact_env_var_value(input, "GITHUB_TOKEN");
+        assert!(!output.contains("ghp_abc"), "leaked token: {output}");
+        assert!(!output.contains("123"), "leaked partial value: {output}");
+        assert!(
+            output.contains("&& echo done"),
+            "rest of line lost: {output}"
+        );
     }
 
     #[test]

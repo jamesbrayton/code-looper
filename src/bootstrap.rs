@@ -172,6 +172,21 @@ fn bootstrap_instruction_file(
             if contents.contains(SECTION_BEGIN) && contents.contains(SECTION_END) {
                 // Complete section already present.
                 Ok(BootstrapAction::AlreadySatisfied(path))
+            } else if contents.contains(SECTION_BEGIN) && !contents.contains(SECTION_END) {
+                // Orphaned begin marker (partial/corrupt injection from a prior
+                // interrupted run).  Remove everything from the orphaned begin
+                // marker to the end of the file before re-appending a clean section.
+                if !dry_run {
+                    let orphan_pos = contents
+                        .find(SECTION_BEGIN)
+                        .expect("contains() confirmed presence");
+                    let truncated = contents[..orphan_pos].trim_end();
+                    let separator = if truncated.is_empty() { "" } else { "\n\n" };
+                    let updated = format!("{truncated}{separator}{CLAUDE_MD_SECTION}\n");
+                    atomic_write(&path, &updated)
+                        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))?;
+                }
+                Ok(BootstrapAction::Appended(path))
             } else {
                 // Append the delimited section.
                 if !dry_run {
@@ -258,77 +273,43 @@ fn strip_trailing_commas_in_object(tail: &str) -> String {
 ///
 /// Returns `None` if the file does not look like a JSON object.
 ///
-/// Tolerates trailing commas in the input (e.g. VS Code's JSONC format)
-/// by stripping them before inserting, so the output is always valid JSON.
-/// See #100.
+/// Uses `serde_json` for parsing and modification to avoid false-match
+/// issues with raw string search (see #171).  Trailing commas (JSONC) are
+/// stripped before parsing.
 fn merge_github_server(json: &str) -> Option<String> {
-    let github_entry = r#""github": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "GITHUB_PERSONAL_ACCESS_TOKEN",
-        "ghcr.io/github/github-mcp-server"
-      ],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
-      }
-    }"#;
+    let github_value: serde_json::Value = serde_json::from_str(
+        r#"{
+          "command": "docker",
+          "args": [
+            "run",
+            "-i",
+            "--rm",
+            "-e",
+            "GITHUB_PERSONAL_ACCESS_TOKEN",
+            "ghcr.io/github/github-mcp-server"
+          ],
+          "env": {
+            "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+          }
+        }"#,
+    )
+    .expect("static github entry is valid JSON");
 
-    // Locate `"mcpServers"` block if present.
-    if let Some(mcp_start) = json.find("\"mcpServers\"") {
-        // Find the opening `{` of the mcpServers value.
-        let after_key = &json[mcp_start + "\"mcpServers\"".len()..];
-        let brace_offset = after_key.find('{')?;
-        let insert_pos = mcp_start + "\"mcpServers\"".len() + brace_offset + 1;
+    // Strip trailing commas so we can parse JSONC-style input.
+    let cleaned = strip_trailing_commas_in_object(json);
+    let mut doc: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
+    let root = doc.as_object_mut()?;
 
-        // Guard against non-ASCII input: if `insert_pos` lands inside a
-        // multi-byte UTF-8 sequence, bail out rather than panicking.
-        if !json.is_char_boundary(insert_pos) {
-            return None;
-        }
-
-        // Strip trailing commas from existing content so we don't produce
-        // double-comma output (e.g. `"github":{...},,"context7":{},`).
-        // See #100.
-        let tail = &json[insert_pos..];
-        let cleaned_tail = strip_trailing_commas_in_object(tail);
-
-        let needs_comma = !cleaned_tail.trim_start().starts_with('}');
-        let comma = if needs_comma { "," } else { "" };
-        let indented = github_entry
-            .lines()
-            .map(|l| format!("    {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let result = format!(
-            "{}\n{indented}{comma}{}",
-            &json[..insert_pos],
-            &cleaned_tail
-        );
-        return Some(result);
+    if let Some(servers) = root.get_mut("mcpServers") {
+        let servers = servers.as_object_mut()?;
+        servers.insert("github".to_string(), github_value);
+    } else {
+        let mut servers = serde_json::Map::new();
+        servers.insert("github".to_string(), github_value);
+        root.insert("mcpServers".to_string(), serde_json::Value::Object(servers));
     }
 
-    // No mcpServers block: insert at the top-level object.
-    let open = json.find('{')?;
-    let insert_pos = open + 1;
-    // Guard against non-ASCII input at top-level insertion point.
-    if !json.is_char_boundary(insert_pos) {
-        return None;
-    }
-    let tail = &json[insert_pos..];
-    let cleaned_tail = strip_trailing_commas_in_object(tail);
-    let needs_comma = !cleaned_tail.trim_start().starts_with('}');
-    let comma = if needs_comma { "," } else { "" };
-    let result = format!(
-        "{}\n  {}{comma}{}",
-        &json[..insert_pos],
-        github_entry.lines().collect::<Vec<_>>().join("\n  "),
-        &cleaned_tail
-    );
-    Some(result)
+    Some(serde_json::to_string_pretty(&doc).expect("serialization cannot fail"))
 }
 
 // ── .gitignore ───────────────────────────────────────────────────────────────
@@ -871,5 +852,67 @@ mod tests {
         fs::create_dir_all(dir.path().join(".code-looper")).unwrap();
         fs::write(dir.path().join(".code-looper/config.toml"), "").unwrap();
         assert!(!warn_if_broad_ignore_hides_config(dir.path()));
+    }
+
+    // ── #172: Orphaned SECTION_BEGIN ──────────────────────────────────────────
+
+    #[test]
+    fn orphaned_section_begin_is_replaced_cleanly() {
+        let dir = tmp();
+        let path = dir.path().join("CLAUDE.md");
+        // Simulate a partial/corrupt injection: SECTION_BEGIN without SECTION_END.
+        fs::write(
+            &path,
+            format!("# Project\n\n{SECTION_BEGIN}\norphaned stuff\n"),
+        )
+        .unwrap();
+        let actions = run_bootstrap(dir.path(), false).unwrap();
+        assert!(matches!(&actions[0], BootstrapAction::Appended(_)));
+        let content = fs::read_to_string(&path).unwrap();
+        // Should have exactly one complete section now.
+        assert_eq!(content.matches(SECTION_BEGIN).count(), 1);
+        assert_eq!(content.matches(SECTION_END).count(), 1);
+        assert!(content.contains("# Project"), "original content preserved");
+        assert!(
+            !content.contains("orphaned stuff"),
+            "orphaned content removed"
+        );
+    }
+
+    #[test]
+    fn orphaned_section_begin_no_unbounded_growth() {
+        let dir = tmp();
+        let path = dir.path().join("CLAUDE.md");
+        fs::write(&path, format!("# Project\n\n{SECTION_BEGIN}\norphaned\n")).unwrap();
+        // Run bootstrap twice — should not accumulate multiple sections.
+        run_bootstrap(dir.path(), false).unwrap();
+        run_bootstrap(dir.path(), false).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        assert_eq!(content.matches(SECTION_BEGIN).count(), 1);
+        assert_eq!(content.matches(SECTION_END).count(), 1);
+    }
+
+    // ── #171: merge_github_server with serde_json ────────────────────────────
+
+    #[test]
+    fn merge_github_server_no_false_match_on_string_value() {
+        // A JSON string value containing "mcpServers" should not confuse
+        // the function (which previously used raw string search).
+        let json = r#"{
+  "description": "This file has mcpServers mentioned in a string",
+  "mcpServers": {
+    "context7": {}
+  }
+}"#;
+        let result = merge_github_server(json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(
+            parsed["mcpServers"]["github"].is_object(),
+            "github entry should be inserted under mcpServers"
+        );
+        assert!(
+            parsed["mcpServers"]["context7"].is_object(),
+            "existing entries should be preserved"
+        );
     }
 }

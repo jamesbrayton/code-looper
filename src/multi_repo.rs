@@ -42,6 +42,9 @@ pub fn run_multi_repo_with_factory(
     factory: &dyn AdapterFactory,
 ) -> Vec<RepoRunResult> {
     let interrupted = get_or_init_interrupt_flag();
+    // Reset the interrupt flag so a prior SIGINT does not cause this call to
+    // skip all targets immediately.  See #175.
+    interrupted.store(false, Ordering::SeqCst);
 
     let mut results = Vec::with_capacity(targets.len());
 

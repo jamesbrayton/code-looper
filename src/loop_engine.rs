@@ -569,6 +569,31 @@ impl LoopEngine {
             if let Some(ref action) = pr_plan.triage_action {
                 match action {
                     TriageAction::Merge { pr } => {
+                        if !self.config.allow_direct_github {
+                            warn!(
+                                iteration = i,
+                                pr = pr.number,
+                                "multi-pr: merge blocked — direct gh CLI usage is disabled \
+                                 (set allow_direct_github = true or route merges through MCP)"
+                            );
+                            iteration_records.push(IterationRecord {
+                                iteration: i,
+                                provider: self.config.provider.clone(),
+                                prompt_source: crate::telemetry::PromptSource::TriageMerge,
+                                workflow_branch: None,
+                                outcome: IterationOutcome::SpawnFailure {
+                                    message: "gh pr merge blocked by MCP-only policy".into(),
+                                },
+                                duration_ms: iter_start.elapsed().as_millis(),
+                                retries: 0,
+                                stderr_excerpt: None,
+                                transcript_path: None,
+                                started_at: iter_started_at,
+                            });
+                            summary.iterations_run += 1;
+                            summary.failures += 1;
+                            continue;
+                        }
                         info!(
                             iteration = i,
                             pr = pr.number,
@@ -2632,5 +2657,60 @@ mod tests {
 
         // Clean up cache.
         crate::config::clear_rules_cache();
+    }
+
+    // ── #176 item 1: interrupt flag mid-run ──────────────────────────────────
+
+    #[test]
+    fn interrupt_flag_set_mid_run_causes_early_exit() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Configure for 10 iterations but interrupt after the first.
+        let config = config_with_iterations(10);
+        let flag = Arc::new(AtomicBool::new(false));
+        let flag_for_adapter = Arc::clone(&flag);
+
+        struct InterruptAfterFirstAdapter {
+            flag: Arc<AtomicBool>,
+            call_count: std::sync::Mutex<u32>,
+        }
+        impl ProviderAdapter for InterruptAfterFirstAdapter {
+            fn name(&self) -> &str {
+                "interrupt-test"
+            }
+            fn execute(
+                &self,
+                _prompt: &str,
+            ) -> Result<crate::provider::ExecutionResult, crate::error::LooperError> {
+                let mut count = self.call_count.lock().unwrap();
+                *count += 1;
+                // Set the interrupt flag after the first call completes.
+                if *count == 1 {
+                    self.flag.store(true, Ordering::SeqCst);
+                }
+                Ok(crate::provider::ExecutionResult {
+                    exit_code: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    duration: std::time::Duration::from_millis(1),
+                })
+            }
+        }
+
+        let adapter = InterruptAfterFirstAdapter {
+            flag: flag_for_adapter,
+            call_count: std::sync::Mutex::new(0),
+        };
+        let engine =
+            LoopEngine::with_adapter(config, Box::new(adapter)).with_shared_interrupt(flag);
+        let summary = engine.run();
+
+        assert_eq!(summary.iterations_run, 1, "should stop after 1 iteration");
+        assert_eq!(summary.successes, 1);
+        assert_eq!(
+            summary.termination_reason,
+            Some(TerminationReason::Interrupted)
+        );
     }
 }
