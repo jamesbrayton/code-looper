@@ -21,10 +21,10 @@ Releases are triggered by manually pushing a `vX.Y.Z` git tag.
 on:
   push:
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+      - 'v[0-9]*.[0-9]*.[0-9]*'
 ```
 
-The `*` suffix allows pre-release tags (`v0.2.0-beta.1`, `v0.2.0-rc.1`). The `release.yml` workflow detects hyphens in the tag name and marks those releases as pre-releases on GitHub.
+GitHub Actions tag filters use glob syntax, not regex — `*` matches any sequence of characters. The pattern above matches `v0.2.0`, `v1.0.0`, and also pre-release tags like `v0.2.0-beta.1`. The `release.yml` workflow detects hyphens in the tag name and marks those releases as pre-releases on GitHub.
 
 The full release sequence (per #185 and `docs/versioning.md`):
 1. Milestone reaches zero open issues and zero open PRs

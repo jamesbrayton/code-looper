@@ -20,8 +20,8 @@ The project is currently pre-1.0 (`0.x.y`). Minor version bumps may include brea
 4. Commit: `git commit -am "chore: bump version to vX.Y.Z (#<issue>)"`
 5. Tag: `git tag vX.Y.Z`
 6. Push commit and tag: `git push && git push --tags`
-7. The `release.yml` workflow fires automatically on the tag push, builds cross-platform binaries, and creates the GitHub Release
-8. After the release is published, close the milestone
+7. The `release.yml` workflow fires automatically on the tag push, builds cross-platform binaries, creates the GitHub Release, and closes the milestone
+8. Confirm the milestone was closed by the workflow (close it manually only if the automation failed)
 
 ## Tag Format
 
