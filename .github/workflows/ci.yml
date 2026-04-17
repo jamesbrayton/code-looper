@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
 
@@ -11,7 +9,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  ci:
+  pr-check:
     name: fmt / clippy / test / release
     runs-on: ubuntu-latest
 
@@ -24,7 +22,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache cargo registry and build artifacts
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
