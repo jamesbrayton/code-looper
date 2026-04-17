@@ -73,6 +73,7 @@ Configured in `.mcp.json`:
 - `docs/PRD.md` — Full product requirements document with architecture, milestones, risks, and success criteria
 - `docs/ADRs/` — ADRs tracking significant architectural decisions
 - `docs/project-management.md` — Label taxonomy, milestone conventions, and lifecycle orchestration model
+- `docs/versioning.md` — SemVer scheme, bump rules, and step-by-step release process
 
 <!-- code-looper begin -->
 ## Code Looper
