@@ -44,11 +44,38 @@ printf 'Installing code-looper %s for %s...\n' "$VERSION" "$TARGET"
 ARCHIVE="code-looper-${VERSION}-${TARGET}.tar.gz"
 BINARY_NAME="code-looper-${VERSION}-${TARGET}"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
+CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
 
-TMP_DIR=$(mktemp -d)
+TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t code-looper 2>/dev/null || printf '')
+if [ -z "$TMP_DIR" ] || [ ! -d "$TMP_DIR" ]; then
+  printf 'Failed to create a temporary directory for installation.\n' >&2
+  exit 1
+fi
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/${ARCHIVE}"
+curl -fsSL "$CHECKSUMS_URL" -o "${TMP_DIR}/checksums.txt"
+
+EXPECTED_CHECKSUM=$(grep "  ${ARCHIVE}$" "${TMP_DIR}/checksums.txt" | awk '{print $1}' || true)
+if [ -z "$EXPECTED_CHECKSUM" ]; then
+  printf 'Failed to find checksum for %s in checksums.txt.\n' "$ARCHIVE" >&2
+  exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_CHECKSUM=$(sha256sum "${TMP_DIR}/${ARCHIVE}" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL_CHECKSUM=$(shasum -a 256 "${TMP_DIR}/${ARCHIVE}" | awk '{print $1}')
+else
+  printf 'Neither sha256sum nor shasum is available to verify the download.\n' >&2
+  exit 1
+fi
+
+if [ "$ACTUAL_CHECKSUM" != "$EXPECTED_CHECKSUM" ]; then
+  printf 'Checksum verification failed for %s.\n' "$ARCHIVE" >&2
+  exit 1
+fi
+
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
 
 mkdir -p "$INSTALL_DIR"

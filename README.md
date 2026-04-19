@@ -14,7 +14,7 @@ If you are a UAT tester, start with [docs/getting-started.md](docs/getting-start
 curl -fsSL https://raw.githubusercontent.com/jamesbrayton/code-looper/main/install.sh | sh
 ```
 
-Detects your OS and architecture, downloads the correct binary from [GitHub Releases](https://github.com/jamesbrayton/code-looper/releases/latest), and installs to `~/.local/bin`. Override with `INSTALL_DIR=/custom/path sh install.sh`.
+Detects your OS and architecture, downloads the correct binary from [GitHub Releases](https://github.com/jamesbrayton/code-looper/releases/latest), and installs to `~/.local/bin`. Override with `curl -fsSL https://raw.githubusercontent.com/jamesbrayton/code-looper/main/install.sh | INSTALL_DIR=/custom/path sh -s --`.
 
 **Supported platforms:** macOS ARM64 (Apple Silicon), Linux x86\_64, Linux ARM64.
 
