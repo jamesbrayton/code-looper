@@ -237,10 +237,10 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
     Ok(BootstrapAction::MergedJson(path))
 }
 
-/// Strip trailing commas that appear before `}` in a JSON-object tail string.
+/// Strip trailing commas that appear before `}` or `]` in a JSONC string.
 ///
-/// Only cleans the *last* trailing comma before each `}` — this is enough to
-/// prevent double-comma output when `merge_github_server` inserts a new entry.
+/// Handles trailing commas in both JSON objects and arrays, covering
+/// the JSONC convention that editors like VS Code produce by default.
 fn strip_trailing_commas_in_object(tail: &str) -> String {
     let mut result = String::with_capacity(tail.len());
     let chars: Vec<char> = tail.chars().collect();
@@ -248,12 +248,12 @@ fn strip_trailing_commas_in_object(tail: &str) -> String {
     let mut i = 0;
     while i < len {
         if chars[i] == ',' {
-            // Look ahead past whitespace/newlines for `}`. If found, skip this comma.
+            // Look ahead past whitespace/newlines for `}` or `]`. If found, skip this comma.
             let mut j = i + 1;
             while j < len && chars[j].is_whitespace() {
                 j += 1;
             }
-            if j < len && chars[j] == '}' {
+            if j < len && (chars[j] == '}' || chars[j] == ']') {
                 // Skip the trailing comma — don't push it.
                 i += 1;
                 continue;
@@ -660,6 +660,29 @@ mod tests {
     fn strip_trailing_commas_preserves_valid_commas() {
         let input = r#""a":{}, "b":{}}"#;
         assert_eq!(strip_trailing_commas_in_object(input), input);
+    }
+
+    #[test]
+    fn strip_trailing_commas_removes_comma_before_bracket() {
+        let input = r#"["a", "b",]"#;
+        let result = strip_trailing_commas_in_object(input);
+        assert_eq!(result, r#"["a", "b"]"#);
+    }
+
+    #[test]
+    fn merge_handles_trailing_comma_in_array_value() {
+        // JSONC with a trailing comma inside a nested array
+        let input = r#"{"mcpServers": {"existing": {"command": "docker", "args": ["run", "--rm",]}}}"#;
+        let result = merge_github_server(input);
+        assert!(
+            result.is_some(),
+            "should parse JSONC with trailing comma in array args"
+        );
+        let out = result.unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&out).expect("merge_github_server output should be valid JSON");
+        assert!(v["mcpServers"]["github"].is_object(), "github server should be inserted");
+        assert!(v["mcpServers"]["existing"].is_object(), "existing server should be preserved");
     }
 
     #[test]
