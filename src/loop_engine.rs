@@ -2116,6 +2116,8 @@ mod tests {
             }
         }
 
+        use crate::config::TelemetryConfig;
+        let artifacts_dir = tempfile::tempdir().unwrap();
         let config = LoopConfig {
             iterations: 3,
             provider: Provider::Claude,
@@ -2127,6 +2129,10 @@ mod tests {
                 comment_issue_number: Some(1),
                 comment_cadence: CommentCadence::EveryIteration,
                 ..Default::default()
+            },
+            telemetry: TelemetryConfig {
+                artifacts_dir: artifacts_dir.path().to_path_buf(),
+                ..TelemetryConfig::default()
             },
             ..Default::default()
         }
