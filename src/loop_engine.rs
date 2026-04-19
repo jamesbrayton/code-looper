@@ -584,7 +584,7 @@ impl LoopEngine {
                                 provider: self.config.provider.clone(),
                                 prompt_source: crate::telemetry::PromptSource::TriageMerge,
                                 workflow_branch: None,
-                                outcome: IterationOutcome::SpawnFailure {
+                                outcome: IterationOutcome::PolicyGuardBlock {
                                     message: "gh pr merge blocked by MCP-only policy".into(),
                                 },
                                 duration_ms: iter_start.elapsed().as_millis(),
@@ -2557,6 +2557,91 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 1);
+    }
+
+    /// When `allow_direct_github = false`, a `TriageAction::Merge` must be
+    /// recorded as `PolicyGuardBlock` — not `SpawnFailure` — because nothing
+    /// was spawned; the request was rejected by a policy gate (#180).
+    #[test]
+    fn merge_blocked_by_policy_recorded_as_policy_guard_block() {
+        use crate::config::{PrManagementConfig, PrMode, TelemetryConfig};
+        use crate::pr_manager::{PrInfo, TriageAction};
+        use crate::pr_strategy::{IterationPlan, PrStrategy};
+        use crate::telemetry::{IterationOutcome, RunManifest};
+
+        struct MergeStrategy;
+        impl PrStrategy for MergeStrategy {
+            fn plan_iteration(&self, _iteration: u64) -> IterationPlan {
+                let pr = PrInfo {
+                    number: 77,
+                    title: "feat: merge me".to_string(),
+                    url: "https://github.com/owner/repo/pull/77".to_string(),
+                    head_ref: Some("loop/77-feat-merge-me".to_string()),
+                };
+                IterationPlan {
+                    description: "merge ready PR".to_string(),
+                    mode: PrMode::MultiPr,
+                    prompt_override: None,
+                    triage_action: Some(TriageAction::Merge { pr }),
+                }
+            }
+        }
+
+        let artifacts_dir = tempfile::tempdir().unwrap();
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test prompt".to_string()),
+            allow_direct_github: false,
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
+            telemetry: TelemetryConfig {
+                artifacts_dir: artifacts_dir.path().to_path_buf(),
+                no_summary: false,
+                ..TelemetryConfig::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let engine = LoopEngine::with_adapter_and_pr_strategy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(MergeStrategy),
+        );
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+
+        // Read the manifest to verify the outcome variant is PolicyGuardBlock,
+        // not SpawnFailure — nothing was spawned; the policy gate rejected it.
+        let run_dir = std::fs::read_dir(artifacts_dir.path())
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .expect("run directory should exist");
+        let manifest_path = run_dir.path().join("manifest.json");
+        let raw = std::fs::read_to_string(&manifest_path)
+            .expect("manifest.json should be written");
+        let manifest: RunManifest =
+            serde_json::from_str(&raw).expect("manifest.json should be valid JSON");
+        assert_eq!(manifest.iterations.len(), 1);
+        assert!(
+            matches!(
+                &manifest.iterations[0].outcome,
+                IterationOutcome::PolicyGuardBlock { .. }
+            ),
+            "expected PolicyGuardBlock, got {:?}",
+            manifest.iterations[0].outcome
+        );
     }
 
     /// When `head_ref` is empty the cleanup branch is skipped entirely.
