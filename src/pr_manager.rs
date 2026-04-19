@@ -849,9 +849,27 @@ impl PrLifecycleTriage for GhPrLifecycle {
 /// `head_ref: None`.  Missing `number`, `url`, or `title` also produce `None`
 /// via `?`.
 pub(crate) fn parse_pr_info_from_value(v: serde_json::Value) -> Option<PrInfo> {
-    let number = v["number"].as_u64()? as u32;
-    let url = v["url"].as_str()?.to_string();
-    let title = v["title"].as_str()?.to_string();
+    let number = match v["number"].as_u64() {
+        Some(n) => n as u32,
+        None => {
+            tracing::warn!("skipping PR entry — missing or invalid 'number' field");
+            return None;
+        }
+    };
+    let url = match v["url"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::warn!(pr = number, "skipping PR entry — missing or invalid 'url' field");
+            return None;
+        }
+    };
+    let title = match v["title"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::warn!(pr = number, "skipping PR entry — missing or invalid 'title' field");
+            return None;
+        }
+    };
     let head_ref = match v["headRefName"].as_str() {
         Some(s) => s.to_string(),
         None => {
@@ -1986,6 +2004,37 @@ mod tests {
             "headRefName": "fix/foo"
         });
         assert!(parse_pr_info_from_value(v).is_none());
+    }
+
+    #[test]
+    fn parse_pr_info_missing_url_is_skipped() {
+        let v = serde_json::json!({
+            "number": 42,
+            "title": "some title",
+            "headRefName": "feature/foo"
+        });
+        assert!(parse_pr_info_from_value(v).is_none());
+    }
+
+    #[test]
+    fn parse_pr_info_missing_title_is_skipped() {
+        let v = serde_json::json!({
+            "number": 42,
+            "url": "https://github.com/owner/repo/pull/42",
+            "headRefName": "feature/foo"
+        });
+        assert!(parse_pr_info_from_value(v).is_none());
+    }
+
+    #[test]
+    fn parse_pr_info_valid_entries_returned_when_batch_has_bad_entries() {
+        let values = vec![
+            serde_json::json!({"number": 1, "title": "bad — no url", "headRefName": "a"}),
+            serde_json::json!({"number": 2, "url": "https://github.com/r/pull/2", "title": "ok", "headRefName": "b"}),
+        ];
+        let results: Vec<_> = values.into_iter().filter_map(parse_pr_info_from_value).collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].number, 2);
     }
 
     // ── #169: merge_pr routing through PrTriage ──────────────────────────────
