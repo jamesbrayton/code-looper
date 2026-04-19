@@ -237,11 +237,12 @@ fn bootstrap_mcp_config(workspace_dir: &Path, dry_run: bool) -> anyhow::Result<B
     Ok(BootstrapAction::MergedJson(path))
 }
 
-/// Strip trailing commas that appear before `}` or `]` in a JSONC string.
+/// Strip trailing commas that appear before `}` or `]` in a JSON string.
 ///
-/// Handles trailing commas in both JSON objects and arrays, covering
-/// the JSONC convention that editors like VS Code produce by default.
-fn strip_trailing_commas_in_object(tail: &str) -> String {
+/// Handles trailing commas in both objects and arrays — the subset of JSONC
+/// that VS Code and similar editors produce.  Comment syntax (`//`, `/* */`)
+/// is not handled; this is "JSON with trailing commas", not full JSONC.
+fn strip_trailing_commas(tail: &str) -> String {
     let mut result = String::with_capacity(tail.len());
     let chars: Vec<char> = tail.chars().collect();
     let len = chars.len();
@@ -296,7 +297,7 @@ fn merge_github_server(json: &str) -> Option<String> {
     .expect("static github entry is valid JSON");
 
     // Strip trailing commas so we can parse JSONC-style input.
-    let cleaned = strip_trailing_commas_in_object(json);
+    let cleaned = strip_trailing_commas(json);
     let mut doc: serde_json::Value = serde_json::from_str(&cleaned).ok()?;
     let root = doc.as_object_mut()?;
 
@@ -653,19 +654,19 @@ mod tests {
 
     #[test]
     fn strip_trailing_commas_removes_comma_before_brace() {
-        assert_eq!(strip_trailing_commas_in_object(r#""a":{},}"#), r#""a":{}}"#);
+        assert_eq!(strip_trailing_commas(r#""a":{},}"#), r#""a":{}}"#);
     }
 
     #[test]
     fn strip_trailing_commas_preserves_valid_commas() {
         let input = r#""a":{}, "b":{}}"#;
-        assert_eq!(strip_trailing_commas_in_object(input), input);
+        assert_eq!(strip_trailing_commas(input), input);
     }
 
     #[test]
     fn strip_trailing_commas_removes_comma_before_bracket() {
         let input = r#"["a", "b",]"#;
-        let result = strip_trailing_commas_in_object(input);
+        let result = strip_trailing_commas(input);
         assert_eq!(result, r#"["a", "b"]"#);
     }
 

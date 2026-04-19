@@ -19,12 +19,12 @@ Pre-built binaries are available for every tagged release. Download the archive 
 | Linux ARM64 | `code-looper-<version>-aarch64-unknown-linux-gnu.tar.gz` |
 | Windows x86_64 | `code-looper-<version>-x86_64-pc-windows-msvc.zip` |
 
-Replace `<version>` with the tag you want (e.g. `v0.2.0`).
+Replace `<version>` with the tag you want (e.g. `v0.2.1`).
 
 **macOS / Linux example (ARM64 Mac):**
 
 ```bash
-VERSION=v0.2.0   # replace with the latest tag
+VERSION=v0.2.1   # replace with the latest tag
 curl -fsSL "https://github.com/jamesbrayton/code-looper/releases/download/${VERSION}/code-looper-${VERSION}-aarch64-apple-darwin.tar.gz" \
   | tar -xz
 sudo mv "code-looper-${VERSION}-aarch64-apple-darwin" /usr/local/bin/code-looper
@@ -33,7 +33,7 @@ sudo mv "code-looper-${VERSION}-aarch64-apple-darwin" /usr/local/bin/code-looper
 **Windows (PowerShell):**
 
 ```powershell
-$VERSION = "v0.2.0"   # replace with the latest tag
+$VERSION = "v0.2.1"   # replace with the latest tag
 $BINARY  = "code-looper-${VERSION}-x86_64-pc-windows-msvc"
 Invoke-WebRequest "https://github.com/jamesbrayton/code-looper/releases/download/${VERSION}/${BINARY}.zip" -OutFile "${BINARY}.zip"
 Expand-Archive "${BINARY}.zip" -DestinationPath .

@@ -844,13 +844,18 @@ impl PrLifecycleTriage for GhPrLifecycle {
 
 /// Parse one element of `gh pr list --json` output into a [`PrInfo`].
 ///
-/// Returns `None` (and logs a warning) when `headRefName` is absent so that a
-/// single malformed entry does not propagate downstream as a PR with
-/// `head_ref: None`.  Missing `number`, `url`, or `title` also produce `None`
-/// via `?`.
+/// Returns `None` and logs a `tracing::warn!` for any missing or invalid
+/// required field (`number`, `url`, `title`, `headRefName`) so that a single
+/// malformed entry does not propagate downstream silently.
 pub(crate) fn parse_pr_info_from_value(v: serde_json::Value) -> Option<PrInfo> {
     let number = match v["number"].as_u64() {
-        Some(n) => n as u32,
+        Some(n) => match u32::try_from(n) {
+            Ok(n32) => n32,
+            Err(_) => {
+                tracing::warn!(number = n, "skipping PR entry — 'number' overflows u32");
+                return None;
+            }
+        },
         None => {
             tracing::warn!("skipping PR entry — missing or invalid 'number' field");
             return None;
