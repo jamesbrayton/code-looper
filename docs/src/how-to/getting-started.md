@@ -76,7 +76,7 @@ Preview what would change without writing anything:
 code-looper bootstrap --dry-run
 ```
 
-See [docs/workspace-prerequisites.md](workspace-prerequisites.md) for the full list of checks and remediation options.
+See [Workspace Prerequisites](workspace-prerequisites.md) for the full list of checks and remediation options.
 
 ## Scaffold a configuration directory (optional)
 
@@ -202,7 +202,7 @@ code-looper \
   --repo-name my-repo
 ```
 
-See [docs/orchestration.md](orchestration.md) for details on workflow branch selection and PR lifecycle configuration.
+See [Orchestration](../explanation/orchestration.md) for details on workflow branch selection and PR lifecycle configuration.
 
 ## Enable PR management
 
@@ -230,7 +230,7 @@ code-looper \
 
 ## First loop walkthrough
 
-This is the end-to-end path a UAT tester should run before reporting any bugs. It uses `claude` as the provider; substitute `copilot` or `codex` if you prefer, but note that `codex` currently has no MCP tool support (see [docs/providers.md](providers.md)).
+This is the end-to-end path a UAT tester should run before reporting any bugs. It uses `claude` as the provider; substitute `copilot` or `codex` if you prefer, but note that `codex` currently has no MCP tool support (see [Providers](../reference/providers.md)).
 
 1. **Pick a throwaway repository** (a forked sandbox or a scratch clone), not a repository with work you cannot afford to lose. The loop does not push or open PRs in its default mode, but it will let the agent edit files.
 2. **Bootstrap it** once:
@@ -266,7 +266,7 @@ This is the end-to-end path a UAT tester should run before reporting any bugs. I
    `iteration-1.log` is written incrementally, so it is present even if the run is interrupted. `manifest.json` and `summary.md` are only written at clean exit.
 7. **Verify the sandbox is still clean** — `git status` should show no unintended changes unless the prompt asked the agent to edit files.
 
-If any of steps 2–7 fail, capture the output and check [docs/troubleshooting.md](troubleshooting.md) before reporting a bug. The most common first-run issues are provider CLI not on `$PATH` and `.mcp.json` missing the `github` entry (both caught by the startup checks).
+If any of steps 2–7 fail, capture the output and check [Troubleshooting](troubleshooting.md) before reporting a bug. The most common first-run issues are provider CLI not on `$PATH` and `.mcp.json` missing the `github` entry (both caught by the startup checks).
 
 ## User-directory install
 
@@ -293,16 +293,16 @@ code-looper --workspace-dir ~/src/my-repo
 # → picks up ~/src/my-repo/.code-looper/config.toml if it exists
 ```
 
-See [docs/configuration.md](configuration.md#config-file-resolution-three-tier)
+See [Configuration](../reference/configuration.md#config-file-resolution-three-tier)
 for the full resolution order.
 
 ## Next steps
 
-- [docs/configuration.md](configuration.md) — Every config field, CLI flag, default, and precedence rule
-- [docs/providers.md](providers.md) — Provider adapter invocation, environment requirements, and known limitations
-- [docs/orchestration.md](orchestration.md) — Workflow branches, shippable signal, PR lifecycle, multi-PR triage
-- [docs/prompt-injection.md](prompt-injection.md) — Every prompt, preamble, and comment template the engine injects
-- [docs/workspace-prerequisites.md](workspace-prerequisites.md) — What the prerequisite checker validates and how to fix each diagnostic
-- [docs/troubleshooting.md](troubleshooting.md) — Common failure modes and remediation steps
-- [docs/PRD.md](PRD.md) — Full product requirements and roadmap
-- [CLAUDE.md](../CLAUDE.md) — Contributor workflow and issue discipline
+- [Configuration](../reference/configuration.md) — Every config field, CLI flag, default, and precedence rule
+- [Providers](../reference/providers.md) — Provider adapter invocation, environment requirements, and known limitations
+- [Orchestration](../explanation/orchestration.md) — Workflow branches, shippable signal, PR lifecycle, multi-PR triage
+- [Prompt Injection](../explanation/prompt-injection.md) — Every prompt, preamble, and comment template the engine injects
+- [Workspace Prerequisites](workspace-prerequisites.md) — What the prerequisite checker validates and how to fix each diagnostic
+- [Troubleshooting](troubleshooting.md) — Common failure modes and remediation steps
+- [Product Requirements](../design/prd.md) — Full product requirements and roadmap
+- [CLAUDE.md](https://github.com/jamesbrayton/code-looper/blob/main/CLAUDE.md) — Contributor workflow and issue discipline
