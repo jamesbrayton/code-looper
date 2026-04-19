@@ -6,14 +6,13 @@ use crate::config::{
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
 use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
 use crate::policy_guard::PolicyGuard;
-use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrManager, TriageAction};
+use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrError, PrManager, TriageAction};
 use crate::pr_strategy::{build_strategy, PrStrategy};
 use crate::provider::{AdapterFactory, DefaultAdapterFactory, ProviderAdapter};
 use crate::telemetry::{
     resolve_operator, unix_now, IterationOutcome, IterationRecord, RetryPolicy, RunArtifacts,
     RunManifest,
 };
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -600,73 +599,78 @@ impl LoopEngine {
                             url = %pr.url,
                             "multi-pr: merging ready PR"
                         );
-                        let merge_result = Command::new("gh")
-                            .args(["pr", "merge", &pr.number.to_string(), "--merge"])
-                            .output();
-                        let (merge_outcome, merge_stderr) = match merge_result {
-                            Ok(out) if out.status.success() => {
-                                info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
-                                // Attempt post-merge **remote-only** branch
-                                // cleanup when the PR has a known head
-                                // branch.  The engine never checks out the
-                                // PR's local branch in multi-PR mode, so
-                                // `cleanup_branch` (which tries to delete a
-                                // local branch) would operate on whatever
-                                // the engine's CWD happens to be on — see
-                                // #65.  `cleanup_merged_remote_branch` only
-                                // touches the remote.  Failures are
-                                // non-fatal (PR is already merged).
-                                if let Some(head_ref) = pr.head_ref.as_deref() {
-                                    let mut bm =
-                                        BranchManager::new(self.config.pr_management.clone());
-                                    if let Some(ref dir) = self.config.workspace_dir {
-                                        bm = bm.with_work_dir(dir.clone());
-                                    }
-                                    match bm.cleanup_merged_remote_branch(head_ref) {
-                                        Ok(()) => info!(
+                        let (merge_outcome, merge_stderr) =
+                            match self.pr_strategy.execute_merge(pr.number) {
+                                Ok(()) => {
+                                    info!(iteration = i, pr = pr.number, "multi-pr: PR merged");
+                                    // Attempt post-merge **remote-only** branch
+                                    // cleanup when the PR has a known head
+                                    // branch.  The engine never checks out the
+                                    // PR's local branch in multi-PR mode, so
+                                    // `cleanup_branch` (which tries to delete a
+                                    // local branch) would operate on whatever
+                                    // the engine's CWD happens to be on — see
+                                    // #65.  `cleanup_merged_remote_branch` only
+                                    // touches the remote.  Failures are
+                                    // non-fatal (PR is already merged).
+                                    if let Some(head_ref) = pr.head_ref.as_deref() {
+                                        let mut bm =
+                                            BranchManager::new(self.config.pr_management.clone());
+                                        if let Some(ref dir) = self.config.workspace_dir {
+                                            bm = bm.with_work_dir(dir.clone());
+                                        }
+                                        match bm.cleanup_merged_remote_branch(head_ref) {
+                                            Ok(()) => info!(
+                                                iteration = i,
+                                                branch = %head_ref,
+                                                "multi-pr: cleaned up remote feature branch after merge"
+                                            ),
+                                            Err(e) => warn!(
+                                                iteration = i,
+                                                branch = %head_ref,
+                                                error = %e,
+                                                "multi-pr: post-merge remote cleanup failed (non-fatal)"
+                                            ),
+                                        }
+                                    } else {
+                                        warn!(
                                             iteration = i,
-                                            branch = %head_ref,
-                                            "multi-pr: cleaned up remote feature branch after merge"
-                                        ),
-                                        Err(e) => warn!(
-                                            iteration = i,
-                                            branch = %head_ref,
-                                            error = %e,
-                                            "multi-pr: post-merge remote cleanup failed (non-fatal)"
-                                        ),
+                                            pr = pr.number,
+                                            "multi-pr: merged PR has no head_ref; \
+                                             skipping remote branch cleanup"
+                                        );
                                     }
-                                } else {
+                                    (IterationOutcome::Success, None)
+                                }
+                                Err(PrError::GhExitNonZero { code, stderr }) => {
                                     warn!(
                                         iteration = i,
                                         pr = pr.number,
-                                        "multi-pr: merged PR has no head_ref; \
-                                         skipping remote branch cleanup"
+                                        exit_code = code,
+                                        stderr = %stderr,
+                                        "multi-pr: merge exited non-zero"
                                     );
+                                    (
+                                        IterationOutcome::NonZeroExit { exit_code: code },
+                                        Some(stderr),
+                                    )
                                 }
-                                (IterationOutcome::Success, None)
-                            }
-                            Ok(out) => {
-                                let stderr = crate::security::redact_secrets(
-                                    &String::from_utf8_lossy(&out.stderr),
-                                );
-                                warn!(iteration = i, pr = pr.number, stderr = %stderr, "multi-pr: merge failed");
-                                (
-                                    IterationOutcome::NonZeroExit {
-                                        exit_code: out.status.code().unwrap_or(-1),
-                                    },
-                                    Some(stderr),
-                                )
-                            }
-                            Err(e) => {
-                                warn!(iteration = i, pr = pr.number, error = %e, "multi-pr: failed to spawn gh for merge");
-                                (
-                                    IterationOutcome::SpawnFailure {
-                                        message: e.to_string(),
-                                    },
-                                    None,
-                                )
-                            }
-                        };
+                                Err(e) => {
+                                    let msg = e.to_string();
+                                    warn!(
+                                        iteration = i,
+                                        pr = pr.number,
+                                        error = %msg,
+                                        "multi-pr: merge failed to spawn"
+                                    );
+                                    (
+                                        IterationOutcome::SpawnFailure {
+                                            message: msg.clone(),
+                                        },
+                                        Some(msg),
+                                    )
+                                }
+                            };
                         let merge_succeeded = matches!(merge_outcome, IterationOutcome::Success);
                         iteration_records.push(IterationRecord {
                             iteration: i,

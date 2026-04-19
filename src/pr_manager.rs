@@ -145,6 +145,11 @@ pub enum PrError {
 
     #[error("failed to parse gh output: {0}")]
     ParseError(String),
+
+    /// `gh` exited with a non-zero status code.  Kept distinct from
+    /// [`GhCommand`] so callers can map it to `NonZeroExit` for retry logic.
+    #[error("gh CLI exited with code {code}: {stderr}")]
+    GhExitNonZero { code: i32, stderr: String },
 }
 
 // ── PrLifecycle trait ─────────────────────────────────────────────────────────
@@ -668,6 +673,10 @@ pub trait PrLifecycleTriage: Send + Sync {
     /// The implementation queries `gh pr view <number> --json` for check
     /// status, review decision, and labels.
     fn get_pr_state(&self, pr_number: u32, skip_labels: &[String]) -> Result<PrWithState, PrError>;
+
+    /// Merge the pull request identified by `pr_number` using a squash-free
+    /// merge commit (`--merge`).
+    fn merge_pr(&self, pr_number: u32) -> Result<(), PrError>;
 }
 
 impl PrLifecycleTriage for GhPrLifecycle {
@@ -699,24 +708,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
 
         let result = prs
             .into_iter()
-            .filter_map(|v| {
-                let number = v["number"].as_u64()? as u32;
-                let url = v["url"].as_str()?.to_string();
-                let title = v["title"].as_str()?.to_string();
-                let head_ref = match v["headRefName"].as_str() {
-                    Some(s) => Some(s.to_string()),
-                    None => {
-                        tracing::warn!(pr = number, "skipping PR — missing headRefName field");
-                        None
-                    }
-                };
-                Some(PrInfo {
-                    number,
-                    url,
-                    title,
-                    head_ref,
-                })
-            })
+            .filter_map(parse_pr_info_from_value)
             .collect();
         Ok(result)
     }
@@ -792,28 +784,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
         }
 
         // Check CI status.
-        let checks_failing = v["statusCheckRollup"]
-            .as_array()
-            .map(|checks| {
-                checks.iter().any(|c| {
-                    c["conclusion"]
-                        .as_str()
-                        .map(|s| {
-                            matches!(
-                                s,
-                                "FAILURE"
-                                    | "TIMED_OUT"
-                                    | "CANCELLED"
-                                    | "ACTION_REQUIRED"
-                                    | "STARTUP_FAILURE"
-                            )
-                        })
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-
-        if checks_failing {
+        if parse_ci_conclusion(&v["statusCheckRollup"]) {
             return Ok(PrWithState {
                 pr,
                 state: PrTriageState::ChecksFailing,
@@ -823,14 +794,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
         }
 
         // Check review decision.
-        let review_decision = v["reviewDecision"].as_str().unwrap_or("");
-        let state = match review_decision {
-            "CHANGES_REQUESTED" => PrTriageState::ChangesRequested,
-            "APPROVED" => PrTriageState::ReadyToMerge,
-            "" => PrTriageState::NeedsReview,
-            "REVIEW_REQUIRED" => PrTriageState::NeedsReview,
-            _ => PrTriageState::NeedsReview,
-        };
+        let state = parse_review_decision(v["reviewDecision"].as_str().unwrap_or(""));
 
         Ok(PrWithState {
             pr,
@@ -838,6 +802,83 @@ impl PrLifecycleTriage for GhPrLifecycle {
             created_at,
             mergeable,
         })
+    }
+
+    fn merge_pr(&self, pr_number: u32) -> Result<(), PrError> {
+        let out = Command::new("gh")
+            .args(["pr", "merge", &pr_number.to_string(), "--merge"])
+            .output()
+            .map_err(|e| PrError::GhCommand(format!("failed to spawn gh for merge: {e}")))?;
+        if !out.status.success() {
+            let stderr = crate::security::redact_secrets(&String::from_utf8_lossy(&out.stderr))
+                .to_string();
+            return Err(PrError::GhExitNonZero {
+                code: out.status.code().unwrap_or(-1),
+                stderr,
+            });
+        }
+        Ok(())
+    }
+}
+
+// ── Parsing helpers (extracted for unit-testability) ─────────────────────────
+
+/// Parse one element of `gh pr list --json` output into a [`PrInfo`].
+///
+/// Returns `None` (and logs a warning) when `headRefName` is absent so that a
+/// single malformed entry does not propagate downstream as a PR with
+/// `head_ref: None`.  Missing `number`, `url`, or `title` also produce `None`
+/// via `?`.
+pub(crate) fn parse_pr_info_from_value(v: serde_json::Value) -> Option<PrInfo> {
+    let number = v["number"].as_u64()? as u32;
+    let url = v["url"].as_str()?.to_string();
+    let title = v["title"].as_str()?.to_string();
+    let head_ref = match v["headRefName"].as_str() {
+        Some(s) => s.to_string(),
+        None => {
+            tracing::warn!(pr = number, "skipping PR — missing headRefName field");
+            return None;
+        }
+    };
+    Some(PrInfo {
+        number,
+        url,
+        title,
+        head_ref: Some(head_ref),
+    })
+}
+
+/// Returns `true` if any check in the `statusCheckRollup` JSON array has a
+/// failing conclusion.
+pub(crate) fn parse_ci_conclusion(rollup: &serde_json::Value) -> bool {
+    rollup
+        .as_array()
+        .map(|checks| {
+            checks.iter().any(|c| {
+                c["conclusion"]
+                    .as_str()
+                    .map(|s| {
+                        matches!(
+                            s,
+                            "FAILURE"
+                                | "TIMED_OUT"
+                                | "CANCELLED"
+                                | "ACTION_REQUIRED"
+                                | "STARTUP_FAILURE"
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Map a raw `reviewDecision` string to a [`PrTriageState`].
+pub(crate) fn parse_review_decision(decision: &str) -> PrTriageState {
+    match decision {
+        "CHANGES_REQUESTED" => PrTriageState::ChangesRequested,
+        "APPROVED" => PrTriageState::ReadyToMerge,
+        _ => PrTriageState::NeedsReview,
     }
 }
 
@@ -853,6 +894,11 @@ pub struct PrTriage<L: PrLifecycleTriage> {
 impl<L: PrLifecycleTriage> PrTriage<L> {
     pub fn new(config: PrManagementConfig, lifecycle: L) -> Self {
         Self { config, lifecycle }
+    }
+
+    /// Merge the pull request via the underlying lifecycle implementation.
+    pub fn merge_pr(&self, pr_number: u32) -> Result<(), PrError> {
+        self.lifecycle.merge_pr(pr_number)
     }
 
     /// Select the highest-priority actionable PR and return the triage action.
@@ -1020,6 +1066,8 @@ pub struct MockPrLifecycleTriage {
     pub open_prs: Vec<PrInfo>,
     /// State returned for each PR by number.
     pub states: std::collections::HashMap<u32, PrWithState>,
+    /// Error messages to return for specific PR numbers from `merge_pr`.
+    pub merge_errors: std::collections::HashMap<u32, String>,
     /// All calls recorded in order.
     pub calls: std::sync::Mutex<Vec<TriageCall>>,
 }
@@ -1029,6 +1077,7 @@ pub struct MockPrLifecycleTriage {
 pub enum TriageCall {
     ListOpenPrsWithLabel { label: String },
     GetPrState { pr_number: u32 },
+    MergePr { pr_number: u32 },
 }
 
 #[cfg(test)]
@@ -1037,6 +1086,7 @@ impl MockPrLifecycleTriage {
         Self {
             open_prs: Vec::new(),
             states: std::collections::HashMap::new(),
+            merge_errors: std::collections::HashMap::new(),
             calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -1073,6 +1123,17 @@ impl PrLifecycleTriage for MockPrLifecycleTriage {
         self.states.get(&pr_number).cloned().ok_or_else(|| {
             PrError::GhCommand(format!("mock: no state configured for PR #{pr_number}"))
         })
+    }
+
+    fn merge_pr(&self, pr_number: u32) -> Result<(), PrError> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(TriageCall::MergePr { pr_number });
+        if let Some(msg) = self.merge_errors.get(&pr_number) {
+            return Err(PrError::GhCommand(msg.clone()));
+        }
+        Ok(())
     }
 }
 
@@ -1767,6 +1828,172 @@ mod tests {
         assert_eq!(Mergeable::from_gh_str("mergeable"), None); // wrong case
         assert_eq!(Mergeable::from_gh_str(""), None);
         assert_eq!(Mergeable::from_gh_str("something-else"), None);
+    }
+
+    // ── #179: parse_ci_conclusion unit tests ─────────────────────────────────
+
+    #[test]
+    fn ci_conclusion_failure_is_failing() {
+        let rollup = serde_json::json!([{"conclusion": "FAILURE"}]);
+        assert!(parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_timed_out_is_failing() {
+        let rollup = serde_json::json!([{"conclusion": "TIMED_OUT"}]);
+        assert!(parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_cancelled_is_failing() {
+        let rollup = serde_json::json!([{"conclusion": "CANCELLED"}]);
+        assert!(parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_action_required_is_failing() {
+        let rollup = serde_json::json!([{"conclusion": "ACTION_REQUIRED"}]);
+        assert!(parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_startup_failure_is_failing() {
+        let rollup = serde_json::json!([{"conclusion": "STARTUP_FAILURE"}]);
+        assert!(parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_success_is_not_failing() {
+        let rollup = serde_json::json!([{"conclusion": "SUCCESS"}]);
+        assert!(!parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_null_field_is_not_failing() {
+        let rollup = serde_json::json!([{"conclusion": null}]);
+        assert!(!parse_ci_conclusion(&rollup));
+    }
+
+    #[test]
+    fn ci_conclusion_missing_rollup_is_not_failing() {
+        assert!(!parse_ci_conclusion(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn ci_conclusion_one_passing_one_failing_is_failing() {
+        let rollup = serde_json::json!([
+            {"conclusion": "SUCCESS"},
+            {"conclusion": "TIMED_OUT"}
+        ]);
+        assert!(parse_ci_conclusion(&rollup));
+    }
+
+    // ── #179: parse_review_decision unit tests ───────────────────────────────
+
+    #[test]
+    fn review_decision_approved_is_ready_to_merge() {
+        assert_eq!(
+            parse_review_decision("APPROVED"),
+            PrTriageState::ReadyToMerge
+        );
+    }
+
+    #[test]
+    fn review_decision_changes_requested_is_changes_requested() {
+        assert_eq!(
+            parse_review_decision("CHANGES_REQUESTED"),
+            PrTriageState::ChangesRequested
+        );
+    }
+
+    #[test]
+    fn review_decision_empty_is_needs_review() {
+        assert_eq!(parse_review_decision(""), PrTriageState::NeedsReview);
+    }
+
+    #[test]
+    fn review_decision_review_required_is_needs_review() {
+        assert_eq!(
+            parse_review_decision("REVIEW_REQUIRED"),
+            PrTriageState::NeedsReview
+        );
+    }
+
+    #[test]
+    fn review_decision_unknown_is_needs_review() {
+        assert_eq!(
+            parse_review_decision("SOME_FUTURE_VALUE"),
+            PrTriageState::NeedsReview
+        );
+    }
+
+    // ── #182: parse_pr_info_from_value skip behavior ─────────────────────────
+
+    #[test]
+    fn parse_pr_info_missing_head_ref_is_skipped() {
+        let v = serde_json::json!({
+            "number": 7,
+            "url": "https://github.com/owner/repo/pull/7",
+            "title": "Fix foo"
+        });
+        assert!(parse_pr_info_from_value(v).is_none());
+    }
+
+    #[test]
+    fn parse_pr_info_with_head_ref_is_included() {
+        let v = serde_json::json!({
+            "number": 7,
+            "url": "https://github.com/owner/repo/pull/7",
+            "title": "Fix foo",
+            "headRefName": "fix/foo"
+        });
+        let info = parse_pr_info_from_value(v).unwrap();
+        assert_eq!(info.number, 7);
+        assert_eq!(info.head_ref, Some("fix/foo".to_string()));
+    }
+
+    #[test]
+    fn parse_pr_info_missing_number_is_skipped() {
+        let v = serde_json::json!({
+            "url": "https://github.com/owner/repo/pull/7",
+            "title": "Fix foo",
+            "headRefName": "fix/foo"
+        });
+        assert!(parse_pr_info_from_value(v).is_none());
+    }
+
+    // ── #169: merge_pr routing through PrTriage ──────────────────────────────
+
+    #[test]
+    fn triage_merge_pr_succeeds_via_mock() {
+        let mock = MockPrLifecycleTriage::new();
+        let triage = PrTriage::new(default_config(), mock);
+        assert!(triage.merge_pr(42).is_ok());
+    }
+
+    #[test]
+    fn triage_merge_pr_error_injection_propagates() {
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.merge_errors.insert(42, "injected merge failure".into());
+        let triage = PrTriage::new(default_config(), mock);
+        let err = triage.merge_pr(42).unwrap_err();
+        assert!(err.to_string().contains("injected merge failure"));
+    }
+
+    #[test]
+    fn triage_merge_pr_error_only_fires_for_configured_pr() {
+        let mut mock = MockPrLifecycleTriage::new();
+        mock.merge_errors.insert(42, "fail only 42".into());
+        let triage = PrTriage::new(default_config(), mock);
+        assert!(triage.merge_pr(99).is_ok());
+    }
+
+    // ── Additional parse_ci_conclusion edge case ──────────────────────────────
+
+    #[test]
+    fn parse_ci_conclusion_empty_array_is_not_failing() {
+        let rollup = serde_json::json!([]);
+        assert!(!parse_ci_conclusion(&rollup));
     }
 
     // ── #167: CI conclusion edge cases ───────────────────────────────────────

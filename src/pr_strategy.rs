@@ -1,5 +1,5 @@
 use crate::config::{PrManagementConfig, PrMode};
-use crate::pr_manager::{build_pr_triage, PrLifecycleTriage, PrTriage, TriageAction};
+use crate::pr_manager::{build_pr_triage, PrError, PrLifecycleTriage, PrTriage, TriageAction};
 
 /// The plan produced by a `PrStrategy` before each iteration.
 ///
@@ -31,6 +31,16 @@ pub trait PrStrategy: Send + Sync {
     ///
     /// `iteration` is 1-based.
     fn plan_iteration(&self, iteration: u64) -> IterationPlan;
+
+    /// Execute the merge for a PR identified by `pr_number`.
+    ///
+    /// Only meaningful for `MultiPr` mode; other strategies return an error.
+    fn execute_merge(&self, pr_number: u32) -> Result<(), PrError> {
+        let _ = pr_number;
+        Err(PrError::GhCommand(
+            "execute_merge is not supported in this strategy mode".into(),
+        ))
+    }
 }
 
 // ── Strategy implementations ──────────────────────────────────────────────────
@@ -123,6 +133,10 @@ impl<L: PrLifecycleTriage + 'static> MultiPrStrategy<L> {
 }
 
 impl<L: PrLifecycleTriage + 'static> PrStrategy for MultiPrStrategy<L> {
+    fn execute_merge(&self, pr_number: u32) -> Result<(), PrError> {
+        self.triage.merge_pr(pr_number)
+    }
+
     fn plan_iteration(&self, iteration: u64) -> IterationPlan {
         tracing::debug!(
             iteration,
