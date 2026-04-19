@@ -3,6 +3,7 @@ set -e
 
 REPO="jamesbrayton/code-looper"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+INSTALL_DIR="${INSTALL_DIR%/}"
 
 OS="${OS:-$(uname -s)}"
 ARCH="${ARCH:-$(uname -m)}"
@@ -24,8 +25,13 @@ case "${OS}/${ARCH}" in
 esac
 
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
-VERSION=$(curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer ${GITHUB_TOKEN}"} "$API_URL" \
-  | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true)
+if [ -n "${GITHUB_TOKEN}" ]; then
+  VERSION=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$API_URL" \
+    | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true)
+else
+  VERSION=$(curl -fsSL "$API_URL" \
+    | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' || true)
+fi
 
 if [ -z "$VERSION" ]; then
   printf 'Failed to resolve latest version from GitHub API.\n' >&2
