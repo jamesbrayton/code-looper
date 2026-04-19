@@ -731,8 +731,7 @@ mod tests {
         );
 
         // A subsequent valid Status request must still work correctly.
-        let (status_resp, shutdown) =
-            service.process_request(ServiceRequest::Status, &mut state);
+        let (status_resp, shutdown) = service.process_request(ServiceRequest::Status, &mut state);
         assert!(!shutdown, "status must not trigger shutdown");
         assert!(status_resp.ok, "status after bad lines must succeed");
         let data = status_resp.data.unwrap();

@@ -2066,7 +2066,7 @@ mod tests {
     #[test]
     fn every_iteration_cadence_with_failing_tracker_does_not_abort_loop() {
         use crate::issue_tracker::{
-            CloseReason, IssueFilter, IssueTrackerError, Issue, IssueDraft,
+            CloseReason, Issue, IssueDraft, IssueFilter, IssueTrackerError,
         };
 
         /// A tracker whose `add_comment` always returns an error; all other
@@ -2092,11 +2092,7 @@ mod tests {
             ) -> Result<(), IssueTrackerError> {
                 Ok(())
             }
-            fn add_comment(
-                &self,
-                _number: u32,
-                _body: &str,
-            ) -> Result<(), IssueTrackerError> {
+            fn add_comment(&self, _number: u32, _body: &str) -> Result<(), IssueTrackerError> {
                 Err(IssueTrackerError::Transport(
                     "simulated comment failure".to_string(),
                 ))
@@ -2721,8 +2717,7 @@ mod tests {
             .find(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
             .expect("run directory should exist");
         let manifest_path = run_dir.path().join("manifest.json");
-        let raw = std::fs::read_to_string(&manifest_path)
-            .expect("manifest.json should be written");
+        let raw = std::fs::read_to_string(&manifest_path).expect("manifest.json should be written");
         let manifest: RunManifest =
             serde_json::from_str(&raw).expect("manifest.json should be valid JSON");
         assert_eq!(manifest.iterations.len(), 1);

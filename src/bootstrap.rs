@@ -672,7 +672,8 @@ mod tests {
     #[test]
     fn merge_handles_trailing_comma_in_array_value() {
         // JSONC with a trailing comma inside a nested array
-        let input = r#"{"mcpServers": {"existing": {"command": "docker", "args": ["run", "--rm",]}}}"#;
+        let input =
+            r#"{"mcpServers": {"existing": {"command": "docker", "args": ["run", "--rm",]}}}"#;
         let result = merge_github_server(input);
         assert!(
             result.is_some(),
@@ -681,8 +682,14 @@ mod tests {
         let out = result.unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&out).expect("merge_github_server output should be valid JSON");
-        assert!(v["mcpServers"]["github"].is_object(), "github server should be inserted");
-        assert!(v["mcpServers"]["existing"].is_object(), "existing server should be preserved");
+        assert!(
+            v["mcpServers"]["github"].is_object(),
+            "github server should be inserted"
+        );
+        assert!(
+            v["mcpServers"]["existing"].is_object(),
+            "existing server should be preserved"
+        );
     }
 
     #[test]
