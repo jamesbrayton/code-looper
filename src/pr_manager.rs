@@ -810,8 +810,8 @@ impl PrLifecycleTriage for GhPrLifecycle {
             .output()
             .map_err(|e| PrError::GhCommand(format!("failed to spawn gh for merge: {e}")))?;
         if !out.status.success() {
-            let stderr = crate::security::redact_secrets(&String::from_utf8_lossy(&out.stderr))
-                .to_string();
+            let stderr =
+                crate::security::redact_secrets(&String::from_utf8_lossy(&out.stderr)).to_string();
             return Err(PrError::GhExitNonZero {
                 code: out.status.code().unwrap_or(-1),
                 stderr,
@@ -1974,7 +1974,8 @@ mod tests {
     #[test]
     fn triage_merge_pr_error_injection_propagates() {
         let mut mock = MockPrLifecycleTriage::new();
-        mock.merge_errors.insert(42, "injected merge failure".into());
+        mock.merge_errors
+            .insert(42, "injected merge failure".into());
         let triage = PrTriage::new(default_config(), mock);
         let err = triage.merge_pr(42).unwrap_err();
         assert!(err.to_string().contains("injected merge failure"));
