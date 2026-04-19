@@ -677,6 +677,70 @@ mod tests {
         assert_eq!(status_resp["data"]["run_count"], 1);
     }
 
+    #[test]
+    fn bad_json_lines_produce_failure_responses_without_corrupting_state() {
+        let service = make_service_with_fake(0);
+        let mut state = ServiceState::new();
+
+        // Three malformed JSON lines — none of these parse as a ServiceRequest.
+        let bad_lines = [
+            "not json at all",
+            r#"{"cmd":"unknown_command"}"#,
+            r#"{"completely": "wrong"}"#,
+        ];
+
+        // Simulate what handle_connection does: try to parse each line; on
+        // failure, produce a ServiceResponse::failure and do NOT call
+        // process_request, so state must remain unchanged.
+        let mut responses: Vec<ServiceResponse> = Vec::new();
+        for line in &bad_lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let resp = match serde_json::from_str::<ServiceRequest>(line) {
+                Ok(req) => service.process_request(req, &mut state).0,
+                Err(e) => ServiceResponse::failure(format!("parse error: {e}")),
+            };
+            responses.push(resp);
+        }
+
+        // All three responses must be failures with ok=false and no shutdown.
+        assert_eq!(responses.len(), 3, "expected one response per bad line");
+        for resp in &responses {
+            assert!(!resp.ok, "bad-JSON response must have ok=false");
+            assert!(
+                resp.data.is_none(),
+                "bad-JSON response must carry no data payload"
+            );
+            assert!(
+                resp.error.is_some(),
+                "bad-JSON response must carry an error message"
+            );
+        }
+
+        // State must be completely untouched — no run/success/failure counts.
+        assert_eq!(state.run_count, 0, "bad JSON must not increment run_count");
+        assert_eq!(
+            state.success_count, 0,
+            "bad JSON must not increment success_count"
+        );
+        assert_eq!(
+            state.failure_count, 0,
+            "bad JSON must not increment failure_count"
+        );
+
+        // A subsequent valid Status request must still work correctly.
+        let (status_resp, shutdown) =
+            service.process_request(ServiceRequest::Status, &mut state);
+        assert!(!shutdown, "status must not trigger shutdown");
+        assert!(status_resp.ok, "status after bad lines must succeed");
+        let data = status_resp.data.unwrap();
+        assert_eq!(data["run_count"], 0);
+        assert_eq!(data["success_count"], 0);
+        assert_eq!(data["failure_count"], 0);
+    }
+
     // ── is_loopback_bind (safety gate for #61) ────────────────────────────────
 
     #[test]
