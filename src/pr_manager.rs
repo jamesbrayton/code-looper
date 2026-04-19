@@ -873,7 +873,7 @@ pub(crate) fn parse_pr_info_from_value(v: serde_json::Value) -> Option<PrInfo> {
     let head_ref = match v["headRefName"].as_str() {
         Some(s) => s.to_string(),
         None => {
-            tracing::warn!(pr = number, "skipping PR — missing headRefName field");
+            tracing::warn!(pr = number, "skipping PR entry — missing or invalid 'headRefName' field");
             return None;
         }
     };
@@ -2035,6 +2035,7 @@ mod tests {
         let results: Vec<_> = values.into_iter().filter_map(parse_pr_info_from_value).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].number, 2);
+        assert_eq!(results[0].url, "https://github.com/r/pull/2");
     }
 
     // ── #169: merge_pr routing through PrTriage ──────────────────────────────
