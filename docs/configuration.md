@@ -99,7 +99,7 @@ To scaffold this layout with annotated defaults and example rule files, run:
 code-looper config bootstrap
 ```
 
-See [Getting Started](../how-to/getting-started.md#scaffold-a-configuration-directory-optional) for options.
+See [getting-started.md](getting-started.md#scaffold-a-configuration-directory-optional) for options.
 
 ---
 
