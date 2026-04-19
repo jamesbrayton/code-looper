@@ -2064,6 +2064,98 @@ mod tests {
     }
 
     #[test]
+    fn every_iteration_cadence_with_failing_tracker_does_not_abort_loop() {
+        use crate::issue_tracker::{
+            CloseReason, IssueFilter, IssueTrackerError, Issue, IssueDraft,
+        };
+
+        /// A tracker whose `add_comment` always returns an error; all other
+        /// methods succeed so the engine can still call `ensure_labels` etc.
+        struct FailingCommentTracker;
+        impl crate::issue_tracker::IssueTracker for FailingCommentTracker {
+            fn list_open_issues(
+                &self,
+                _filter: &IssueFilter,
+            ) -> Result<Vec<Issue>, IssueTrackerError> {
+                Ok(vec![])
+            }
+            fn get_issue(&self, _number: u32) -> Result<Issue, IssueTrackerError> {
+                Err(IssueTrackerError::NotFound("not found".to_string()))
+            }
+            fn create_issue(&self, _draft: IssueDraft) -> Result<Issue, IssueTrackerError> {
+                Err(IssueTrackerError::NotFound("not found".to_string()))
+            }
+            fn update_issue_body(
+                &self,
+                _number: u32,
+                _body: &str,
+            ) -> Result<(), IssueTrackerError> {
+                Ok(())
+            }
+            fn add_comment(
+                &self,
+                _number: u32,
+                _body: &str,
+            ) -> Result<(), IssueTrackerError> {
+                Err(IssueTrackerError::Transport(
+                    "simulated comment failure".to_string(),
+                ))
+            }
+            fn close_issue(
+                &self,
+                _number: u32,
+                _reason: CloseReason,
+            ) -> Result<(), IssueTrackerError> {
+                Ok(())
+            }
+            fn reopen_issue(&self, _number: u32) -> Result<(), IssueTrackerError> {
+                Ok(())
+            }
+            fn link_issue_to_pr(
+                &self,
+                _issue_number: u32,
+                _pr_number: u32,
+            ) -> Result<(), IssueTrackerError> {
+                Ok(())
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 3,
+            provider: Provider::Claude,
+            prompt_inline: Some("test".to_string()),
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                comment_issue_number: Some(1),
+                comment_cadence: CommentCadence::EveryIteration,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+
+        let engine = LoopEngine::with_adapter_and_tracker(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(FailingCommentTracker),
+        );
+        let summary = engine.run();
+
+        // The loop must complete all 3 iterations — comment failures must NOT abort the run.
+        assert_eq!(
+            summary.iterations_run, 3,
+            "all 3 iterations must run despite comment failures"
+        );
+        assert_eq!(
+            summary.failures, 0,
+            "provider iterations all succeeded; failures must be 0"
+        );
+    }
+
+    #[test]
     fn local_mode_posts_no_comments() {
         let tracker = Arc::new(MockIssueTracker::new());
         let config = LoopConfig {
