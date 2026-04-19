@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Code Looper is a Rust CLI application that provides a pluggable loop engine for multiple coding-agent CLIs (Claude Code, GitHub Copilot CLI, Codex CLI). It supports configurable iteration behavior, policy-driven orchestration flows, and structured logging. See `docs/src/design/prd.md` for full requirements.
+Code Looper is a Rust CLI application that provides a pluggable loop engine for multiple coding-agent CLIs (Claude Code, GitHub Copilot CLI, Codex CLI). It supports configurable iteration behavior, policy-driven orchestration flows, and structured logging. See `docs/PRD.md` for full requirements.
 
 ## Architecture
 
@@ -70,10 +70,10 @@ Configured in `.mcp.json`:
 
 ## Key Documentation
 
-- `docs/src/design/prd.md` — Full product requirements document with architecture, milestones, risks, and success criteria
-- `docs/src/design/adrs/` — ADRs tracking significant architectural decisions
-- `docs/src/reference/project-management.md` — Label taxonomy, milestone conventions, and lifecycle orchestration model
-- `docs/src/reference/versioning.md` — SemVer scheme, bump rules, and step-by-step release process
+- `docs/PRD.md` — Full product requirements document with architecture, milestones, risks, and success criteria
+- `docs/ADRs/` — ADRs tracking significant architectural decisions
+- `docs/project-management.md` — Label taxonomy, milestone conventions, and lifecycle orchestration model
+- `docs/versioning.md` — SemVer scheme, bump rules, and step-by-step release process
 
 <!-- code-looper begin -->
 ## Code Looper

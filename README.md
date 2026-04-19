@@ -4,9 +4,9 @@ Code Looper is a Rust CLI loop engine that drives multiple coding-agent CLIs (Cl
 
 ## Status
 
-**Early / experimental — ready for first-round user acceptance testing.** Milestones M1–M14 are complete (core engine, all three provider adapters, orchestration policy, issue tracking, branch and PR lifecycle, multi-PR triage). The project follows the roadmap in the [Product Requirements](https://jamesbrayton.github.io/code-looper/design/prd.html). Breaking changes are possible until v1.0.
+**Early / experimental — ready for first-round user acceptance testing.** Milestones M1–M14 are complete (core engine, all three provider adapters, orchestration policy, issue tracking, branch and PR lifecycle, multi-PR triage). The project follows the roadmap in [docs/PRD.md](docs/PRD.md). Breaking changes are possible until v1.0.
 
-If you are a UAT tester, start with the [Getting Started guide](https://jamesbrayton.github.io/code-looper/how-to/getting-started.html) — it walks through install, first run, and what successful output looks like end-to-end.
+If you are a UAT tester, start with [docs/getting-started.md](docs/getting-started.md) — it walks through install, first run, and what successful output looks like end-to-end.
 
 ## Quick Install
 
@@ -52,7 +52,7 @@ cd /path/to/target/repo
 
 The run writes artifacts under `.code-looper/runs/<run-id>/` (per-iteration logs, manifest, and summary).
 
-For a GitHub-integrated workflow with issue tracking and PR management, see the [Getting Started guide](https://jamesbrayton.github.io/code-looper/how-to/getting-started.html).
+For a GitHub-integrated workflow with issue tracking and PR management, see [docs/getting-started.md](docs/getting-started.md).
 
 ## Build & test
 
@@ -92,14 +92,15 @@ A fully configured dev container is provided (`.devcontainer/`). It is based on 
 
 ## Documentation
 
-Full documentation is published at **https://jamesbrayton.github.io/code-looper/**.
-
-| Section | What it covers |
-|---------|---------------|
-| [How-to Guides](https://jamesbrayton.github.io/code-looper/how-to/getting-started.html) | Getting started, workspace setup, troubleshooting |
-| [Reference](https://jamesbrayton.github.io/code-looper/reference/configuration.html) | Configuration, providers, versioning, project management |
-| [Explanation](https://jamesbrayton.github.io/code-looper/explanation/orchestration.html) | Orchestration policy, prompt injection |
-| [Design & Architecture](https://jamesbrayton.github.io/code-looper/design/prd.html) | PRD, Architecture Decision Records |
+| Document | Description |
+|----------|-------------|
+| [docs/getting-started.md](docs/getting-started.md) | Install, configure, and run your first loop |
+| [docs/configuration.md](docs/configuration.md) | Every config field, CLI flag, default, and precedence rule |
+| [docs/providers.md](docs/providers.md) | Provider adapter invocation, environment requirements, and limitations |
+| [docs/orchestration.md](docs/orchestration.md) | Workflow branch selection, shippable signal protocol, PR lifecycle |
+| [docs/workspace-prerequisites.md](docs/workspace-prerequisites.md) | What the prerequisite checker validates and how to fix each diagnostic |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Common failure modes and remediation steps |
+| [docs/PRD.md](docs/PRD.md) | Full product requirements and roadmap |
 
 ## Contributing
 
