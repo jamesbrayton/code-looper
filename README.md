@@ -10,37 +10,17 @@ If you are a UAT tester, start with [docs/getting-started.md](docs/getting-start
 
 ## Quick Install
 
-Pre-built binaries are available for every tagged release. Download the archive for your platform from the [latest release](https://github.com/jamesbrayton/code-looper/releases/latest), extract, and place the binary on your `$PATH`.
-
-| Platform | Archive |
-|----------|---------|
-| macOS ARM64 (Apple Silicon) | `code-looper-<version>-aarch64-apple-darwin.tar.gz` |
-| Linux x86_64 | `code-looper-<version>-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | `code-looper-<version>-aarch64-unknown-linux-gnu.tar.gz` |
-| Windows x86_64 | `code-looper-<version>-x86_64-pc-windows-msvc.zip` |
-
-Replace `<version>` with the tag you want (e.g. `v0.2.1`).
-
-**macOS / Linux example (ARM64 Mac):**
-
-```bash
-VERSION=v0.2.1   # replace with the latest tag
-curl -fsSL "https://github.com/jamesbrayton/code-looper/releases/download/${VERSION}/code-looper-${VERSION}-aarch64-apple-darwin.tar.gz" \
-  | tar -xz
-sudo mv "code-looper-${VERSION}-aarch64-apple-darwin" /usr/local/bin/code-looper
+```sh
+curl -fsSL https://raw.githubusercontent.com/jamesbrayton/code-looper/main/install.sh | sh
 ```
 
-**Windows (PowerShell):**
+Detects your OS and architecture, downloads the correct binary from [GitHub Releases](https://github.com/jamesbrayton/code-looper/releases/latest), and installs to `~/.local/bin`. Override with `INSTALL_DIR=/custom/path sh install.sh`.
 
-```powershell
-$VERSION = "v0.2.1"   # replace with the latest tag
-$BINARY  = "code-looper-${VERSION}-x86_64-pc-windows-msvc"
-Invoke-WebRequest "https://github.com/jamesbrayton/code-looper/releases/download/${VERSION}/${BINARY}.zip" -OutFile "${BINARY}.zip"
-Expand-Archive "${BINARY}.zip" -DestinationPath .
-# Move ${BINARY}.exe to a directory on your PATH
-```
+**Supported platforms:** macOS ARM64 (Apple Silicon), Linux x86\_64, Linux ARM64.
 
-> **macOS x86_64 (Intel):** No pre-built binary is provided for Intel Macs. Build from source (see below).
+**macOS x86\_64 (Intel):** No pre-built binary — build from source (see below).
+
+**Windows:** Download `code-looper-<version>-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/jamesbrayton/code-looper/releases/latest), extract, and place `code-looper.exe` on your `PATH`.
 
 ## Quick start
 
