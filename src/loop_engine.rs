@@ -203,7 +203,8 @@ impl LoopEngine {
             None
         };
         let tracker = build_tracker(&config);
-        let pr_strategy = build_strategy(config.pr_management.clone());
+        let pr_strategy =
+            build_strategy(config.pr_management.clone(), config.workspace_dir.clone());
         let pr_manager = if config.pr_management.mode == PrMode::SinglePr {
             Some(build_pr_manager(config.pr_management.clone()))
         } else {
@@ -247,7 +248,8 @@ impl LoopEngine {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
-        let pr_strategy = build_strategy(config.pr_management.clone());
+        let pr_strategy =
+            build_strategy(config.pr_management.clone(), config.workspace_dir.clone());
         Self {
             config,
             adapter,
@@ -270,7 +272,8 @@ impl LoopEngine {
     ) -> Self {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
-        let pr_strategy = build_strategy(config.pr_management.clone());
+        let pr_strategy =
+            build_strategy(config.pr_management.clone(), config.workspace_dir.clone());
         Self {
             config,
             adapter,
@@ -294,7 +297,8 @@ impl LoopEngine {
         let interrupted = Arc::new(AtomicBool::new(false));
         let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
         let tracker = build_tracker(&config);
-        let pr_strategy = build_strategy(config.pr_management.clone());
+        let pr_strategy =
+            build_strategy(config.pr_management.clone(), config.workspace_dir.clone());
         Self {
             config,
             adapter,
@@ -663,7 +667,7 @@ impl LoopEngine {
                                     iteration = i,
                                     pr = pr.number,
                                     error = %msg,
-                                    "multi-pr: merge failed to spawn"
+                                    "multi-pr: merge failed"
                                 );
                                 (
                                     IterationOutcome::SpawnFailure {
@@ -2607,6 +2611,130 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 1);
+    }
+
+    /// `GhExitNonZero` from `execute_merge` maps to a recorded failure (not a
+    /// panic or success).  Distinguishes the retryable non-zero-exit path from
+    /// spawn failures.
+    #[test]
+    fn merge_gh_exit_non_zero_recorded_as_failure() {
+        use crate::config::{PrManagementConfig, PrMode};
+        use crate::pr_manager::{PrError, PrInfo, TriageAction};
+        use crate::pr_strategy::{IterationPlan, PrStrategy};
+
+        struct GhExitStrategy;
+        impl PrStrategy for GhExitStrategy {
+            fn plan_iteration(&self, _iteration: u64) -> IterationPlan {
+                let pr = PrInfo {
+                    number: 99,
+                    title: "exit test".to_string(),
+                    url: "https://github.com/owner/repo/pull/99".to_string(),
+                    head_ref: Some("loop/99-exit-test".to_string()),
+                };
+                IterationPlan {
+                    description: "exit test".to_string(),
+                    mode: PrMode::MultiPr,
+                    prompt_override: None,
+                    triage_action: Some(TriageAction::Merge { pr }),
+                }
+            }
+
+            fn execute_merge(&self, _pr_number: u32) -> Result<(), PrError> {
+                Err(PrError::GhExitNonZero {
+                    code: 1,
+                    stderr: "gh: pull request not found".to_string(),
+                })
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test prompt".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let engine = LoopEngine::with_adapter_and_pr_strategy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(GhExitStrategy),
+        );
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.successes, 0);
+    }
+
+    /// Any `PrError` other than `GhExitNonZero` from `execute_merge` maps to
+    /// a `SpawnFailure` (non-retryable) and is recorded as a failure.
+    #[test]
+    fn merge_spawn_failure_recorded_as_failure() {
+        use crate::config::{PrManagementConfig, PrMode};
+        use crate::pr_manager::{PrError, PrInfo, TriageAction};
+        use crate::pr_strategy::{IterationPlan, PrStrategy};
+
+        struct SpawnFailStrategy;
+        impl PrStrategy for SpawnFailStrategy {
+            fn plan_iteration(&self, _iteration: u64) -> IterationPlan {
+                let pr = PrInfo {
+                    number: 100,
+                    title: "spawn fail test".to_string(),
+                    url: "https://github.com/owner/repo/pull/100".to_string(),
+                    head_ref: Some("loop/100-spawn-fail".to_string()),
+                };
+                IterationPlan {
+                    description: "spawn fail test".to_string(),
+                    mode: PrMode::MultiPr,
+                    prompt_override: None,
+                    triage_action: Some(TriageAction::Merge { pr }),
+                }
+            }
+
+            fn execute_merge(&self, _pr_number: u32) -> Result<(), PrError> {
+                Err(PrError::UnsupportedOperation(
+                    "simulated spawn failure".to_string(),
+                ))
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            prompt_inline: Some("test prompt".to_string()),
+            pr_management: PrManagementConfig {
+                mode: PrMode::MultiPr,
+                ..PrManagementConfig::default()
+            },
+            issue_tracking: IssueTrackingConfig {
+                mode: IssueTrackingMode::Github,
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let engine = LoopEngine::with_adapter_and_pr_strategy(
+            config,
+            Box::new(FakeAdapter::success("fake")),
+            Box::new(SpawnFailStrategy),
+        );
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert_eq!(summary.successes, 0);
     }
 
     // ── Rules injection into adapter prompt (#166) ───────────────────────────

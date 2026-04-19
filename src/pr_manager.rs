@@ -150,6 +150,11 @@ pub enum PrError {
     /// [`GhCommand`] so callers can map it to `NonZeroExit` for retry logic.
     #[error("gh CLI exited with code {code}: {stderr}")]
     GhExitNonZero { code: i32, stderr: String },
+
+    /// The requested operation is not supported by the current strategy or
+    /// lifecycle configuration (no `gh` invocation was attempted).
+    #[error("unsupported operation: {0}")]
+    UnsupportedOperation(String),
 }
 
 // ── PrLifecycle trait ─────────────────────────────────────────────────────────
@@ -175,11 +180,21 @@ pub trait PrLifecycle: Send + Sync {
 // ── GhPrLifecycle (production) ────────────────────────────────────────────────
 
 /// Production [`PrLifecycle`] implementation backed by the `gh` CLI.
-pub struct GhPrLifecycle;
+pub struct GhPrLifecycle {
+    /// When set, `gh` commands that mutate repository state are run with this
+    /// directory as the working directory so that multi-repo runs always
+    /// operate on the intended repository.
+    work_dir: Option<std::path::PathBuf>,
+}
 
 impl GhPrLifecycle {
     pub fn new() -> Self {
-        Self
+        Self { work_dir: None }
+    }
+
+    pub fn with_work_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.work_dir = Some(dir);
+        self
     }
 }
 
@@ -784,7 +799,7 @@ impl PrLifecycleTriage for GhPrLifecycle {
         }
 
         // Check CI status.
-        if parse_ci_conclusion(&v["statusCheckRollup"]) {
+        if ci_checks_failing(&v["statusCheckRollup"]) {
             return Ok(PrWithState {
                 pr,
                 state: PrTriageState::ChecksFailing,
@@ -805,8 +820,12 @@ impl PrLifecycleTriage for GhPrLifecycle {
     }
 
     fn merge_pr(&self, pr_number: u32) -> Result<(), PrError> {
-        let out = Command::new("gh")
-            .args(["pr", "merge", &pr_number.to_string(), "--merge"])
+        let mut cmd = Command::new("gh");
+        cmd.args(["pr", "merge", &pr_number.to_string(), "--merge"]);
+        if let Some(ref dir) = self.work_dir {
+            cmd.current_dir(dir);
+        }
+        let out = cmd
             .output()
             .map_err(|e| PrError::GhCommand(format!("failed to spawn gh for merge: {e}")))?;
         if !out.status.success() {
@@ -850,7 +869,7 @@ pub(crate) fn parse_pr_info_from_value(v: serde_json::Value) -> Option<PrInfo> {
 
 /// Returns `true` if any check in the `statusCheckRollup` JSON array has a
 /// failing conclusion.
-pub(crate) fn parse_ci_conclusion(rollup: &serde_json::Value) -> bool {
+pub(crate) fn ci_checks_failing(rollup: &serde_json::Value) -> bool {
     rollup
         .as_array()
         .map(|checks| {
@@ -1050,8 +1069,15 @@ impl<L: PrLifecycleTriage> PrTriage<L> {
 }
 
 /// Build a production [`PrTriage`] backed by the `gh` CLI.
-pub fn build_pr_triage(config: PrManagementConfig) -> PrTriage<GhPrLifecycle> {
-    PrTriage::new(config, GhPrLifecycle::new())
+pub fn build_pr_triage(
+    config: PrManagementConfig,
+    workspace_dir: Option<std::path::PathBuf>,
+) -> PrTriage<GhPrLifecycle> {
+    let mut lifecycle = GhPrLifecycle::new();
+    if let Some(dir) = workspace_dir {
+        lifecycle = lifecycle.with_work_dir(dir);
+    }
+    PrTriage::new(config, lifecycle)
 }
 
 // `mergeable_sort_key` has moved to `Mergeable::sort_key` — the enum is the
@@ -1830,53 +1856,53 @@ mod tests {
         assert_eq!(Mergeable::from_gh_str("something-else"), None);
     }
 
-    // ── #179: parse_ci_conclusion unit tests ─────────────────────────────────
+    // ── #179: ci_checks_failing unit tests ─────────────────────────────────
 
     #[test]
     fn ci_conclusion_failure_is_failing() {
         let rollup = serde_json::json!([{"conclusion": "FAILURE"}]);
-        assert!(parse_ci_conclusion(&rollup));
+        assert!(ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_timed_out_is_failing() {
         let rollup = serde_json::json!([{"conclusion": "TIMED_OUT"}]);
-        assert!(parse_ci_conclusion(&rollup));
+        assert!(ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_cancelled_is_failing() {
         let rollup = serde_json::json!([{"conclusion": "CANCELLED"}]);
-        assert!(parse_ci_conclusion(&rollup));
+        assert!(ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_action_required_is_failing() {
         let rollup = serde_json::json!([{"conclusion": "ACTION_REQUIRED"}]);
-        assert!(parse_ci_conclusion(&rollup));
+        assert!(ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_startup_failure_is_failing() {
         let rollup = serde_json::json!([{"conclusion": "STARTUP_FAILURE"}]);
-        assert!(parse_ci_conclusion(&rollup));
+        assert!(ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_success_is_not_failing() {
         let rollup = serde_json::json!([{"conclusion": "SUCCESS"}]);
-        assert!(!parse_ci_conclusion(&rollup));
+        assert!(!ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_null_field_is_not_failing() {
         let rollup = serde_json::json!([{"conclusion": null}]);
-        assert!(!parse_ci_conclusion(&rollup));
+        assert!(!ci_checks_failing(&rollup));
     }
 
     #[test]
     fn ci_conclusion_missing_rollup_is_not_failing() {
-        assert!(!parse_ci_conclusion(&serde_json::Value::Null));
+        assert!(!ci_checks_failing(&serde_json::Value::Null));
     }
 
     #[test]
@@ -1885,7 +1911,7 @@ mod tests {
             {"conclusion": "SUCCESS"},
             {"conclusion": "TIMED_OUT"}
         ]);
-        assert!(parse_ci_conclusion(&rollup));
+        assert!(ci_checks_failing(&rollup));
     }
 
     // ── #179: parse_review_decision unit tests ───────────────────────────────
@@ -1989,12 +2015,12 @@ mod tests {
         assert!(triage.merge_pr(99).is_ok());
     }
 
-    // ── Additional parse_ci_conclusion edge case ──────────────────────────────
+    // ── Additional ci_checks_failing edge case ──────────────────────────────
 
     #[test]
-    fn parse_ci_conclusion_empty_array_is_not_failing() {
+    fn ci_checks_failing_empty_array_is_not_failing() {
         let rollup = serde_json::json!([]);
-        assert!(!parse_ci_conclusion(&rollup));
+        assert!(!ci_checks_failing(&rollup));
     }
 
     // ── #167: CI conclusion edge cases ───────────────────────────────────────

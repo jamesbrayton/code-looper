@@ -37,8 +37,8 @@ pub trait PrStrategy: Send + Sync {
     /// Only meaningful for `MultiPr` mode; other strategies return an error.
     fn execute_merge(&self, pr_number: u32) -> Result<(), PrError> {
         let _ = pr_number;
-        Err(PrError::GhCommand(
-            "execute_merge is not supported in this strategy mode".into(),
+        Err(PrError::UnsupportedOperation(
+            "execute_merge is only available in MultiPr mode; no gh command was attempted".into(),
         ))
     }
 }
@@ -118,8 +118,8 @@ pub struct MultiPrStrategy<L: PrLifecycleTriage + 'static> {
 
 impl MultiPrStrategy<crate::pr_manager::GhPrLifecycle> {
     /// Build a production `MultiPrStrategy` backed by the `gh` CLI.
-    pub fn new(config: PrManagementConfig) -> Self {
-        let triage = build_pr_triage(config.clone());
+    pub fn new(config: PrManagementConfig, workspace_dir: Option<std::path::PathBuf>) -> Self {
+        let triage = build_pr_triage(config.clone(), workspace_dir);
         Self { config, triage }
     }
 }
@@ -195,11 +195,14 @@ impl<L: PrLifecycleTriage + 'static> PrStrategy for MultiPrStrategy<L> {
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 /// Build the concrete `PrStrategy` for the given config.
-pub fn build_strategy(config: PrManagementConfig) -> Box<dyn PrStrategy> {
+pub fn build_strategy(
+    config: PrManagementConfig,
+    workspace_dir: Option<std::path::PathBuf>,
+) -> Box<dyn PrStrategy> {
     match config.mode {
         PrMode::NoPr => Box::new(NoPrStrategy::new(config)),
         PrMode::SinglePr => Box::new(SinglePrStrategy::new(config)),
-        PrMode::MultiPr => Box::new(MultiPrStrategy::new(config)),
+        PrMode::MultiPr => Box::new(MultiPrStrategy::new(config, workspace_dir)),
     }
 }
 
@@ -420,14 +423,14 @@ mod tests {
 
     #[test]
     fn build_strategy_no_pr() {
-        let strategy = build_strategy(config_with_mode(PrMode::NoPr));
+        let strategy = build_strategy(config_with_mode(PrMode::NoPr), None);
         let plan = strategy.plan_iteration(1);
         assert_eq!(plan.mode, PrMode::NoPr);
     }
 
     #[test]
     fn build_strategy_single_pr() {
-        let strategy = build_strategy(config_with_mode(PrMode::SinglePr));
+        let strategy = build_strategy(config_with_mode(PrMode::SinglePr), None);
         let plan = strategy.plan_iteration(1);
         assert_eq!(plan.mode, PrMode::SinglePr);
     }
@@ -436,7 +439,7 @@ mod tests {
 
     #[test]
     fn strategy_called_with_correct_iteration_number() {
-        let strategy = build_strategy(config_with_mode(PrMode::NoPr));
+        let strategy = build_strategy(config_with_mode(PrMode::NoPr), None);
         // Just verifying plan_iteration is callable with any u64 without panic.
         for n in [1u64, 5, 100] {
             let plan = strategy.plan_iteration(n);
