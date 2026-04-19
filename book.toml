@@ -1,0 +1,9 @@
+[book]
+title = "Code Looper"
+authors = ["James Brayton"]
+src = "docs/src"
+language = "en"
+
+[output.html]
+git-repository-url = "https://github.com/jamesbrayton/code-looper"
+edit-url-template = "https://github.com/jamesbrayton/code-looper/edit/main/docs/src/{path}"
