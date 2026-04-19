@@ -762,6 +762,9 @@ mod tests {
         let out = Command::new("git")
             .args(args)
             .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .output()
             .unwrap_or_else(|e| panic!("git {} failed to spawn: {e}", args.join(" ")));
         assert!(
