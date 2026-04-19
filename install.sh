@@ -4,8 +4,8 @@ set -e
 REPO="jamesbrayton/code-looper"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 
-OS=$(uname -s)
-ARCH=$(uname -m)
+OS="${OS:-$(uname -s)}"
+ARCH="${ARCH:-$(uname -m)}"
 
 case "${OS}/${ARCH}" in
   Linux/x86_64)  TARGET="x86_64-unknown-linux-gnu" ;;
