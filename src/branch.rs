@@ -795,6 +795,10 @@ mod tests {
         git_in(clone.path(), &["config", "user.name", "Test"]);
 
         // Initial commit on main so the branch exists.
+        // .gitignore prevents concurrent loop-engine tests (which write
+        // .code-looper/runs/ relative to process CWD) from polluting this
+        // temp repo and causing racy "unable to stat" failures in git add.
+        std::fs::write(clone.path().join(".gitignore"), ".code-looper/\nloop.log\n").unwrap();
         std::fs::write(clone.path().join("README.md"), "init").unwrap();
         git_in(clone.path(), &["add", "."]);
         git_in(clone.path(), &["commit", "-m", "initial"]);
