@@ -485,6 +485,74 @@ pub struct OrchestrationConfig {
     /// rule chain (pr-review → issue-execution → backlog-discovery).
     #[serde(default = "default_policy_rules")]
     pub policies: Vec<PolicyRule>,
+    /// Milestone-aware mode. When set, the LifecycleEngine is used instead of PolicyEngine.
+    #[serde(default)]
+    pub mode: Option<OrchestrationMode>,
+    /// Current milestone number for label-filtered lifecycle queries.
+    #[serde(default)]
+    pub current_milestone: Option<u32>,
+    /// Iteration pattern (depth or breadth).
+    #[serde(default)]
+    pub iteration_pattern: IterationPattern,
+    /// Discovery policy configuration.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// Autonomy mode for the milestone-aware lifecycle engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrchestrationMode {
+    /// Only execution and pr-review lifecycles are available.
+    ExecutionOnly,
+    /// execution, pr-review, and grooming lifecycles are available.
+    Assisted,
+    /// All five lifecycles are available.
+    Autonomous,
+}
+
+/// Iteration pattern for the lifecycle engine.
+/// NOTE: This field is parsed and stored but the depth/breadth stop-condition
+/// logic is not yet implemented in the engine. Setting this to `breadth` has
+/// no effect until that feature is wired in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum IterationPattern {
+    /// Stop after the current milestone releases; scope is locked to launch prompt.
+    #[default]
+    Depth,
+    /// After release, move to planning the next milestone and repeat.
+    Breadth,
+}
+
+/// Policy for handling work discovered during execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoveryPolicy {
+    /// Add discovered work to the current milestone (default).
+    #[default]
+    AddToMilestone,
+    /// Always push discovered work to the next milestone.
+    Defer,
+    /// Ask the user before adding or deferring.
+    Prompt,
+}
+
+impl std::fmt::Display for DiscoveryPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiscoveryPolicy::AddToMilestone => write!(f, "add-to-milestone"),
+            DiscoveryPolicy::Defer => write!(f, "defer"),
+            DiscoveryPolicy::Prompt => write!(f, "prompt"),
+        }
+    }
+}
+
+/// Discovery policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoveryConfig {
+    #[serde(default)]
+    pub policy: DiscoveryPolicy,
 }
 
 impl Default for OrchestrationConfig {
@@ -494,6 +562,10 @@ impl Default for OrchestrationConfig {
             repo_owner: None,
             repo_name: None,
             policies: default_policy_rules(),
+            mode: None,
+            current_milestone: None,
+            iteration_pattern: IterationPattern::default(),
+            discovery: DiscoveryConfig::default(),
         }
     }
 }
@@ -1125,6 +1197,26 @@ impl LoopConfig {
             if self.orchestration.repo_name.is_none() {
                 return Err(LooperError::InvalidArgument(
                     "orchestration requires --repo-name".to_string(),
+                ));
+            }
+        }
+
+        // When mode is set, the three lifecycle-engine fields are required.
+        if self.orchestration.mode.is_some() {
+            if self.orchestration.repo_owner.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration.mode is set but orchestration.repo_owner is missing".to_string(),
+                ));
+            }
+            if self.orchestration.repo_name.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration.mode is set but orchestration.repo_name is missing".to_string(),
+                ));
+            }
+            if self.orchestration.current_milestone.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration.mode is set but orchestration.current_milestone is missing"
+                        .to_string(),
                 ));
             }
         }
@@ -3044,5 +3136,94 @@ global = ".code-looper/rules/global.md"
         assert!(rules
             .workflows
             .contains_key(&PolicyWorkflow::IssueExecution));
+    }
+
+    #[test]
+    fn orchestration_mode_default_is_none() {
+        let cfg = OrchestrationConfig::default();
+        assert!(cfg.mode.is_none());
+    }
+
+    #[test]
+    fn orchestration_mode_deserializes_from_toml() {
+        let toml_str = r#"
+            enabled = true
+            mode = "assisted"
+            current_milestone = 3
+            [discovery]
+            policy = "defer"
+        "#;
+        let cfg: OrchestrationConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mode, Some(OrchestrationMode::Assisted));
+        assert_eq!(cfg.current_milestone, Some(3));
+        assert_eq!(cfg.discovery.policy, DiscoveryPolicy::Defer);
+    }
+
+    #[test]
+    fn orchestration_mode_deserializes_execution_only() {
+        let toml_str = r#"
+            enabled = true
+            mode = "execution-only"
+            current_milestone = 1
+        "#;
+        let cfg: OrchestrationConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mode, Some(OrchestrationMode::ExecutionOnly));
+    }
+
+    #[test]
+    fn orchestration_mode_deserializes_autonomous() {
+        let toml_str = r#"
+            enabled = true
+            mode = "autonomous"
+            current_milestone = 1
+        "#;
+        let cfg: OrchestrationConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mode, Some(OrchestrationMode::Autonomous));
+    }
+
+    #[test]
+    fn iteration_pattern_default_is_depth() {
+        let cfg = OrchestrationConfig::default();
+        assert_eq!(cfg.iteration_pattern, IterationPattern::Depth);
+    }
+
+    #[test]
+    fn discovery_policy_default_is_add_to_milestone() {
+        let cfg = OrchestrationConfig::default();
+        assert_eq!(cfg.discovery.policy, DiscoveryPolicy::AddToMilestone);
+    }
+
+    #[test]
+    fn validate_rejects_mode_without_repo_fields() {
+        let cfg = LoopConfig {
+            orchestration: OrchestrationConfig {
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_mode_with_all_required_fields() {
+        let cfg = LoopConfig {
+            orchestration: OrchestrationConfig {
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                current_milestone: Some(1),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        };
+        // validate() may fail for other reasons (prompt source); just confirm it doesn't
+        // fail on the orchestration fields. Check the error message if it fails.
+        if let Err(e) = cfg.validate() {
+            assert!(
+                !e.to_string().contains("orchestration.mode"),
+                "validate should not fail on orchestration.mode fields, got: {e}"
+            );
+        }
     }
 }

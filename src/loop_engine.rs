@@ -4,7 +4,9 @@ use crate::config::{
     CommentCadence, IssueTrackingMode, LoopConfig, PrMode, PromptInput, ValidatedLoopConfig,
 };
 use crate::issue_tracker::{GitHubIssueTracker, IssueTracker, LocalPromiseTracker};
-use crate::orchestration::{BranchSelection, GhCliContextResolver, PolicyEngine};
+use crate::orchestration::{
+    BranchSelection, GhCliContextResolver, LifecycleEngine, LifecycleSelection, PolicyEngine,
+};
 use crate::policy_guard::PolicyGuard;
 use crate::pr_manager::{build_pr_manager, GhPrLifecycle, PrError, PrManager, TriageAction};
 use crate::pr_strategy::{build_strategy, PrStrategy};
@@ -143,6 +145,8 @@ pub struct LoopEngine {
     adapter: Box<dyn ProviderAdapter>,
     /// Optional orchestration policy engine (present when orchestration is enabled).
     policy_engine: Option<PolicyEngine>,
+    /// Milestone-aware lifecycle engine (present when orchestration.mode is set).
+    lifecycle_engine: Option<LifecycleEngine>,
     /// Policy guard used to augment prompts with the GitHub policy preamble.
     guard: PolicyGuard,
     /// Issue tracker for this run.
@@ -180,25 +184,66 @@ impl LoopEngine {
             config.provider_extra_args.clone(),
         );
         let policy_engine = if config.orchestration.enabled {
-            let owner = config.orchestration.repo_owner.clone().unwrap_or_else(|| {
-                warn!(
-                    "PolicyEngine constructed with no repo_owner — \
-                     orchestration context resolution will fail"
-                );
-                String::new()
-            });
-            let repo = config.orchestration.repo_name.clone().unwrap_or_else(|| {
-                warn!(
-                    "PolicyEngine constructed with no repo_name — \
-                     orchestration context resolution will fail"
-                );
-                String::new()
-            });
-            let rules = config.orchestration.policies.clone();
-            Some(PolicyEngine::with_rules(
-                Box::new(GhCliContextResolver { owner, repo }),
-                rules,
-            ))
+            match (
+                config.orchestration.repo_owner.clone(),
+                config.orchestration.repo_name.clone(),
+            ) {
+                (Some(owner), Some(repo)) => Some(PolicyEngine::with_rules(
+                    Box::new(GhCliContextResolver { owner, repo }),
+                    config.orchestration.policies.clone(),
+                )),
+                (owner, repo) => {
+                    let missing: Vec<&str> = [
+                        owner.is_none().then_some("orchestration.repo_owner"),
+                        repo.is_none().then_some("orchestration.repo_name"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    warn!(
+                        "orchestration.enabled is true but required fields are missing: {}. \
+                         Policy engine disabled.",
+                        missing.join(", ")
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let lifecycle_engine = if let Some(mode) = config.orchestration.mode.clone() {
+            match (
+                config.orchestration.repo_owner.clone(),
+                config.orchestration.repo_name.clone(),
+                config.orchestration.current_milestone,
+            ) {
+                (Some(owner), Some(repo), Some(milestone)) => Some(LifecycleEngine::new(
+                    Box::new(crate::orchestration::GhCliLifecycleContextResolver {
+                        owner,
+                        repo,
+                        milestone,
+                    }),
+                    mode,
+                )),
+                (owner, repo, milestone) => {
+                    let missing: Vec<&str> = [
+                        owner.is_none().then_some("orchestration.repo_owner"),
+                        repo.is_none().then_some("orchestration.repo_name"),
+                        milestone
+                            .is_none()
+                            .then_some("orchestration.current_milestone"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    warn!(
+                        "orchestration.mode is set but required fields are missing: {}. \
+                         Lifecycle engine disabled.",
+                        missing.join(", ")
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -224,6 +269,7 @@ impl LoopEngine {
             config,
             adapter,
             policy_engine,
+            lifecycle_engine,
             guard,
             tracker,
             pr_strategy,
@@ -254,6 +300,7 @@ impl LoopEngine {
             config,
             adapter,
             policy_engine: None,
+            lifecycle_engine: None,
             guard,
             tracker,
             pr_strategy,
@@ -278,6 +325,7 @@ impl LoopEngine {
             config,
             adapter,
             policy_engine: None,
+            lifecycle_engine: None,
             guard,
             tracker,
             pr_strategy,
@@ -303,6 +351,7 @@ impl LoopEngine {
             config,
             adapter,
             policy_engine: Some(policy_engine),
+            lifecycle_engine: None,
             guard,
             tracker,
             pr_strategy,
@@ -326,6 +375,33 @@ impl LoopEngine {
             config,
             adapter,
             policy_engine: None,
+            lifecycle_engine: None,
+            guard,
+            tracker,
+            pr_strategy,
+            pr_manager: None,
+            branch_manager: None,
+            interrupted,
+        }
+    }
+
+    /// Constructor that accepts a custom adapter and lifecycle engine (useful for testing).
+    #[cfg(test)]
+    pub fn with_adapter_and_lifecycle(
+        config: ValidatedLoopConfig,
+        adapter: Box<dyn ProviderAdapter>,
+        lifecycle_engine: LifecycleEngine,
+    ) -> Self {
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let guard = PolicyGuard::new(crate::policy_guard::UnsafeOverrides::default());
+        let tracker = build_tracker(&config);
+        let pr_strategy =
+            build_strategy(config.pr_management.clone(), config.workspace_dir.clone());
+        Self {
+            config,
+            adapter,
+            policy_engine: None,
+            lifecycle_engine: Some(lifecycle_engine),
             guard,
             tracker,
             pr_strategy,
@@ -686,9 +762,50 @@ impl LoopEngine {
                 }
             }
 
-            // If orchestration is enabled, select a workflow branch and use its prompt.
+            // Prefer lifecycle engine (milestone-aware) over policy engine (legacy).
             let (raw_prompt, workflow_branch, workflow_policy) =
-                if let Some(ref engine) = self.policy_engine {
+                if let Some(ref engine) = self.lifecycle_engine {
+                    match engine.select() {
+                        Ok(LifecycleSelection { lifecycle, context }) => {
+                            let lc_name = lifecycle.to_string();
+                            let discovery_policy = &self.config.orchestration.discovery.policy;
+                            let milestone = self.config.orchestration.current_milestone;
+                            info!(
+                                iteration = i,
+                                provider = self.adapter.name(),
+                                lifecycle = %lc_name,
+                                milestone_ready_for_dev = context.milestone_ready_for_dev,
+                                open_pr_count = context.open_pr_count,
+                                "Iteration start (lifecycle engine)"
+                            );
+                            let p = lifecycle.default_prompt(discovery_policy, milestone);
+                            (p, Some(lc_name), None)
+                        }
+                        Err(e) => {
+                            error!(iteration = i, "Lifecycle engine failed: {e}");
+                            let outcome = IterationOutcome::PolicyGuardBlock {
+                                message: e.to_string(),
+                            };
+                            iteration_records.push(IterationRecord {
+                                iteration: i,
+                                provider: self.config.provider.clone(),
+                                prompt_source: prompt_source.clone(),
+                                workflow_branch: None,
+                                outcome: outcome.clone(),
+                                duration_ms: iter_start.elapsed().as_millis(),
+                                retries: 0,
+                                stderr_excerpt: Some(e.to_string()),
+                                transcript_path: None,
+                                started_at: iter_started_at,
+                            });
+                            summary.iterations_run += 1;
+                            summary.failures += 1;
+                            summary.termination_reason =
+                                Some(TerminationReason::ProviderError(e.to_string()));
+                            break;
+                        }
+                    }
+                } else if let Some(ref engine) = self.policy_engine {
                     match engine.select_branch() {
                         Ok(BranchSelection {
                             branch,
@@ -1169,7 +1286,7 @@ impl LoopEngine {
 
         info!(
             total_duration_ms = total_ms,
-            termination_reason = %summary.termination_reason.as_ref().unwrap(),
+            termination_reason = %summary.termination_reason.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "unknown".to_string()),
             "Loop finished"
         );
 
@@ -1887,6 +2004,95 @@ mod tests {
             summary.termination_reason,
             Some(TerminationReason::ProviderError(_))
         ));
+    }
+
+    #[test]
+    fn lifecycle_engine_selects_lifecycle_and_succeeds() {
+        use crate::config::{OrchestrationConfig, OrchestrationMode};
+        use crate::orchestration::{LifecycleEngine, MilestoneContext, MilestoneContextResolver};
+
+        struct StubLifecycleResolver;
+        impl MilestoneContextResolver for StubLifecycleResolver {
+            fn resolve(&self) -> Result<MilestoneContext, crate::error::LooperError> {
+                Ok(MilestoneContext {
+                    milestone_ready_for_dev: 1,
+                    ..Default::default()
+                })
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 1,
+            provider: Provider::Claude,
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                current_milestone: Some(1),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let adapter = FakeAdapter::success("fake");
+        let lifecycle_engine = LifecycleEngine::new(
+            Box::new(StubLifecycleResolver),
+            OrchestrationMode::ExecutionOnly,
+        );
+
+        let engine =
+            LoopEngine::with_adapter_and_lifecycle(config, Box::new(adapter), lifecycle_engine);
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 0);
+    }
+
+    #[test]
+    fn lifecycle_engine_failure_terminates_loop() {
+        use crate::config::{OrchestrationConfig, OrchestrationMode};
+        use crate::orchestration::{LifecycleEngine, MilestoneContext, MilestoneContextResolver};
+
+        struct FailingLifecycleResolver;
+        impl MilestoneContextResolver for FailingLifecycleResolver {
+            fn resolve(&self) -> Result<MilestoneContext, crate::error::LooperError> {
+                Err(crate::error::LooperError::InvalidArgument(
+                    "simulated resolver failure".to_string(),
+                ))
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 3,
+            provider: Provider::Claude,
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                current_milestone: Some(1),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let adapter = FakeAdapter::success("fake");
+        let lifecycle_engine = LifecycleEngine::new(
+            Box::new(FailingLifecycleResolver),
+            OrchestrationMode::ExecutionOnly,
+        );
+
+        let engine =
+            LoopEngine::with_adapter_and_lifecycle(config, Box::new(adapter), lifecycle_engine);
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+        assert!(
+            summary.termination_reason.is_some(),
+            "termination_reason should be set after lifecycle engine failure"
+        );
     }
 
     // ── Engine-driven issue comment tests ────────────────────────────────────
