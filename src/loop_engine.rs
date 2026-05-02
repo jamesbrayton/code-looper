@@ -2023,6 +2023,7 @@ mod tests {
                 mode: Some(OrchestrationMode::ExecutionOnly),
                 repo_owner: Some("owner".to_string()),
                 repo_name: Some("repo".to_string()),
+                current_milestone: Some(1),
                 ..OrchestrationConfig::default()
             },
             ..Default::default()

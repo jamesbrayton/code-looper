@@ -1198,6 +1198,26 @@ impl LoopConfig {
             }
         }
 
+        // When mode is set, the three lifecycle-engine fields are required.
+        if self.orchestration.mode.is_some() {
+            if self.orchestration.repo_owner.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration.mode is set but orchestration.repo_owner is missing".to_string(),
+                ));
+            }
+            if self.orchestration.repo_name.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration.mode is set but orchestration.repo_name is missing".to_string(),
+                ));
+            }
+            if self.orchestration.current_milestone.is_none() {
+                return Err(LooperError::InvalidArgument(
+                    "orchestration.mode is set but orchestration.current_milestone is missing"
+                        .to_string(),
+                ));
+            }
+        }
+
         // ── on_complete ─────────────────────────────────────────────────
         if let Some(cmd) = &self.on_complete {
             if cmd.trim().is_empty() {
@@ -3146,5 +3166,39 @@ global = ".code-looper/rules/global.md"
     fn discovery_policy_default_is_add_to_milestone() {
         let cfg = OrchestrationConfig::default();
         assert_eq!(cfg.discovery.policy, DiscoveryPolicy::AddToMilestone);
+    }
+
+    #[test]
+    fn validate_rejects_mode_without_repo_fields() {
+        let cfg = LoopConfig {
+            orchestration: OrchestrationConfig {
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_mode_with_all_required_fields() {
+        let cfg = LoopConfig {
+            orchestration: OrchestrationConfig {
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                current_milestone: Some(1),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        };
+        // validate() may fail for other reasons (prompt source); just confirm it doesn't
+        // fail on the orchestration fields. Check the error message if it fails.
+        if let Err(e) = cfg.validate() {
+            assert!(
+                !e.to_string().contains("orchestration.mode"),
+                "validate should not fail on orchestration.mode fields, got: {e}"
+            );
+        }
     }
 }
