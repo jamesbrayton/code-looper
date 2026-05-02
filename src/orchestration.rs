@@ -21,7 +21,6 @@ impl RepoContext {
 
 /// Milestone-aware repository context for the lifecycle engine.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct MilestoneContext {
     /// Open issues in the current milestone with `ready-for-dev` label.
     pub milestone_ready_for_dev: u32,
@@ -36,21 +35,18 @@ pub struct MilestoneContext {
 }
 
 impl MilestoneContext {
-    #[allow(dead_code)]
     pub fn is_milestone_complete(&self) -> bool {
         self.milestone_open_issues == 0 && self.open_pr_count == 0
     }
 }
 
 /// Abstraction for fetching milestone-aware repository context.
-#[allow(dead_code)]
 pub trait MilestoneContextResolver: Send + Sync {
     fn resolve(&self) -> Result<MilestoneContext, LooperError>;
 }
 
 /// The five named lifecycles.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum Lifecycle {
     /// Work items with `ready-for-dev` in the current milestone.
     Execution,
@@ -66,7 +62,6 @@ pub enum Lifecycle {
 
 impl Lifecycle {
     /// Return the default prompt payload for this lifecycle.
-    #[allow(dead_code)]
     pub fn default_prompt(&self, discovery_policy: &str, milestone: Option<u32>) -> String {
         let milestone_ref = milestone
             .map(|n| format!("milestone #{n}"))
@@ -145,21 +140,19 @@ impl std::fmt::Display for Lifecycle {
 
 /// Result of lifecycle selection.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct LifecycleSelection {
     pub lifecycle: Lifecycle,
+    #[allow(dead_code)]
     pub context: MilestoneContext,
 }
 
 /// Lifecycle engine: queries milestone-aware context and selects the active lifecycle.
-#[allow(dead_code)]
 pub struct LifecycleEngine {
     resolver: Box<dyn MilestoneContextResolver>,
     mode: crate::config::OrchestrationMode,
 }
 
 impl LifecycleEngine {
-    #[allow(dead_code)]
     pub fn new(
         resolver: Box<dyn MilestoneContextResolver>,
         mode: crate::config::OrchestrationMode,
@@ -167,7 +160,6 @@ impl LifecycleEngine {
         Self { resolver, mode }
     }
 
-    #[allow(dead_code)]
     pub fn select(&self) -> Result<LifecycleSelection, LooperError> {
         use crate::config::OrchestrationMode;
         let ctx = self.resolver.resolve()?;
@@ -289,13 +281,13 @@ pub trait ContextResolver: Send + Sync {
 
 /// Result of the policy engine's branch selection.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct BranchSelection {
     /// The workflow branch to execute.
     pub branch: WorkflowBranch,
     /// Prompt override from the matching rule, if any.
     pub prompt_override: Option<String>,
     /// Repository context snapshot used to make the decision.
+    #[allow(dead_code)]
     pub context: RepoContext,
 }
 
