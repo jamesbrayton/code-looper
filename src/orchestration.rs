@@ -64,6 +64,73 @@ pub enum Lifecycle {
     Planning,
 }
 
+impl Lifecycle {
+    /// Return the default prompt payload for this lifecycle.
+    #[allow(dead_code)]
+    pub fn default_prompt(&self, discovery_policy: &str, milestone: Option<u32>) -> String {
+        let milestone_ref = milestone
+            .map(|n| format!("milestone #{n}"))
+            .unwrap_or_else(|| "the current milestone".to_string());
+
+        match self {
+            Lifecycle::Execution => {
+                let discovery_note = match discovery_policy {
+                    "defer" => "create a new issue and leave it without a milestone (defer to next release)".to_string(),
+                    "prompt" => "pause and ask the user whether to add it to the current milestone or defer".to_string(),
+                    _ => format!("create a new issue and add it to {milestone_ref}"),
+                };
+                format!(
+                    "Work on open GitHub issues in {milestone_ref} that have the `ready-for-dev` label. \
+                     Pick the highest-priority unassigned issue, understand the requirements, \
+                     implement the changes, and update the issue when done.\n\n\
+                     **Issue lifecycle rules:**\n\
+                     - Comment at meaningful milestones (plan finalised, first pass done, tests added, blocker found).\n\
+                     - If you discover out-of-scope work, {discovery_note}.\n\
+                     - When the issue checklist is fully checked and changes are committed, close the issue."
+                )
+            }
+            Lifecycle::PrReview => {
+                "Review open pull requests in this repository. For each open PR, \
+                 check the diff, verify tests pass, and leave a constructive review comment \
+                 using the `gh` CLI or MCP GitHub tools. Do not merge without explicit approval \
+                 or unless the PR is from an automated process with a green CI run."
+                    .to_string()
+            }
+            Lifecycle::Release => format!(
+                "{milestone_ref} is complete — all issues are closed and there are no open PRs. \
+                 Create and push a release tag to trigger the release workflow:\n\n\
+                 1. Determine the next version by reading `Cargo.toml` and the latest git tag.\n\
+                 2. Run `git tag v<VERSION> && git push origin v<VERSION>`.\n\
+                 3. Verify that the `release.yml` CI workflow starts on GitHub Actions.\n\
+                 4. Comment on the milestone with the release tag and close it if it is not already closed."
+            ),
+            Lifecycle::Grooming => format!(
+                "Groom open issues in {milestone_ref} that have no state label \
+                 (`ready-for-dev`, `in-progress`, or `blocked`).\n\n\
+                 For each ungroomed issue:\n\
+                 - Read the issue body and comments.\n\
+                 - If the issue is actionable as written, add the `ready-for-dev` label.\n\
+                 - If the issue is blocked on another issue or external decision, add the `blocked` label \
+                   and add a comment explaining the blocker.\n\
+                 - If the issue is out of scope for the current milestone (compare against the launch goal), \
+                   remove the milestone assignment and add a comment explaining the deferral.\n\
+                 - If the issue needs more information before it can be started, leave a comment asking \
+                   for the missing details."
+            ),
+            Lifecycle::Planning => {
+                "Issues with the `ready-for-dev` label exist without a milestone assignment. \
+                 Plan the next milestone:\n\n\
+                 1. List all `ready-for-dev` issues without a milestone using `gh issue list --label ready-for-dev`.\n\
+                 2. Group them by theme or dependency order.\n\
+                 3. If no open milestone exists, create one: `gh api repos/:owner/:repo/milestones --method POST -f title='vX.Y.Z'`.\n\
+                 4. Assign the highest-priority issues to the milestone using `gh issue edit <number> --milestone <title>`.\n\
+                 5. Leave a planning comment on the milestone (via `gh api`) summarising the scope."
+                    .to_string()
+            }
+        }
+    }
+}
+
 impl std::fmt::Display for Lifecycle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -838,5 +905,28 @@ pub mod tests {
         assert_eq!(Lifecycle::Release.to_string(), "release");
         assert_eq!(Lifecycle::Grooming.to_string(), "grooming");
         assert_eq!(Lifecycle::Planning.to_string(), "planning");
+    }
+
+    #[test]
+    fn lifecycle_prompts_are_nonempty() {
+        assert!(!Lifecycle::Execution.default_prompt("add-to-milestone", Some(1)).is_empty());
+        assert!(!Lifecycle::PrReview.default_prompt("add-to-milestone", None).is_empty());
+        assert!(!Lifecycle::Release.default_prompt("add-to-milestone", Some(1)).is_empty());
+        assert!(!Lifecycle::Grooming.default_prompt("add-to-milestone", Some(1)).is_empty());
+        assert!(!Lifecycle::Planning.default_prompt("add-to-milestone", None).is_empty());
+    }
+
+    #[test]
+    fn execution_prompt_injects_discovery_policy() {
+        let defer_prompt = Lifecycle::Execution.default_prompt("defer", Some(2));
+        assert!(
+            defer_prompt.contains("defer to next release"),
+            "expected defer text in: {defer_prompt}"
+        );
+        let add_prompt = Lifecycle::Execution.default_prompt("add-to-milestone", Some(2));
+        assert!(
+            add_prompt.contains("milestone #2"),
+            "expected milestone ref in: {add_prompt}"
+        );
     }
 }
