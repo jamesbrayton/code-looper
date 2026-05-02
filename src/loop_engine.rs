@@ -1280,7 +1280,7 @@ impl LoopEngine {
 
         info!(
             total_duration_ms = total_ms,
-            termination_reason = %summary.termination_reason.as_ref().unwrap(),
+            termination_reason = %summary.termination_reason.as_ref().map(|r| r.to_string()).unwrap_or_else(|| "unknown".to_string()),
             "Loop finished"
         );
 

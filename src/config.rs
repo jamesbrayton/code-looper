@@ -511,7 +511,10 @@ pub enum OrchestrationMode {
     Autonomous,
 }
 
-/// Iteration pattern for the lifecycle engine (used in autonomous mode).
+/// Iteration pattern for the lifecycle engine.
+/// NOTE: This field is parsed and stored but the depth/breadth stop-condition
+/// logic is not yet implemented in the engine. Setting this to `breadth` has
+/// no effect until that feature is wired in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum IterationPattern {
