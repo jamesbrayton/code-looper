@@ -50,13 +50,13 @@ pub trait MilestoneContextResolver: Send + Sync {
 pub enum Lifecycle {
     /// Work items with `ready-for-dev` in the current milestone.
     Execution,
-    /// Open PRs exist (and no ready-for-dev items).
+    /// Open PRs exist and the current milestone has no `ready-for-dev` issues.
     PrReview,
     /// Milestone is fully closed — time to release.
     Release,
     /// Ungroomed issues in the milestone need scoping.
     Grooming,
-    /// Ready-for-dev items with no milestone need milestone assignment.
+    /// Issues with `ready-for-dev` label and no milestone assignment exist in the backlog.
     Planning,
 }
 
@@ -982,6 +982,11 @@ pub mod tests {
         assert!(
             add_prompt.contains("milestone #2"),
             "expected milestone ref in: {add_prompt}"
+        );
+        let prompt_prompt = Lifecycle::Execution.default_prompt(&DiscoveryPolicy::Prompt, Some(2));
+        assert!(
+            prompt_prompt.contains("pause and ask the user"),
+            "expected pause text in: {prompt_prompt}"
         );
     }
 

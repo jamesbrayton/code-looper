@@ -3160,6 +3160,28 @@ global = ".code-looper/rules/global.md"
     }
 
     #[test]
+    fn orchestration_mode_deserializes_execution_only() {
+        let toml_str = r#"
+            enabled = true
+            mode = "execution-only"
+            current_milestone = 1
+        "#;
+        let cfg: OrchestrationConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mode, Some(OrchestrationMode::ExecutionOnly));
+    }
+
+    #[test]
+    fn orchestration_mode_deserializes_autonomous() {
+        let toml_str = r#"
+            enabled = true
+            mode = "autonomous"
+            current_milestone = 1
+        "#;
+        let cfg: OrchestrationConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mode, Some(OrchestrationMode::Autonomous));
+    }
+
+    #[test]
     fn iteration_pattern_default_is_depth() {
         let cfg = OrchestrationConfig::default();
         assert_eq!(cfg.iteration_pattern, IterationPattern::Depth);

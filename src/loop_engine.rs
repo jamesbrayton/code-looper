@@ -2089,6 +2089,10 @@ mod tests {
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 1);
+        assert!(
+            summary.termination_reason.is_some(),
+            "termination_reason should be set after lifecycle engine failure"
+        );
     }
 
     // ── Engine-driven issue comment tests ────────────────────────────────────
