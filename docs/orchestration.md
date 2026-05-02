@@ -42,7 +42,7 @@ condition wins.
 enabled = true
 mode = "assisted"             # execution-only | assisted | autonomous
 current_milestone = 3         # GitHub milestone number to query
-iteration_pattern = "depth"   # depth | breadth (autonomous only)
+iteration_pattern = "depth"   # depth | breadth (breadth requires autonomous mode — not yet enforced)
 
 [orchestration.discovery]
 policy = "add-to-milestone"   # add-to-milestone | defer | prompt
@@ -59,8 +59,10 @@ issues before launching:
 4. Set `orchestration.current_milestone` in `looper.toml` to the milestone number.
 5. Launch `code-looper` — the engine picks up `ready-for-dev` issues automatically.
 
-The engine stops and reports an error if no `ready-for-dev` issues exist and
-the milestone is not yet complete.
+The engine returns an error if the milestone contains open issues but none carry
+the `ready-for-dev` label and no PRs are open — there is no lifecycle available
+in `execution-only` mode for this state. Ensure all actionable issues are
+labelled `ready-for-dev` before launching.
 
 ## Issue lifecycle
 

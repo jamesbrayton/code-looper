@@ -15,7 +15,7 @@ The **launch prompt** (either `--prompt-inline` text or the content of `--prompt
 
 - Issues are the *work decomposition* for achieving the goal — they can grow as the agent refines its understanding.
 - Milestones define what gets shipped — scope is anchored to the original prompt.
-- The engine passes the launch prompt to every lifecycle, not just execution. Grooming and planning lifecycles receive it as context for scoping decisions.
+- The engine will pass the launch prompt to every lifecycle, not just execution, as a planned enhancement (not yet implemented — see Consequences). Grooming and planning lifecycles will receive it as context for scoping decisions.
 
 ## Consequences
 

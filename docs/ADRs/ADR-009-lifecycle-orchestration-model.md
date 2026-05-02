@@ -19,7 +19,7 @@ Define **five named lifecycles** selected by querying GitHub state at the start 
 |-----------|--------------|
 | `execution` | Current milestone has ≥1 open issue with `ready-for-dev` label |
 | `pr-review` | Open PRs exist and no `ready-for-dev` issues in milestone |
-| `release` | Milestone has 0 open issues and 0 open PRs |
+| `release` | Milestone has 0 open issues (all issues closed, regardless of label) and 0 open PRs |
 | `grooming` | Open issues in milestone have no state label (ungroomed backlog) |
 | `planning` | `ready-for-dev` issues exist with no milestone assignment |
 

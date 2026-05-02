@@ -36,4 +36,4 @@ Two iteration patterns:
 
 - In `depth` mode, the engine stops when the `release` lifecycle fires (or raises an error if no more work exists in the milestone).
 - In `breadth` mode, the engine transitions from `release` → `planning` automatically. This requires `autonomous` mode; attempting `breadth` with `execution-only` or `assisted` is a startup validation error.
-- `breadth` cross-milestone behavior is implemented as a follow-on iteration: after release, the next `select()` call naturally falls through to `planning` because the old milestone is closed and a new one does not yet exist.
+- `breadth` cross-milestone behavior is implemented as a follow-on iteration: after release, the next `select()` call falls through to `planning` — provided `ready-for-dev` issues with no milestone assignment already exist. If the backlog is empty at that point, the engine errors even in `autonomous` mode until issues are seeded.
