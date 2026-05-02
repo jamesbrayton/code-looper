@@ -362,6 +362,145 @@ fn count_gh_items(owner: &str, repo: &str, kind: &str) -> Result<u32, LooperErro
     Ok(items.len() as u32)
 }
 
+// ── GitHub CLI lifecycle context resolver ────────────────────────────────────
+
+/// State label names used by the lifecycle engine to classify issues.
+const STATE_LABELS: &[&str] = &["ready-for-dev", "in-progress", "blocked"];
+
+/// Fetches milestone-aware context by shelling out to `gh`.
+pub struct GhCliLifecycleContextResolver {
+    pub owner: String,
+    pub repo: String,
+    /// GitHub milestone number for label-filtered queries.
+    pub milestone: u32,
+}
+
+impl MilestoneContextResolver for GhCliLifecycleContextResolver {
+    fn resolve(&self) -> Result<MilestoneContext, LooperError> {
+        let repo_slug = format!("{}/{}", self.owner, self.repo);
+
+        // 1. Open PRs — all, not milestone-filtered (GitHub doesn't link PRs to milestones)
+        let open_pr_count = count_gh_items(&self.owner, &self.repo, "pr")?;
+
+        // 2. All open issues in the milestone with their labels
+        let milestone_issues = list_milestone_issues(&repo_slug, self.milestone)?;
+
+        let milestone_open_issues = milestone_issues.len() as u32;
+
+        // 3. Partition by state label
+        let milestone_ready_for_dev = milestone_issues
+            .iter()
+            .filter(|i| has_label(i, "ready-for-dev"))
+            .count() as u32;
+
+        let milestone_ungroomed = milestone_issues
+            .iter()
+            .filter(|i| STATE_LABELS.iter().all(|&l| !has_label(i, l)))
+            .count() as u32;
+
+        // 4. Backlog: ready-for-dev issues with no milestone
+        let backlog_ready_for_dev = count_gh_issues_no_milestone(&repo_slug)?;
+
+        Ok(MilestoneContext {
+            milestone_ready_for_dev,
+            milestone_ungroomed,
+            milestone_open_issues,
+            open_pr_count,
+            backlog_ready_for_dev,
+        })
+    }
+}
+
+fn list_milestone_issues(
+    repo_slug: &str,
+    milestone: u32,
+) -> Result<Vec<serde_json::Value>, LooperError> {
+    use std::process::Command;
+
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "list",
+            "--repo",
+            repo_slug,
+            "--state",
+            "open",
+            "--milestone",
+            &milestone.to_string(),
+            "--json",
+            "number,labels",
+            "--limit",
+            "200",
+        ])
+        .output()
+        .map_err(|e| LooperError::ProviderSpawn {
+            binary: "gh".to_string(),
+            source: e,
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LooperError::InvalidArgument(format!(
+            "gh issue list --milestone {milestone} failed for {repo_slug}: {stderr}"
+        )));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&text).map_err(|e| {
+        LooperError::InvalidArgument(format!(
+            "failed to parse gh issue list output as JSON: {e}"
+        ))
+    })
+}
+
+fn has_label(issue: &serde_json::Value, label: &str) -> bool {
+    issue["labels"]
+        .as_array()
+        .map(|labels| labels.iter().any(|l| l["name"].as_str() == Some(label)))
+        .unwrap_or(false)
+}
+
+fn count_gh_issues_no_milestone(repo_slug: &str) -> Result<u32, LooperError> {
+    use std::process::Command;
+
+    let output = Command::new("gh")
+        .args([
+            "api",
+            &format!("repos/{repo_slug}/issues"),
+            "--method",
+            "GET",
+            "-f",
+            "state=open",
+            "-f",
+            "milestone=none",
+            "-f",
+            "labels=ready-for-dev",
+            "--paginate",
+            "--jq",
+            "length",
+        ])
+        .output()
+        .map_err(|e| LooperError::ProviderSpawn {
+            binary: "gh".to_string(),
+            source: e,
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(LooperError::InvalidArgument(format!(
+            "gh api issues (no-milestone) failed for {repo_slug}: {stderr}"
+        )));
+    }
+
+    // --paginate + --jq "length" outputs one count per page; sum them.
+    let text = String::from_utf8_lossy(&output.stdout);
+    let total: u32 = text
+        .lines()
+        .filter_map(|l| l.trim().parse::<u32>().ok())
+        .sum();
+    Ok(total)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
