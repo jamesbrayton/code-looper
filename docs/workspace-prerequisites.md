@@ -101,11 +101,16 @@ Run `code-looper bootstrap` to append the Code Looper section automatically, or 
 
 **What it looks for**
 
-The checker looks for `.mcp.json` in the workspace root and verifies that it contains a `"github"` key, indicating that the GitHub MCP server is configured.
+When strict MCP mode is enabled (`allow_direct_github = false`), the checker
+looks for `.mcp.json` in the workspace root and verifies that it contains a
+`"github"` key, indicating that the GitHub MCP server is configured.
 
 **Why this matters**
 
-Code Looper enforces MCP-only GitHub mutation by default. If the GitHub MCP server is not configured, orchestration flows that need to read PR/issue state or post comments will fail at runtime. The startup check surfaces this early with actionable guidance rather than failing mid-run.
+Code Looper defaults to `gh`-first GitHub operations with MCP fallback.
+In strict MCP mode, missing GitHub MCP configuration will cause runtime
+failures for operations that require MCP tools. The startup check surfaces
+this early with actionable guidance.
 
 **Failure messages**
 
@@ -166,14 +171,14 @@ Ensure `GITHUB_TOKEN` is set in your environment (or in a `.env` file). The toke
 
 ---
 
-## Bypassing the MCP-only constraint
+## GitHub policy mode
 
-The `--allow-direct-github` flag disables the MCP-only enforcement. This means:
+`allow_direct_github = true` (default) uses `gh` first and falls back to MCP
+when needed.
 
-- The agent is not prompted to use MCP tools for GitHub mutations.
-- The orchestration engine may use direct `gh` CLI calls for context resolution.
-
-**This flag is unsafe for production use.** It exists primarily for local development and provider adapters (like `codex`) that lack MCP tool support. When set, direct `gh` mutations bypass the audit trail and policy guard layer.
+Set `allow_direct_github = false` to enforce strict MCP-only write policy in
+provider prompts. In this mode, `.mcp.json` with a GitHub server entry is a
+required prerequisite.
 
 ---
 

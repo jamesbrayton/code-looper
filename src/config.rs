@@ -437,7 +437,7 @@ pub fn default_policy_rules() -> Vec<PolicyRule> {
 /// Rule files are markdown files whose contents are prepended to the engine-
 /// generated prompt (not replacing it).  This gives users a way to inject
 /// standing instructions (coding standards, review checklists, domain context)
-/// while preserving the MCP policy and workflow structure.
+/// while preserving the GitHub policy and workflow structure.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RulesConfig {
     /// Path to a global rules markdown file prepended to every provider prompt.
@@ -568,9 +568,12 @@ pub struct LoopConfig {
     /// Skip workspace prerequisite checks at startup.
     #[serde(default)]
     pub skip_prereq_check: bool,
-    /// [UNSAFE] Allow GitHub context resolution via direct gh CLI calls and
-    /// disable the MCP-only prompt preamble.
-    #[serde(default)]
+    /// Prefer direct GitHub access via `gh` CLI in provider prompts.
+    ///
+    /// When `true` (default), prompt policy tells agents to use `gh` first
+    /// and fall back to MCP tooling only when `gh` is unavailable or fails.
+    /// When `false`, prompt policy enforces MCP-only writes.
+    #[serde(default = "default_allow_direct_github")]
     pub allow_direct_github: bool,
     /// Stop the loop after the first iteration that fails (non-zero exit after
     /// all retries are exhausted).
@@ -649,6 +652,10 @@ fn default_retry_backoff_multiplier() -> f64 {
     1.0
 }
 
+fn default_allow_direct_github() -> bool {
+    true
+}
+
 impl Default for LoopConfig {
     fn default() -> Self {
         Self {
@@ -661,7 +668,7 @@ impl Default for LoopConfig {
             orchestration: OrchestrationConfig::default(),
             workspace_dir: None,
             skip_prereq_check: false,
-            allow_direct_github: false,
+            allow_direct_github: true,
             stop_on_failure: false,
             max_retries: 0,
             retry_backoff_ms: default_retry_backoff_ms(),

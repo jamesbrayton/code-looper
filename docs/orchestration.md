@@ -37,7 +37,7 @@ The set is configurable via `issue_tracking.standard_labels` in `looper.toml`.
 
 When the agent discovers work that falls outside the current issue's scope it should:
 
-1. Create a new issue via GitHub MCP with a descriptive title, body, and one or more standard labels.
+1. Create a new issue via `gh issue create` with a descriptive title, body, and one or more standard labels.
 2. Add `discovered-during-loop` to the new issue.
 3. Leave a comment on the current issue linking to the newly created one.
 
@@ -45,7 +45,7 @@ This keeps the current iteration focused and makes discovered work discoverable.
 
 ### Issue closure
 
-When the agent has completed the current issue's checklist *and* the work is committed (or a PR is open), it should close the issue with a summary comment via GitHub MCP.
+When the agent has completed the current issue's checklist *and* the work is committed (or a PR is open), it should close the issue with a summary comment via `gh issue close`.
 
 The engine performs an end-of-run verification: after the loop finishes it checks whether the owned issue is still open.  Behaviour depends on the `auto_close_owned_issues` configuration flag:
 
@@ -199,17 +199,13 @@ branch and PR.
 | `triage_priority` | `oldest` \| `newest` \| `least-conflicts` | `oldest` | Multi-PR ordering |
 | `skip_labels` | list of strings | `["do-not-loop","wip"]` | Labels that exclude a PR from triage |
 
-## MCP-only policy
+## GitHub policy
 
-All GitHub **write** operations (PR create, PR comment, issue comment, label
-edits, etc.) must flow through the configured GitHub MCP server tools.  This
-is the Code Looper–approved mutation path: the policy guard layer prepends an
-`MCP_ONLY_PREAMBLE` to every provider prompt that explicitly forbids direct
-`gh` CLI write commands and raw GitHub REST API calls.
+Code Looper uses a `gh`-first policy by default. The policy guard prepends a
+GitHub preamble to each provider prompt directing the agent to use `gh` CLI
+first for GitHub operations, and to fall back to configured GitHub MCP tools
+when `gh` is unavailable or fails for tooling reasons.
 
-Read-only GitHub context (open issues, PR metadata, etc.) is gathered via the
-GitHub MCP server by default.  The unsafe `--allow-direct-github` flag flips
-the **read** path to use the `gh` CLI directly (via `GhCliContextResolver`)
-*and* disables the MCP-only preamble — at which point write enforcement is no
-longer applied to provider prompts.  Use only when you know the workspace has
-no MCP server available and you accept the loss of write-path enforcement.
+Set `allow_direct_github = false` to switch to strict MCP-only write policy in
+provider prompts. In strict mode, workspace prerequisite checks require a
+GitHub MCP server entry in `.mcp.json`.

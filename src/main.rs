@@ -205,7 +205,8 @@ fn main() -> anyhow::Result<()> {
     // Run workspace prerequisite checks unless explicitly skipped.
     if !validated.skip_prereq_check {
         let ws_dir = workspace::resolve_workspace_dir(validated.workspace_dir.as_deref());
-        let checker = workspace::PrerequisiteChecker::new(&ws_dir);
+        let checker = workspace::PrerequisiteChecker::new(&ws_dir)
+            .with_mcp_github_required(!validated.allow_direct_github);
         let check_result = checker.run();
         if !check_result.is_ok() {
             eprintln!("Workspace prerequisite checks failed:");

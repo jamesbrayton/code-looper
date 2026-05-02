@@ -113,8 +113,8 @@ See [getting-started.md](getting-started.md#scaffold-a-configuration-directory-o
 | `prompt_file` | `--prompt-file` | path | — | Path to a markdown file whose contents become the prompt (mutually exclusive with `prompt_inline`) |
 | `log_level` | `--log-level` | `trace`\|`debug`\|`info`\|`warn`\|`error` | `info` | Tracing log level |
 | `workspace_dir` | `--workspace-dir` | path | cwd | Directory to use as the workspace root for prerequisite checks |
-| `skip_prereq_check` | `--skip-prereq-check` | bool | `false` | Skip instruction-file and MCP config validation at startup |
-| `allow_direct_github` | `--allow-direct-github` | bool | `false` | **Unsafe.** Allow GitHub access via `gh` CLI instead of requiring MCP |
+| `skip_prereq_check` | `--skip-prereq-check` | bool | `false` | Skip instruction-file and prerequisite validation at startup |
+| `allow_direct_github` | `--allow-direct-github` | bool | `true` | Prefer `gh` for GitHub operations in prompts; when false, enforce strict MCP-only write policy |
 | `stop_on_failure` | `--stop-on-failure` | bool | `false` | Stop the loop after the first iteration that fails after all retries |
 | `max_retries` | `--max-retries` | integer | `0` | Additional retry attempts per iteration on non-zero exit |
 | `retry_backoff_ms` | `--retry-backoff-ms` | integer | `500` | Base delay in milliseconds between retry attempts |
@@ -133,7 +133,7 @@ See [getting-started.md](getting-started.md#scaffold-a-configuration-directory-o
 
 ## `[rules]`
 
-User rules: global preamble and per-workflow-branch overrides via markdown files. Rule file contents are **prepended** to the engine-generated prompt (not replacing it), giving users a way to inject standing instructions (coding standards, review checklists, domain context) while preserving the MCP policy and workflow structure.
+User rules: global preamble and per-workflow-branch overrides via markdown files. Rule file contents are **prepended** to the engine-generated prompt (not replacing it), giving users a way to inject standing instructions (coding standards, review checklists, domain context) while preserving the GitHub policy and workflow structure.
 
 | TOML key | Type | Default | Description |
 |----------|------|---------|-------------|
@@ -146,7 +146,7 @@ When user rules are configured, the full prompt seen by the provider is assemble
 
 | Layer | Source | Customisable? |
 |-------|--------|--------------|
-| MCP-only preamble | `policy_guard.rs` | Only via `allow_direct_github` (unsafe) |
+| GitHub policy preamble (`gh`-first by default) | `policy_guard.rs` | `allow_direct_github = false` switches to strict MCP-only write preamble |
 | User global rules | `[rules].global` config path | Yes — user-authored markdown |
 | User workflow rules | `[rules.workflows].<branch>` | Yes — user-authored markdown |
 | Engine workflow prompt | `orchestration.rs` / `pr_manager.rs` | Per-rule `prompt_override` in config |
