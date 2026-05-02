@@ -583,7 +583,7 @@ fn count_gh_issues_no_milestone(repo_slug: &str) -> Result<u32, LooperError> {
             continue;
         }
         match trimmed.parse::<u32>() {
-            Ok(n) => total += n,
+            Ok(n) => total = total.saturating_add(n),
             Err(e) => {
                 return Err(LooperError::InvalidArgument(format!(
                     "gh api issues (no-milestone) returned unparseable output for {repo_slug}: \
