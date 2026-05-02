@@ -12,15 +12,13 @@ When the engine builds the final prompt for a provider invocation, content is la
 
 The GitHub policy preamble is always first. Everything else depends on the active mode.
 
-> **Future: user rules.** A planned feature (#86) will add user-authored rule
-> files that slot between the MCP preamble and the engine workflow prompt.
-> The exact layering will be:
->
-> 1. GitHub policy preamble
-> 2. User global rules (`[rules].global`)
-> 3. User workflow rules (`[rules.workflows].<branch>`)
-> 4. Engine-generated workflow prompt
-> 5. User-supplied iteration prompt
+The full prompt layering (from top to bottom):
+
+1. GitHub policy preamble
+2. User global rules (`[rules].global`)
+3. User workflow rules (`[rules.workflows].<branch>`)
+4. Engine-generated workflow prompt
+5. User-supplied iteration prompt
 
 ---
 
@@ -42,7 +40,8 @@ IMPORTANT - GitHub operations policy:
 Use `gh` CLI as the default path for GitHub operations (issues, pull requests,
 comments, branch operations, and merges). If a `gh` command is unavailable or
 fails for a tool-capability reason, fall back to the configured GitHub MCP
-tools for that action.
+tools for that action. Do not stop after a `gh`-tooling failure without
+attempting MCP fallback when the action is still required.
 ```
 
 ### 2. Workflow branch default prompts
@@ -151,7 +150,7 @@ During loop runs the agent should:
 - Comment on the linked issue at meaningful milestones (scope clarified, first
   implementation pass complete, tests added, blocker found, handoff).
 - Keep the issue body current (checklist, decisions, blockers/dependencies).
-- Create new issues (via GitHub MCP) when discovered work falls outside the
+- Create new issues (via `gh issue create`) when discovered work falls outside the
   current issue's scope, using labels: `bug`, `enhancement`, `tech-debt`,
   `discovered-during-loop`.
 - Close the issue with a summary comment when the checklist is complete and

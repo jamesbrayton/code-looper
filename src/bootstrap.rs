@@ -58,7 +58,7 @@ During loop runs the agent should:
 - Comment on the linked issue at meaningful milestones (scope clarified, first
   implementation pass complete, tests added, blocker found, handoff).
 - Keep the issue body current (checklist, decisions, blockers/dependencies).
-- Create new issues (via GitHub MCP) when discovered work falls outside the
+- Create new issues (via `gh issue create`) when discovered work falls outside the
   current issue's scope, using labels: `bug`, `enhancement`, `tech-debt`,
   `discovered-during-loop`.
 - Close the issue with a summary comment when the checklist is complete and

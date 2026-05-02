@@ -12,11 +12,19 @@
 //! out of scope for this ADR.
 
 /// Configuration for policy behavior.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct UnsafeOverrides {
     /// When `true` (runtime default), prompts enforce `gh`-first with MCP
     /// fallback.  When `false`, strict MCP-only preamble is used.
     pub allow_direct_github: bool,
+}
+
+impl Default for UnsafeOverrides {
+    fn default() -> Self {
+        Self {
+            allow_direct_github: true,
+        }
+    }
 }
 
 /// Validation error emitted by the policy guard.

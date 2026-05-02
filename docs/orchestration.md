@@ -37,7 +37,7 @@ The set is configurable via `issue_tracking.standard_labels` in `looper.toml`.
 
 When the agent discovers work that falls outside the current issue's scope it should:
 
-1. Create a new issue via GitHub MCP with a descriptive title, body, and one or more standard labels.
+1. Create a new issue via `gh issue create` with a descriptive title, body, and one or more standard labels.
 2. Add `discovered-during-loop` to the new issue.
 3. Leave a comment on the current issue linking to the newly created one.
 
@@ -45,7 +45,7 @@ This keeps the current iteration focused and makes discovered work discoverable.
 
 ### Issue closure
 
-When the agent has completed the current issue's checklist *and* the work is committed (or a PR is open), it should close the issue with a summary comment via GitHub MCP.
+When the agent has completed the current issue's checklist *and* the work is committed (or a PR is open), it should close the issue with a summary comment via `gh issue close`.
 
 The engine performs an end-of-run verification: after the loop finishes it checks whether the owned issue is still open.  Behaviour depends on the `auto_close_owned_issues` configuration flag:
 

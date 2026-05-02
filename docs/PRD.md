@@ -10,7 +10,7 @@
   - At least 3 providers (Claude Code CLI, GitHub Copilot CLI, Codex CLI) are supported by stable adapters in v1.0.
   - New provider adapter scaffold can be implemented and validated in <= 1 developer day using documented extension interfaces.
   - Teams report >= 20% reduction in manual repetitive orchestration steps (self-reported survey and run-log evidence) within 60 days of adoption.
-  - 100% of **agent-initiated** GitHub mutations (issue create/update/comment, PR review/comment/merge, branch actions) are executed through MCP server interfaces, enforced via a policy-guard preamble on every provider prompt. Engine-initiated bookkeeping calls (opening/merging PRs, posting lifecycle comments, merge-cleanup branch ops) are explicitly permitted to use the `gh` CLI directly and are audited through structured logs and the per-run manifest. See ADR-001 for the scoping rationale.
+  - By default, agent-initiated GitHub operations use `gh` CLI first with MCP fallback, enforced via a policy-guard preamble on every provider prompt. Strict MCP-only mode is available via `allow_direct_github = false`. Engine-initiated bookkeeping calls (opening/merging PRs, posting lifecycle comments, merge-cleanup branch ops) always use `gh` directly and are audited through structured logs and the per-run manifest. See ADR-001 for the scoping rationale.
 
 ## 2. User Experience & Functionality
 
@@ -47,7 +47,7 @@
     - Every iteration creates structured logs with timestamp, provider, prompt source, decision path, command status, and duration.
     - Session summary includes counts of successes, failures, retries, skipped decisions, and termination reason.
   - GitHub operations and prerequisites:
-    - All GitHub read and write operations in orchestration flows use MCP server tools; bypass paths are disabled unless explicitly enabled via an unsafe flag.
+    - By default, GitHub operations in orchestration flows use `gh` CLI first with MCP fallback. Strict MCP-only mode is available via `allow_direct_github = false`.
     - System validates workspace prerequisites at startup (for example presence/expected sections in instruction files and required skill references) and fails fast with remediation guidance when missing.
     - Optional `bootstrap` command can initialize or patch repository prerequisites (instruction files, MCP config stubs, and skill references) in an idempotent way.
 

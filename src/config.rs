@@ -573,7 +573,7 @@ pub struct LoopConfig {
     /// When `true` (default), prompt policy tells agents to use `gh` first
     /// and fall back to MCP tooling only when `gh` is unavailable or fails.
     /// When `false`, prompt policy enforces MCP-only writes.
-    #[serde(default)]
+    #[serde(default = "default_allow_direct_github")]
     pub allow_direct_github: bool,
     /// Stop the loop after the first iteration that fails (non-zero exit after
     /// all retries are exhausted).
@@ -650,6 +650,10 @@ fn default_retry_backoff_ms() -> u64 {
 
 fn default_retry_backoff_multiplier() -> f64 {
     1.0
+}
+
+fn default_allow_direct_github() -> bool {
+    true
 }
 
 impl Default for LoopConfig {

@@ -15,7 +15,7 @@ The application is organized into these layers (per PRD):
 - **Orchestration Policy Engine**: Evaluates repo context (PRs, issues), selects workflow branch, generates provider prompt payloads
 - **Policy Guard Layer**: Enforces GitHub tool selection policy (gh-first with MCP fallback by default)
 - **Workspace Bootstrap/Validation**: Checks/initializes repo prerequisites before loop execution
-- **Context Integrations**: GitHub MCP-backed resolver for PR/issue state
+- **Context Integrations**: GitHub resolver via `gh` CLI (primary) and MCP tools (fallback) for PR/issue state
 - **Telemetry/Logs**: Structured per-iteration logs and session summaries
 
 ## Build & Run Commands
@@ -92,7 +92,7 @@ During loop runs the agent should:
 - Comment on the linked issue at meaningful milestones (scope clarified, first
   implementation pass complete, tests added, blocker found, handoff).
 - Keep the issue body current (checklist, decisions, blockers/dependencies).
-- Create new issues (via GitHub MCP) when discovered work falls outside the
+- Create new issues (via `gh issue create`) when discovered work falls outside the
   current issue's scope, using labels: `bug`, `enhancement`, `tech-debt`,
   `discovered-during-loop`.
 - Close the issue with a summary comment when the checklist is complete and
