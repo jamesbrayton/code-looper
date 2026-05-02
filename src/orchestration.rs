@@ -171,7 +171,10 @@ impl LifecycleEngine {
         } else if ctx.is_milestone_complete() {
             Some(Lifecycle::Release)
         } else if ctx.milestone_ungroomed > 0
-            && matches!(self.mode, OrchestrationMode::Assisted | OrchestrationMode::Autonomous)
+            && matches!(
+                self.mode,
+                OrchestrationMode::Assisted | OrchestrationMode::Autonomous
+            )
         {
             Some(Lifecycle::Grooming)
         } else if ctx.backlog_ready_for_dev > 0
@@ -190,7 +193,10 @@ impl LifecycleEngine {
                     open_pr_count = ctx.open_pr_count,
                     "Lifecycle engine selected lifecycle"
                 );
-                Ok(LifecycleSelection { lifecycle: lc, context: ctx })
+                Ok(LifecycleSelection {
+                    lifecycle: lc,
+                    context: ctx,
+                })
             }
             None => Err(LooperError::InvalidArgument(format!(
                 "No lifecycle applies to current state in `{}` mode. \
@@ -505,9 +511,7 @@ fn list_milestone_issues(
 
     let text = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&text).map_err(|e| {
-        LooperError::InvalidArgument(format!(
-            "failed to parse gh issue list output as JSON: {e}"
-        ))
+        LooperError::InvalidArgument(format!("failed to parse gh issue list output as JSON: {e}"))
     })
 }
 
@@ -807,7 +811,10 @@ pub mod tests {
         use crate::config::OrchestrationMode;
         let engine = LifecycleEngine::new(
             Box::new(StubLifecycleResolver {
-                ctx: MilestoneContext { milestone_ready_for_dev: 2, ..Default::default() },
+                ctx: MilestoneContext {
+                    milestone_ready_for_dev: 2,
+                    ..Default::default()
+                },
             }),
             OrchestrationMode::ExecutionOnly,
         );
@@ -820,7 +827,10 @@ pub mod tests {
         use crate::config::OrchestrationMode;
         let engine = LifecycleEngine::new(
             Box::new(StubLifecycleResolver {
-                ctx: MilestoneContext { open_pr_count: 1, ..Default::default() },
+                ctx: MilestoneContext {
+                    open_pr_count: 1,
+                    ..Default::default()
+                },
             }),
             OrchestrationMode::ExecutionOnly,
         );
@@ -848,7 +858,11 @@ pub mod tests {
         let engine = LifecycleEngine::new(
             Box::new(StubLifecycleResolver {
                 // milestone_open_issues > 0 so is_milestone_complete() returns false
-                ctx: MilestoneContext { milestone_ungroomed: 3, milestone_open_issues: 3, ..Default::default() },
+                ctx: MilestoneContext {
+                    milestone_ungroomed: 3,
+                    milestone_open_issues: 3,
+                    ..Default::default()
+                },
             }),
             OrchestrationMode::Assisted,
         );
@@ -881,7 +895,11 @@ pub mod tests {
         let engine = LifecycleEngine::new(
             Box::new(StubLifecycleResolver {
                 // milestone_open_issues > 0 so Release doesn't fire; no ready-for-dev, no PRs
-                ctx: MilestoneContext { milestone_open_issues: 1, backlog_ready_for_dev: 2, ..Default::default() },
+                ctx: MilestoneContext {
+                    milestone_open_issues: 1,
+                    backlog_ready_for_dev: 2,
+                    ..Default::default()
+                },
             }),
             OrchestrationMode::Autonomous,
         );
@@ -900,11 +918,21 @@ pub mod tests {
 
     #[test]
     fn lifecycle_prompts_are_nonempty() {
-        assert!(!Lifecycle::Execution.default_prompt("add-to-milestone", Some(1)).is_empty());
-        assert!(!Lifecycle::PrReview.default_prompt("add-to-milestone", None).is_empty());
-        assert!(!Lifecycle::Release.default_prompt("add-to-milestone", Some(1)).is_empty());
-        assert!(!Lifecycle::Grooming.default_prompt("add-to-milestone", Some(1)).is_empty());
-        assert!(!Lifecycle::Planning.default_prompt("add-to-milestone", None).is_empty());
+        assert!(!Lifecycle::Execution
+            .default_prompt("add-to-milestone", Some(1))
+            .is_empty());
+        assert!(!Lifecycle::PrReview
+            .default_prompt("add-to-milestone", None)
+            .is_empty());
+        assert!(!Lifecycle::Release
+            .default_prompt("add-to-milestone", Some(1))
+            .is_empty());
+        assert!(!Lifecycle::Grooming
+            .default_prompt("add-to-milestone", Some(1))
+            .is_empty());
+        assert!(!Lifecycle::Planning
+            .default_prompt("add-to-milestone", None)
+            .is_empty());
     }
 
     #[test]

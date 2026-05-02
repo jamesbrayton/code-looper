@@ -761,12 +761,8 @@ impl LoopEngine {
                     match engine.select() {
                         Ok(LifecycleSelection { lifecycle, context }) => {
                             let lc_name = lifecycle.to_string();
-                            let discovery_policy = self
-                                .config
-                                .orchestration
-                                .discovery
-                                .policy
-                                .to_string();
+                            let discovery_policy =
+                                self.config.orchestration.discovery.policy.to_string();
                             let milestone = self.config.orchestration.current_milestone;
                             info!(
                                 iteration = i,
@@ -2007,14 +2003,15 @@ mod tests {
     #[test]
     fn lifecycle_engine_selects_lifecycle_and_succeeds() {
         use crate::config::{OrchestrationConfig, OrchestrationMode};
-        use crate::orchestration::{
-            LifecycleEngine, MilestoneContext, MilestoneContextResolver,
-        };
+        use crate::orchestration::{LifecycleEngine, MilestoneContext, MilestoneContextResolver};
 
         struct StubLifecycleResolver;
         impl MilestoneContextResolver for StubLifecycleResolver {
             fn resolve(&self) -> Result<MilestoneContext, crate::error::LooperError> {
-                Ok(MilestoneContext { milestone_ready_for_dev: 1, ..Default::default() })
+                Ok(MilestoneContext {
+                    milestone_ready_for_dev: 1,
+                    ..Default::default()
+                })
             }
         }
 
@@ -2033,10 +2030,13 @@ mod tests {
         .validate()
         .unwrap();
         let adapter = FakeAdapter::success("fake");
-        let lifecycle_engine =
-            LifecycleEngine::new(Box::new(StubLifecycleResolver), OrchestrationMode::ExecutionOnly);
+        let lifecycle_engine = LifecycleEngine::new(
+            Box::new(StubLifecycleResolver),
+            OrchestrationMode::ExecutionOnly,
+        );
 
-        let engine = LoopEngine::with_adapter_and_lifecycle(config, Box::new(adapter), lifecycle_engine);
+        let engine =
+            LoopEngine::with_adapter_and_lifecycle(config, Box::new(adapter), lifecycle_engine);
         let summary = engine.run();
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 0);
