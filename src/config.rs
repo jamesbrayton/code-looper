@@ -485,6 +485,69 @@ pub struct OrchestrationConfig {
     /// rule chain (pr-review → issue-execution → backlog-discovery).
     #[serde(default = "default_policy_rules")]
     pub policies: Vec<PolicyRule>,
+    /// Milestone-aware mode. When set, the LifecycleEngine is used instead of PolicyEngine.
+    pub mode: Option<OrchestrationMode>,
+    /// Current milestone number for label-filtered lifecycle queries.
+    pub current_milestone: Option<u32>,
+    /// Iteration pattern (depth or breadth).
+    #[serde(default)]
+    pub iteration_pattern: IterationPattern,
+    /// Discovery policy configuration.
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// Autonomy mode for the milestone-aware lifecycle engine.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OrchestrationMode {
+    /// Only execution and pr-review lifecycles are available.
+    ExecutionOnly,
+    /// execution, pr-review, and grooming lifecycles are available.
+    Assisted,
+    /// All five lifecycles are available.
+    Autonomous,
+}
+
+/// Iteration pattern for the lifecycle engine (used in autonomous mode).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum IterationPattern {
+    /// Stop after the current milestone releases; scope is locked to launch prompt.
+    #[default]
+    Depth,
+    /// After release, move to planning the next milestone and repeat.
+    Breadth,
+}
+
+/// Policy for handling work discovered during execution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiscoveryPolicy {
+    /// Add discovered work to the current milestone (default).
+    #[default]
+    AddToMilestone,
+    /// Always push discovered work to the next milestone.
+    Defer,
+    /// Ask the user before adding or deferring.
+    Prompt,
+}
+
+impl std::fmt::Display for DiscoveryPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DiscoveryPolicy::AddToMilestone => write!(f, "add-to-milestone"),
+            DiscoveryPolicy::Defer => write!(f, "defer"),
+            DiscoveryPolicy::Prompt => write!(f, "prompt"),
+        }
+    }
+}
+
+/// Discovery policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DiscoveryConfig {
+    #[serde(default)]
+    pub policy: DiscoveryPolicy,
 }
 
 impl Default for OrchestrationConfig {
@@ -494,6 +557,10 @@ impl Default for OrchestrationConfig {
             repo_owner: None,
             repo_name: None,
             policies: default_policy_rules(),
+            mode: None,
+            current_milestone: None,
+            iteration_pattern: IterationPattern::default(),
+            discovery: DiscoveryConfig::default(),
         }
     }
 }
@@ -3044,5 +3111,38 @@ global = ".code-looper/rules/global.md"
         assert!(rules
             .workflows
             .contains_key(&PolicyWorkflow::IssueExecution));
+    }
+
+    #[test]
+    fn orchestration_mode_default_is_none() {
+        let cfg = OrchestrationConfig::default();
+        assert!(cfg.mode.is_none());
+    }
+
+    #[test]
+    fn orchestration_mode_deserializes_from_toml() {
+        let toml_str = r#"
+            enabled = true
+            mode = "assisted"
+            current_milestone = 3
+            [discovery]
+            policy = "defer"
+        "#;
+        let cfg: OrchestrationConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.mode, Some(OrchestrationMode::Assisted));
+        assert_eq!(cfg.current_milestone, Some(3));
+        assert_eq!(cfg.discovery.policy, DiscoveryPolicy::Defer);
+    }
+
+    #[test]
+    fn iteration_pattern_default_is_depth() {
+        let cfg = OrchestrationConfig::default();
+        assert_eq!(cfg.iteration_pattern, IterationPattern::Depth);
+    }
+
+    #[test]
+    fn discovery_policy_default_is_add_to_milestone() {
+        let cfg = OrchestrationConfig::default();
+        assert_eq!(cfg.discovery.policy, DiscoveryPolicy::AddToMilestone);
     }
 }
