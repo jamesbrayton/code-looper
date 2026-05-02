@@ -21,7 +21,7 @@ Three autonomy modes are defined at launch time via `orchestration.mode`:
 
 Mode is a **launch-time configuration**, not a runtime toggle. Changing mode mid-run would create unpredictable behavior: an autonomous run might create issues that an execution-only run then refuses to groom.
 
-`execution-only` is the **default** when `mode` is set, so users who forget to specify a mode get the safest option.
+If `mode` is omitted from `[orchestration]`, the lifecycle engine is not activated and the legacy policy engine is used instead. Users must explicitly set `mode = "execution-only"` (or another level) to enable the lifecycle engine.
 
 ## Consequences
 

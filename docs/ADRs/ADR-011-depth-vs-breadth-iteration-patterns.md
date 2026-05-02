@@ -1,6 +1,6 @@
 # ADR-011: Depth vs Breadth Iteration Patterns
 
-**Status:** Accepted
+**Status:** Accepted (partially implemented)
 **Date:** 2026-05-02
 **Deciders:** Code Looper project team
 **Related:** #191
@@ -31,6 +31,8 @@ Two iteration patterns:
 `breadth` is appropriate when the user trusts the agent's planning judgment and wants fully autonomous velocity. It requires `autonomous` mode.
 
 ## Consequences
+
+> **Implementation note (2026-05-02):** `IterationPattern` is parsed and stored but the depth/breadth stop-condition and breadth-continuation logic are not yet wired into the engine. The consequences below describe the intended behaviour when that work is complete. Currently, both `depth` and `breadth` produce identical engine behaviour.
 
 - In `depth` mode, the engine stops when the `release` lifecycle fires (or raises an error if no more work exists in the milestone).
 - In `breadth` mode, the engine transitions from `release` → `planning` automatically. This requires `autonomous` mode; attempting `breadth` with `execution-only` or `assisted` is a startup validation error.

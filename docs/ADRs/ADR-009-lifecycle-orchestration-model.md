@@ -30,6 +30,6 @@ The existing three-branch policy engine is retained for backward compatibility w
 ## Consequences
 
 - More granular repository context is required: label-filtered issue counts per milestone, not just total counts.
-- The `gh` CLI must be called with `--milestone` and `--label` flags; this adds two extra shell invocations per iteration.
+- The `gh` CLI is called with `--milestone` to fetch milestone issues; label filtering is applied in-process. A third `gh api` call fetches backlog issues with no milestone assignment. This adds one extra shell invocation per iteration compared to the legacy resolver (3 total vs 2).
 - The `release` lifecycle fires as a soft signal: the orchestration engine selects it and generates a prompt instructing the agent to create and push a release tag, which in turn triggers `release.yml`. No direct CI invocation from the engine.
 - Grooming and planning lifecycles are restricted by autonomy mode (see ADR-010).

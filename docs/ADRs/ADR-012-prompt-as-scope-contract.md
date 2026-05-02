@@ -19,7 +19,7 @@ The **launch prompt** (either `--prompt-inline` text or the content of `--prompt
 
 ## Consequences
 
-- The launch prompt must be stored on `LoopEngine` and passed through to every lifecycle prompt template.
+- The launch prompt is the intended scope anchor for grooming and planning lifecycles; passing it to lifecycle prompt templates is a planned enhancement. Currently `Lifecycle::default_prompt` does not accept a launch-prompt parameter; scope anchoring via prompt text is not yet implemented.
 - Agents must be instructed (via the lifecycle prompt) to compare discovered work against the launch prompt goal before adding it to the current milestone.
 - Users who want the agent to expand scope freely should use a broad launch prompt ("improve this repository") rather than a specific one.
 - This is enforced by convention (prompt text), not by hard code; the engine cannot mechanically verify that an issue "serves the goal."
