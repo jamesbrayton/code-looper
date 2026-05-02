@@ -984,4 +984,61 @@ pub mod tests {
             "expected milestone ref in: {add_prompt}"
         );
     }
+
+    #[test]
+    fn selects_grooming_when_ungroomed_and_mode_is_autonomous() {
+        use crate::config::OrchestrationMode;
+        let engine = LifecycleEngine::new(
+            Box::new(StubLifecycleResolver {
+                ctx: MilestoneContext {
+                    milestone_ungroomed: 3,
+                    milestone_open_issues: 3,
+                    ..Default::default()
+                },
+            }),
+            OrchestrationMode::Autonomous,
+        );
+        let sel = engine.select().unwrap();
+        assert_eq!(sel.lifecycle, Lifecycle::Grooming);
+    }
+
+    #[test]
+    fn assisted_mode_blocks_planning() {
+        use crate::config::OrchestrationMode;
+        // backlog_ready_for_dev > 0 triggers Planning only in Autonomous mode.
+        // milestone_open_issues > 0 prevents Release; no ungroomed prevents Grooming.
+        // In Assisted mode, Planning is blocked and no lifecycle applies → error.
+        let engine = LifecycleEngine::new(
+            Box::new(StubLifecycleResolver {
+                ctx: MilestoneContext {
+                    backlog_ready_for_dev: 2,
+                    milestone_open_issues: 1,
+                    ..Default::default()
+                },
+            }),
+            OrchestrationMode::Assisted,
+        );
+        assert!(engine.select().is_err());
+    }
+
+    #[test]
+    fn is_milestone_complete_requires_both_zero() {
+        assert!(MilestoneContext::default().is_milestone_complete());
+        assert!(!MilestoneContext {
+            open_pr_count: 1,
+            ..Default::default()
+        }
+        .is_milestone_complete());
+        assert!(!MilestoneContext {
+            milestone_open_issues: 1,
+            ..Default::default()
+        }
+        .is_milestone_complete());
+        assert!(!MilestoneContext {
+            milestone_open_issues: 1,
+            open_pr_count: 1,
+            ..Default::default()
+        }
+        .is_milestone_complete());
+    }
 }

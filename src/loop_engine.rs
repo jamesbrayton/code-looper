@@ -2043,6 +2043,46 @@ mod tests {
         assert_eq!(summary.failures, 0);
     }
 
+    #[test]
+    fn lifecycle_engine_failure_terminates_loop() {
+        use crate::config::{OrchestrationConfig, OrchestrationMode};
+        use crate::orchestration::{LifecycleEngine, MilestoneContext, MilestoneContextResolver};
+
+        struct FailingLifecycleResolver;
+        impl MilestoneContextResolver for FailingLifecycleResolver {
+            fn resolve(&self) -> Result<MilestoneContext, crate::error::LooperError> {
+                Err(crate::error::LooperError::InvalidArgument(
+                    "simulated resolver failure".to_string(),
+                ))
+            }
+        }
+
+        let config = LoopConfig {
+            iterations: 3,
+            provider: Provider::Claude,
+            orchestration: OrchestrationConfig {
+                enabled: true,
+                mode: Some(OrchestrationMode::ExecutionOnly),
+                repo_owner: Some("owner".to_string()),
+                repo_name: Some("repo".to_string()),
+                current_milestone: Some(1),
+                ..OrchestrationConfig::default()
+            },
+            ..Default::default()
+        }
+        .validate()
+        .unwrap();
+        let adapter = FakeAdapter::success("fake");
+        let lifecycle_engine =
+            LifecycleEngine::new(Box::new(FailingLifecycleResolver), OrchestrationMode::ExecutionOnly);
+
+        let engine =
+            LoopEngine::with_adapter_and_lifecycle(config, Box::new(adapter), lifecycle_engine);
+        let summary = engine.run();
+        assert_eq!(summary.iterations_run, 1);
+        assert_eq!(summary.failures, 1);
+    }
+
     // ── Engine-driven issue comment tests ────────────────────────────────────
 
     use crate::config::{CommentCadence, IssueTrackingConfig, IssueTrackingMode};
