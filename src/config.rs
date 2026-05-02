@@ -486,8 +486,10 @@ pub struct OrchestrationConfig {
     #[serde(default = "default_policy_rules")]
     pub policies: Vec<PolicyRule>,
     /// Milestone-aware mode. When set, the LifecycleEngine is used instead of PolicyEngine.
+    #[serde(default)]
     pub mode: Option<OrchestrationMode>,
     /// Current milestone number for label-filtered lifecycle queries.
+    #[serde(default)]
     pub current_milestone: Option<u32>,
     /// Iteration pattern (depth or breadth).
     #[serde(default)]
