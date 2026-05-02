@@ -1,8 +1,16 @@
 provider = "claude"
-iterations = 1
-log_level = "debug"
+iterations = 5
+log_level = "info"
 stop_on_failure = false
+on_complete = "echo 'Loop finished' | tee -a loop.log"
+prompt_inline = "Review and work on milestone v0.3.0.  If there are no open issues in the milestone, take a look at the PR and review any open comments on it.  If the open comments provide actionable feedback, then incorporate them into the PR, comment on them what was done, and then resolve the comments.  If their are no more open comments, review the most recent CI run associated with the PR to ensure all steps are passing.  If all comments are resolved (or there are no comments), CI is passing, and issues are closed, then conduct another pull request review."
 
 [issue_tracking]
 mode = "github"
 comment_cadence = "milestones"
+
+[pr_management]
+mode = "single-pr"
+base_branch = "main"
+branch_prefix = "loop/"
+require_human_review = true
