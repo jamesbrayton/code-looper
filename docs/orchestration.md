@@ -16,6 +16,52 @@ Each iteration the orchestration policy engine evaluates the current repository 
 
 The engine resolves repository context once per iteration before selecting a branch.
 
+## Milestone-aware lifecycle engine
+
+When `orchestration.mode` is set in `looper.toml`, the engine switches to a
+**five-lifecycle model** that queries GitHub state (milestone labels, PR count)
+to select the active lifecycle each iteration.
+
+### Lifecycle selection
+
+| Lifecycle | Fires when | Autonomy mode required |
+|-----------|-----------|----------------------|
+| `execution` | Current milestone has ≥1 issue with `ready-for-dev` label | Any |
+| `pr-review` | Open PRs exist; no `ready-for-dev` in milestone | Any |
+| `release` | Milestone has 0 open issues and 0 open PRs | Any |
+| `grooming` | Issues in milestone have no state label | `assisted` or `autonomous` |
+| `planning` | `ready-for-dev` issues exist with no milestone | `autonomous` only |
+
+Lifecycles are evaluated in priority order top-to-bottom; the first matching
+condition wins.
+
+### Configuration
+
+```toml
+[orchestration]
+enabled = true
+mode = "assisted"             # execution-only | assisted | autonomous
+current_milestone = 3         # GitHub milestone number to query
+iteration_pattern = "depth"   # depth | breadth (autonomous only)
+
+[orchestration.discovery]
+policy = "add-to-milestone"   # add-to-milestone | defer | prompt
+```
+
+### Execution-only mode setup
+
+In `execution-only` mode the engine cannot groom or plan — you must set up
+issues before launching:
+
+1. Open issues for all planned work (`gh issue create ...`).
+2. Add the `ready-for-dev` label to issues that are ready to start (`gh issue edit <n> --add-label ready-for-dev`).
+3. Assign issues to the current milestone (`gh issue edit <n> --milestone <title>`).
+4. Set `orchestration.current_milestone` in `looper.toml` to the milestone number.
+5. Launch `code-looper` — the engine picks up `ready-for-dev` issues automatically.
+
+The engine stops and reports an error if no `ready-for-dev` issues exist and
+the milestone is not yet complete.
+
 ## Issue lifecycle
 
 When orchestration is enabled, the engine expects agents to actively manage GitHub Issues throughout the run.
