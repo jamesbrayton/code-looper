@@ -102,7 +102,8 @@ impl Lifecycle {
                  1. Determine the next version by reading `Cargo.toml` and the latest git tag.\n\
                  2. Run `git tag v<VERSION> && git push origin v<VERSION>`.\n\
                  3. Verify that the `release.yml` CI workflow starts on GitHub Actions.\n\
-                 4. Comment on the milestone with the release tag and close it if it is not already closed."
+                 4. Close the milestone once the tag is pushed: \
+ `gh api repos/:owner/:repo/milestones/<MILESTONE_NUMBER> --method PATCH -f state=closed`."
             ),
             Lifecycle::Grooming => format!(
                 "Groom open issues in {milestone_ref} that have no state label \
@@ -120,11 +121,13 @@ impl Lifecycle {
             Lifecycle::Planning => {
                 "Issues with the `ready-for-dev` label exist without a milestone assignment. \
                  Plan the next milestone:\n\n\
-                 1. List all `ready-for-dev` issues without a milestone using `gh issue list --label ready-for-dev`.\n\
+                 1. List all `ready-for-dev` issues without a milestone using \
+   `gh issue list --no-milestone --label ready-for-dev`.\n\
                  2. Group them by theme or dependency order.\n\
                  3. If no open milestone exists, create one: `gh api repos/:owner/:repo/milestones --method POST -f title='vX.Y.Z'`.\n\
                  4. Assign the highest-priority issues to the milestone using `gh issue edit <number> --milestone <title>`.\n\
-                 5. Leave a planning comment on the milestone (via `gh api`) summarising the scope."
+                 5. Verify the milestone is open and note its URL for reference: \
+   `gh api repos/:owner/:repo/milestones/<MILESTONE_NUMBER>`."
                     .to_string()
             }
         }
@@ -402,7 +405,8 @@ fn count_gh_items(owner: &str, repo: &str, kind: &str) -> Result<u32, LooperErro
     let repo_slug = format!("{owner}/{repo}");
     let output = Command::new("gh")
         .args([
-            kind, "list", "--repo", &repo_slug, "--state", "open", "--json", "number",
+            kind, "list", "--repo", &repo_slug, "--state", "open", "--json", "number", "--limit",
+            "500",
         ])
         .output()
         .map_err(|e| LooperError::ProviderSpawn {
@@ -557,6 +561,8 @@ fn count_gh_issues_no_milestone(repo_slug: &str) -> Result<u32, LooperError> {
             "milestone=none",
             "-f",
             "labels=ready-for-dev",
+            "-f",
+            "type=issue",
             "--paginate",
             "--jq",
             "length",
