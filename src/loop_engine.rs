@@ -207,35 +207,35 @@ impl LoopEngine {
             None
         };
         let lifecycle_engine = if let Some(mode) = config.orchestration.mode.clone() {
-            let owner = config.orchestration.repo_owner.clone().unwrap_or_else(|| {
-                warn!(
-                    "LifecycleEngine constructed with no repo_owner — \
-                     context resolution will fail"
-                );
-                String::new()
-            });
-            let repo = config.orchestration.repo_name.clone().unwrap_or_else(|| {
-                warn!(
-                    "LifecycleEngine constructed with no repo_name — \
-                     context resolution will fail"
-                );
-                String::new()
-            });
-            if let Some(milestone) = config.orchestration.current_milestone {
-                Some(LifecycleEngine::new(
+            match (
+                config.orchestration.repo_owner.clone(),
+                config.orchestration.repo_name.clone(),
+                config.orchestration.current_milestone,
+            ) {
+                (Some(owner), Some(repo), Some(milestone)) => Some(LifecycleEngine::new(
                     Box::new(crate::orchestration::GhCliLifecycleContextResolver {
                         owner,
                         repo,
                         milestone,
                     }),
                     mode,
-                ))
-            } else {
-                warn!(
-                    "orchestration.mode is set but orchestration.current_milestone is not; \
-                     lifecycle engine disabled"
-                );
-                None
+                )),
+                (owner, repo, milestone) => {
+                    let missing: Vec<&str> = [
+                        owner.is_none().then_some("orchestration.repo_owner"),
+                        repo.is_none().then_some("orchestration.repo_name"),
+                        milestone.is_none().then_some("orchestration.current_milestone"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    warn!(
+                        "orchestration.mode is set but required fields are missing: {}. \
+                         Lifecycle engine disabled.",
+                        missing.join(", ")
+                    );
+                    None
+                }
             }
         } else {
             None
