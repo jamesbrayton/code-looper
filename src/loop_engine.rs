@@ -224,7 +224,9 @@ impl LoopEngine {
                     let missing: Vec<&str> = [
                         owner.is_none().then_some("orchestration.repo_owner"),
                         repo.is_none().then_some("orchestration.repo_name"),
-                        milestone.is_none().then_some("orchestration.current_milestone"),
+                        milestone
+                            .is_none()
+                            .then_some("orchestration.current_milestone"),
                     ]
                     .into_iter()
                     .flatten()
@@ -761,8 +763,7 @@ impl LoopEngine {
                     match engine.select() {
                         Ok(LifecycleSelection { lifecycle, context }) => {
                             let lc_name = lifecycle.to_string();
-                            let discovery_policy =
-                                &self.config.orchestration.discovery.policy;
+                            let discovery_policy = &self.config.orchestration.discovery.policy;
                             let milestone = self.config.orchestration.current_milestone;
                             info!(
                                 iteration = i,
@@ -2073,8 +2074,10 @@ mod tests {
         .validate()
         .unwrap();
         let adapter = FakeAdapter::success("fake");
-        let lifecycle_engine =
-            LifecycleEngine::new(Box::new(FailingLifecycleResolver), OrchestrationMode::ExecutionOnly);
+        let lifecycle_engine = LifecycleEngine::new(
+            Box::new(FailingLifecycleResolver),
+            OrchestrationMode::ExecutionOnly,
+        );
 
         let engine =
             LoopEngine::with_adapter_and_lifecycle(config, Box::new(adapter), lifecycle_engine);
