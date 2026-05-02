@@ -5,6 +5,7 @@ REPO="jamesbrayton/code-looper"
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 INSTALL_DIR="${INSTALL_DIR%/}"
 
+# Detect OS and architecture
 OS="${OS:-$(uname -s)}"
 ARCH="${ARCH:-$(uname -m)}"
 
@@ -24,6 +25,7 @@ case "${OS}/${ARCH}" in
     ;;
 esac
 
+# Resolve latest release version from GitHub API
 API_URL="https://api.github.com/repos/${REPO}/releases/latest"
 if [ -n "${GITHUB_TOKEN}" ]; then
   VERSION=$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$API_URL" \
@@ -46,6 +48,13 @@ BINARY_NAME="code-looper-${VERSION}-${TARGET}"
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE}"
 CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${VERSION}/checksums.txt"
 
+# Fail fast if the install directory cannot be created before downloading
+if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+  printf 'Cannot create install directory: %s\n' "$INSTALL_DIR" >&2
+  printf 'Try: INSTALL_DIR=~/.local/bin sh install.sh\n' >&2
+  exit 1
+fi
+
 TMP_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t code-looper 2>/dev/null || printf '')
 if [ -z "$TMP_DIR" ] || [ ! -d "$TMP_DIR" ]; then
   printf 'Failed to create a temporary directory for installation.\n' >&2
@@ -53,10 +62,12 @@ if [ -z "$TMP_DIR" ] || [ ! -d "$TMP_DIR" ]; then
 fi
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -fsSL "$DOWNLOAD_URL" -o "${TMP_DIR}/${ARCHIVE}"
-curl -fsSL "$CHECKSUMS_URL" -o "${TMP_DIR}/checksums.txt"
+# Download archive and checksums to temp directory
+curl -fSL "$DOWNLOAD_URL" -o "${TMP_DIR}/${ARCHIVE}"
+curl -fSL "$CHECKSUMS_URL" -o "${TMP_DIR}/checksums.txt"
 
-EXPECTED_CHECKSUM=$(grep "  ${ARCHIVE}$" "${TMP_DIR}/checksums.txt" | awk '{print $1}' || true)
+# Verify archive integrity before extraction
+EXPECTED_CHECKSUM=$(grep "  ${ARCHIVE}$" "${TMP_DIR}/checksums.txt" | awk '{print $1}')
 if [ -z "$EXPECTED_CHECKSUM" ]; then
   printf 'Failed to find checksum for %s in checksums.txt.\n' "$ARCHIVE" >&2
   exit 1
@@ -76,12 +87,16 @@ if [ "$ACTUAL_CHECKSUM" != "$EXPECTED_CHECKSUM" ]; then
   exit 1
 fi
 
+# Extract binary and install
 tar -xzf "${TMP_DIR}/${ARCHIVE}" -C "$TMP_DIR"
-
-mkdir -p "$INSTALL_DIR"
+if [ ! -f "${TMP_DIR}/${BINARY_NAME}" ]; then
+  printf 'Extraction succeeded but expected binary %s was not found in the archive.\n' "$BINARY_NAME" >&2
+  exit 1
+fi
 mv "${TMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/code-looper"
 chmod +x "${INSTALL_DIR}/code-looper"
 
+# Verify installation succeeded
 if ! INSTALLED_VERSION=$("${INSTALL_DIR}/code-looper" --version 2>&1); then
   printf 'Binary was installed to %s/code-looper but failed to execute:\n%s\n' "$INSTALL_DIR" "$INSTALLED_VERSION" >&2
   printf 'The binary may be incompatible with this system (wrong architecture, noexec mount, etc.).\n' >&2
@@ -89,6 +104,7 @@ if ! INSTALLED_VERSION=$("${INSTALL_DIR}/code-looper" --version 2>&1); then
 fi
 printf 'Installed: %s/code-looper (%s)\n' "$INSTALL_DIR" "$INSTALLED_VERSION"
 
+# Warn if install directory is not on PATH
 case ":${PATH}:" in
   *":${INSTALL_DIR}:"*) ;;
   *)

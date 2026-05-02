@@ -815,7 +815,7 @@ mod tests {
         // temp repo and causing racy "unable to stat" failures in git add.
         std::fs::write(clone.path().join(".gitignore"), ".code-looper/\nloop.log\n").unwrap();
         std::fs::write(clone.path().join("README.md"), "init").unwrap();
-        git_in(clone.path(), &["add", "."]);
+        git_in(clone.path(), &["add", ".gitignore", "README.md"]);
         git_in(clone.path(), &["commit", "-m", "initial"]);
         git_in(clone.path(), &["push", "origin", "main"]);
 
