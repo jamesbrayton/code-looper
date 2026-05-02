@@ -79,13 +79,13 @@ A fully configured dev container is provided (`.devcontainer/`). It is based on 
 - GitHub Copilot CLI
 - `uv` (Python package manager)
 
-**Environment variables:** Copy `.env.example` to `.env` and set `GITHUB_TOKEN` to a personal access token with `repo` scope. The GitHub MCP server reads this token at startup.
+**Environment variables:** Copy `.env.example` to `.env` and set `GITHUB_TOKEN` to a personal access token with `repo` scope. The `gh` CLI uses this token for GitHub operations; it is also consumed by the GitHub MCP server when MCP fallback is in use.
 
-**MCP servers:** Configured in `.mcp.json`:
+**MCP servers:** Configured in `.mcp.json`. The `github` entry is optional in the default (`gh`-first) mode and only required when `allow_direct_github = false` (strict MCP-only mode):
 
 | Server | Purpose |
 |--------|---------|
-| `github` | GitHub API for issue/PR read and write |
+| `github` | GitHub API fallback when `gh` is unavailable (optional in default mode) |
 | `context7` | Library documentation lookup |
 | `markitdown` | Document format conversion |
 | `microsoftdocs` | Microsoft Learn / Azure documentation |

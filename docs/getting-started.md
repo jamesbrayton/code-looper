@@ -67,7 +67,7 @@ code-looper bootstrap
 This is idempotent and safe to run multiple times. It will:
 
 - Create `CLAUDE.md` with a Code Looper section if no instruction file exists, or append the section to an existing `CLAUDE.md` / `AGENTS.md` / `.github/copilot-instructions.md`.
-- Create `.mcp.json` with a GitHub MCP server stub (Docker-based by default) if one does not already exist, or merge the `github` entry into an existing file.
+- Create `.mcp.json` with a GitHub MCP server stub (Docker-based by default) if one does not already exist, or merge the `github` entry into an existing file. This enables MCP as a fallback path for GitHub operations when `gh` is unavailable.
 - Add `.code-looper/runs/` to `.gitignore` so run artifacts do not clutter `git status`. Config, rules, and prompts under `.code-looper/` are intended to be committed. If you are **not** running bootstrap, append `.code-looper/runs/` to your `.gitignore` manually.
 
 Preview what would change without writing anything:
@@ -252,7 +252,7 @@ This is the end-to-end path a UAT tester should run before reporting any bugs. I
      --prompt-inline "List every Cargo.toml or package.json file in this repo and print their top-level names"
    ```
 5. **Confirm what you should see** while the loop runs:
-   - Startup logs from the prerequisite checker (`✓ instruction-file`, `✓ instruction-section`, `✓ mcp-github-server`).
+   - Startup logs from the prerequisite checker (`✓ instruction-file`, `✓ instruction-section`). The `mcp-github-server` check only runs in strict MCP mode (`allow_direct_github = false`).
    - The provider's streamed stdout (agent reasoning + tool calls).
    - A structured `Iteration complete` log line with `outcome=success` and non-zero `duration_ms` once the iteration finishes.
    - An end-of-run summary printed to the terminal and written to `summary.md`.
@@ -266,7 +266,7 @@ This is the end-to-end path a UAT tester should run before reporting any bugs. I
    `iteration-1.log` is written incrementally, so it is present even if the run is interrupted. `manifest.json` and `summary.md` are only written at clean exit.
 7. **Verify the sandbox is still clean** — `git status` should show no unintended changes unless the prompt asked the agent to edit files.
 
-If any of steps 2–7 fail, capture the output and check [docs/troubleshooting.md](troubleshooting.md) before reporting a bug. The most common first-run issues are provider CLI not on `$PATH` and `.mcp.json` missing the `github` entry (both caught by the startup checks).
+If any of steps 2–7 fail, capture the output and check [docs/troubleshooting.md](troubleshooting.md) before reporting a bug. The most common first-run issue is the provider CLI not being on `$PATH` (caught by the startup check). In default mode the `gh` CLI handles GitHub operations, so no MCP configuration is required.
 
 ## User-directory install
 
