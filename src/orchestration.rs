@@ -449,6 +449,15 @@ impl MilestoneContextResolver for GhCliLifecycleContextResolver {
         // 2. All open issues in the milestone with their labels
         let milestone_issues = list_milestone_issues(&repo_slug, self.milestone)?;
 
+        if milestone_issues.len() == 200 {
+            tracing::warn!(
+                repo = %repo_slug,
+                milestone = self.milestone,
+                "Milestone issue query returned exactly 200 results (the limit); \
+                 some issues may have been omitted and counts may be inaccurate."
+            );
+        }
+
         let milestone_open_issues = milestone_issues.len() as u32;
 
         // 3. Partition by state label
@@ -516,10 +525,16 @@ fn list_milestone_issues(
 }
 
 fn has_label(issue: &serde_json::Value, label: &str) -> bool {
-    issue["labels"]
-        .as_array()
-        .map(|labels| labels.iter().any(|l| l["name"].as_str() == Some(label)))
-        .unwrap_or(false)
+    match issue["labels"].as_array() {
+        Some(labels) => labels.iter().any(|l| l["name"].as_str() == Some(label)),
+        None => {
+            tracing::warn!(
+                issue_number = issue["number"].as_u64(),
+                "Issue JSON missing or malformed 'labels' field; treating as unlabelled"
+            );
+            false
+        }
+    }
 }
 
 fn count_gh_issues_no_milestone(repo_slug: &str) -> Result<u32, LooperError> {
@@ -556,10 +571,23 @@ fn count_gh_issues_no_milestone(repo_slug: &str) -> Result<u32, LooperError> {
 
     // --paginate + --jq "length" outputs one count per page; sum them.
     let text = String::from_utf8_lossy(&output.stdout);
-    let total: u32 = text
-        .lines()
-        .filter_map(|l| l.trim().parse::<u32>().ok())
-        .sum();
+    let mut total: u32 = 0;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        match trimmed.parse::<u32>() {
+            Ok(n) => total += n,
+            Err(e) => {
+                return Err(LooperError::InvalidArgument(format!(
+                    "gh api issues (no-milestone) returned unparseable output for {repo_slug}: \
+                     {e} (line: {trimmed:?})"
+                )));
+            }
+        }
+    }
+    tracing::debug!(repo = %repo_slug, backlog_ready_for_dev = total, "Counted backlog ready-for-dev issues (no milestone)");
     Ok(total)
 }
 
