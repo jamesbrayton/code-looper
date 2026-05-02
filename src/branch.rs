@@ -155,7 +155,10 @@ fn local_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
         "--verify",
         "--quiet",
         &format!("refs/heads/{name}"),
-    ]);
+    ])
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_INDEX_FILE");
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
@@ -170,7 +173,10 @@ fn remote_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
         "--verify",
         "--quiet",
         &format!("refs/remotes/origin/{name}"),
-    ]);
+    ])
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_INDEX_FILE");
     if let Some(d) = dir {
         cmd.current_dir(d);
     }
@@ -182,6 +188,9 @@ fn remote_branch_exists_in(dir: Option<&std::path::Path>, name: &str) -> bool {
 fn has_uncommitted_changes() -> bool {
     Command::new("git")
         .args(["diff", "--quiet", "HEAD"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .status()
         .map(|s| !s.success())
         .unwrap_or(true)
@@ -194,6 +203,9 @@ fn has_unmerged_commits(branch: &str, base_branch: &str) -> bool {
     // Count commits in branch that are not in base_branch
     let result = Command::new("git")
         .args(["rev-list", "--count", &format!("{base_branch}..{branch}")])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
         .output();
     match result {
         Ok(out) if out.status.success() => {
@@ -789,6 +801,9 @@ mod tests {
         Command::new("git")
             .args(["clone", bare_url, "."])
             .current_dir(clone.path())
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .output()
             .expect("git clone failed");
         git_in(clone.path(), &["config", "user.email", "test@test.com"]);

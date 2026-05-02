@@ -20,7 +20,7 @@ Detects your OS and architecture, downloads the correct binary from [GitHub Rele
 
 **macOS x86\_64 (Intel):** No pre-built binary — build from source (see below).
 
-**Windows:** Download `code-looper-<version>-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/jamesbrayton/code-looper/releases/latest), extract, and place `code-looper.exe` on your `PATH`.
+**Windows:** Download `code-looper-<version>-x86_64-pc-windows-msvc.zip` from the [latest release](https://github.com/jamesbrayton/code-looper/releases/latest), extract it, rename the extracted `code-looper-<version>-x86_64-pc-windows-msvc.exe` to `code-looper.exe`, and move it to a directory on your `PATH`.
 
 ## Quick start
 
