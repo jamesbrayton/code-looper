@@ -662,18 +662,20 @@ pub mod tests {
     #[test]
     fn execution_only_mode_blocks_grooming() {
         use crate::config::OrchestrationMode;
+        // milestone_open_issues > 0 prevents is_milestone_complete() from firing;
+        // no ready-for-dev, no PRs → grooming would fire in Assisted mode but is
+        // blocked in ExecutionOnly → engine returns an error.
         let engine = LifecycleEngine::new(
             Box::new(StubLifecycleResolver {
-                ctx: MilestoneContext { milestone_ungroomed: 3, ..Default::default() },
+                ctx: MilestoneContext {
+                    milestone_ungroomed: 3,
+                    milestone_open_issues: 3,
+                    ..Default::default()
+                },
             }),
             OrchestrationMode::ExecutionOnly,
         );
-        // No ready-for-dev, no PRs, milestone_open_issues=0 so Release fires first
-        // Wait — actually MilestoneContext::default() has milestone_open_issues=0 and open_pr_count=0,
-        // so is_milestone_complete() returns true → Release is selected, not an error.
-        // Execution-only cannot block Release. Test should verify grooming is NOT selected:
-        let sel = engine.select().unwrap();
-        assert_ne!(sel.lifecycle, Lifecycle::Grooming);
+        assert!(engine.select().is_err());
     }
 
     #[test]
