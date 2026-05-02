@@ -118,9 +118,14 @@ jobs:
           fi
 
       - name: Generate checksums
+        shell: bash
         run: |
           cd artifacts
-          sha256sum * > checksums.txt
+          sha256sum code-looper-*.tar.gz code-looper-*.zip > checksums.txt
+          if [ ! -s checksums.txt ]; then
+            echo "ERROR: no artifacts found to checksum" >&2
+            exit 1
+          fi
 
       - name: Create GitHub Release
         env:
