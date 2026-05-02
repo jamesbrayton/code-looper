@@ -184,25 +184,30 @@ impl LoopEngine {
             config.provider_extra_args.clone(),
         );
         let policy_engine = if config.orchestration.enabled {
-            let owner = config.orchestration.repo_owner.clone().unwrap_or_else(|| {
-                warn!(
-                    "PolicyEngine constructed with no repo_owner — \
-                     orchestration context resolution will fail"
-                );
-                String::new()
-            });
-            let repo = config.orchestration.repo_name.clone().unwrap_or_else(|| {
-                warn!(
-                    "PolicyEngine constructed with no repo_name — \
-                     orchestration context resolution will fail"
-                );
-                String::new()
-            });
-            let rules = config.orchestration.policies.clone();
-            Some(PolicyEngine::with_rules(
-                Box::new(GhCliContextResolver { owner, repo }),
-                rules,
-            ))
+            match (
+                config.orchestration.repo_owner.clone(),
+                config.orchestration.repo_name.clone(),
+            ) {
+                (Some(owner), Some(repo)) => Some(PolicyEngine::with_rules(
+                    Box::new(GhCliContextResolver { owner, repo }),
+                    config.orchestration.policies.clone(),
+                )),
+                (owner, repo) => {
+                    let missing: Vec<&str> = [
+                        owner.is_none().then_some("orchestration.repo_owner"),
+                        repo.is_none().then_some("orchestration.repo_name"),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    warn!(
+                        "orchestration.enabled is true but required fields are missing: {}. \
+                         Policy engine disabled.",
+                        missing.join(", ")
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
