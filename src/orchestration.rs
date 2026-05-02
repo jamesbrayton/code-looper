@@ -62,17 +62,22 @@ pub enum Lifecycle {
 
 impl Lifecycle {
     /// Return the default prompt payload for this lifecycle.
-    pub fn default_prompt(&self, discovery_policy: &str, milestone: Option<u32>) -> String {
+    pub fn default_prompt(
+        &self,
+        discovery_policy: &crate::config::DiscoveryPolicy,
+        milestone: Option<u32>,
+    ) -> String {
         let milestone_ref = milestone
             .map(|n| format!("milestone #{n}"))
             .unwrap_or_else(|| "the current milestone".to_string());
 
         match self {
             Lifecycle::Execution => {
+                use crate::config::DiscoveryPolicy;
                 let discovery_note = match discovery_policy {
-                    "defer" => "create a new issue and leave it without a milestone (defer to next release)".to_string(),
-                    "prompt" => "pause and ask the user whether to add it to the current milestone or defer".to_string(),
-                    _ => format!("create a new issue and add it to {milestone_ref}"),
+                    DiscoveryPolicy::Defer => "create a new issue and leave it without a milestone (defer to next release)".to_string(),
+                    DiscoveryPolicy::Prompt => "pause and ask the user whether to add it to the current milestone or defer".to_string(),
+                    DiscoveryPolicy::AddToMilestone => format!("create a new issue and add it to {milestone_ref}"),
                 };
                 format!(
                     "Work on open GitHub issues in {milestone_ref} that have the `ready-for-dev` label. \
@@ -946,31 +951,34 @@ pub mod tests {
 
     #[test]
     fn lifecycle_prompts_are_nonempty() {
+        use crate::config::DiscoveryPolicy;
         assert!(!Lifecycle::Execution
-            .default_prompt("add-to-milestone", Some(1))
+            .default_prompt(&DiscoveryPolicy::AddToMilestone, Some(1))
             .is_empty());
         assert!(!Lifecycle::PrReview
-            .default_prompt("add-to-milestone", None)
+            .default_prompt(&DiscoveryPolicy::AddToMilestone, None)
             .is_empty());
         assert!(!Lifecycle::Release
-            .default_prompt("add-to-milestone", Some(1))
+            .default_prompt(&DiscoveryPolicy::AddToMilestone, Some(1))
             .is_empty());
         assert!(!Lifecycle::Grooming
-            .default_prompt("add-to-milestone", Some(1))
+            .default_prompt(&DiscoveryPolicy::AddToMilestone, Some(1))
             .is_empty());
         assert!(!Lifecycle::Planning
-            .default_prompt("add-to-milestone", None)
+            .default_prompt(&DiscoveryPolicy::AddToMilestone, None)
             .is_empty());
     }
 
     #[test]
     fn execution_prompt_injects_discovery_policy() {
-        let defer_prompt = Lifecycle::Execution.default_prompt("defer", Some(2));
+        use crate::config::DiscoveryPolicy;
+        let defer_prompt = Lifecycle::Execution.default_prompt(&DiscoveryPolicy::Defer, Some(2));
         assert!(
             defer_prompt.contains("defer to next release"),
             "expected defer text in: {defer_prompt}"
         );
-        let add_prompt = Lifecycle::Execution.default_prompt("add-to-milestone", Some(2));
+        let add_prompt =
+            Lifecycle::Execution.default_prompt(&DiscoveryPolicy::AddToMilestone, Some(2));
         assert!(
             add_prompt.contains("milestone #2"),
             "expected milestone ref in: {add_prompt}"

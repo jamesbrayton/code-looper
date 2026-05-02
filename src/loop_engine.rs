@@ -762,7 +762,7 @@ impl LoopEngine {
                         Ok(LifecycleSelection { lifecycle, context }) => {
                             let lc_name = lifecycle.to_string();
                             let discovery_policy =
-                                self.config.orchestration.discovery.policy.to_string();
+                                &self.config.orchestration.discovery.policy;
                             let milestone = self.config.orchestration.current_milestone;
                             info!(
                                 iteration = i,
@@ -772,7 +772,7 @@ impl LoopEngine {
                                 open_pr_count = context.open_pr_count,
                                 "Iteration start (lifecycle engine)"
                             );
-                            let p = lifecycle.default_prompt(&discovery_policy, milestone);
+                            let p = lifecycle.default_prompt(discovery_policy, milestone);
                             (p, Some(lc_name), None)
                         }
                         Err(e) => {
