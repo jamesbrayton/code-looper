@@ -1,11 +1,30 @@
 ---
 name: github-issues
-description: 'Create, update, and manage GitHub issues using MCP tools. Use this skill when users want bug reports, feature requests, task tracking, issue comments, issue-type selection, or issue workflow updates. Triggers on requests like "create an issue", "file a bug", "request a feature", "update issue X", "comment on issue", or any GitHub issue management task.'
+description: 'Create, update, and manage GitHub issues using the GitHub CLI (`gh`) by default, with MCP fallback when `gh` is unavailable or fails for capability reasons. Use this skill when users want bug reports, feature requests, task tracking, issue comments, issue-type selection, or issue workflow updates. Triggers on requests like "create an issue", "file a bug", "request a feature", "update issue X", "comment on issue", or any GitHub issue management task.'
 ---
 
 # GitHub Issues
 
-Manage GitHub issues using the GitHub MCP server.
+Manage GitHub issues with a `gh`-first policy and MCP fallback.
+
+## Tooling Policy
+
+1. Use `gh` CLI first for all issue operations.
+2. If `gh` is unavailable or fails due to missing capability, fall back to the matching MCP tool.
+3. Do not stop after a `gh` tooling failure when MCP can complete the action.
+
+## Preferred `gh` Commands
+
+| Action | Preferred `gh` command |
+|--------|-------------------------|
+| Create issue | `gh issue create` |
+| Update issue fields | `gh issue edit` |
+| Add comment | `gh issue comment` |
+| View issue details/comments | `gh issue view` |
+| List issues | `gh issue list` |
+| Search issues | `gh search issues` |
+
+Use `--json` output where structured parsing is needed.
 
 ## Available MCP Tools
 
@@ -25,7 +44,7 @@ Manage GitHub issues using the GitHub MCP server.
 2. **Determine issue type**: Use issue `type` (`bug`, `feature`, `task`) instead of type-like labels.
 3. **Gather context**: Confirm owner/repo, fetch issue (if updating), and call `list_issue_types` when type availability is unknown.
 4. **Structure content**: Use the correct template file from `references/`.
-5. **Execute**: Call the appropriate MCP tool with only the fields being changed.
+5. **Execute**: Use `gh` first. If blocked by tooling limitations, call the appropriate MCP tool with only the fields being changed.
 6. **Maintain execution log**: Add milestone comments and keep issue body sections/checklists current.
 7. **Confirm**: Report the resulting issue URL and what was changed.
 
@@ -73,7 +92,7 @@ Always use the templates in `references/` and choose based on request intent:
 
 ## Updating Issues
 
-Use `issue_write` with `method: "update"`:
+Use `gh issue edit` first, or `issue_write` with `method: "update"` when falling back:
 
 ```
 owner, repo, issue_number (required)
@@ -88,7 +107,7 @@ State values: `open`, `closed`
 
 **User**: "Create a bug issue - the login page crashes when using SSO"
 
-**Action**: Call `issue_write` with:
+**Action**: Prefer `gh issue create`; MCP fallback example:
 ```json
 {
   "method": "create",
@@ -105,7 +124,7 @@ State values: `open`, `closed`
 
 **User**: "Create a feature request for dark mode with high priority"
 
-**Action**: Call `issue_write` with:
+**Action**: Prefer `gh issue create`; MCP fallback example:
 ```json
 {
   "method": "create",
@@ -176,5 +195,5 @@ Issue comments are the canonical execution log while work is in progress.
 - Always confirm the repository context before creating issues
 - Ask for missing critical information rather than guessing
 - Link related issues when known: `Related to #123`
-- For updates, fetch current issue first to preserve unchanged fields
+- For updates, fetch current issue first (`gh issue view`) to preserve unchanged fields
 - If issue types are uncertain for a repo/org, call `list_issue_types` before `issue_write`

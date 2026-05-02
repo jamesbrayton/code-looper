@@ -6,17 +6,17 @@ This reference documents every piece of content the Code Looper engine programma
 
 When the engine builds the final prompt for a provider invocation, content is layered top-to-bottom:
 
-1. **MCP-only preamble** (from `PolicyGuard::augment_prompt`)
+1. **GitHub policy preamble** (from `PolicyGuard::augment_prompt`)
 2. **Engine-generated workflow prompt** (from orchestration or PR triage)
 3. **User-supplied prompt** (`--prompt-inline` / `--prompt-file` / policy rule `prompt_override`)
 
-The MCP preamble is always first. Everything else depends on the active mode.
+The GitHub policy preamble is always first. Everything else depends on the active mode.
 
 > **Future: user rules.** A planned feature (#86) will add user-authored rule
 > files that slot between the MCP preamble and the engine workflow prompt.
 > The exact layering will be:
 >
-> 1. MCP-only preamble
+> 1. GitHub policy preamble
 > 2. User global rules (`[rules].global`)
 > 3. User workflow rules (`[rules.workflows].<branch>`)
 > 4. Engine-generated workflow prompt
@@ -26,24 +26,23 @@ The MCP preamble is always first. Everything else depends on the active mode.
 
 ## Prompt injections
 
-### 1. MCP-only preamble
+### 1. GitHub policy preamble
 
 | | |
 |---|---|
-| **Source** | `src/policy_guard.rs:102–108` — `MCP_ONLY_PREAMBLE` constant |
-| **Applied by** | `PolicyGuard::augment_prompt()` (`src/policy_guard.rs:87–98`) |
-| **When** | Every iteration, every subcommand — unless `allow_direct_github = true` |
-| **Override** | Set `allow_direct_github = true` in config or `--allow-direct-github` CLI flag (unsafe) |
+| **Source** | `src/policy_guard.rs` — `GITHUB_CLI_FIRST_PREAMBLE` and `MCP_ONLY_PREAMBLE` |
+| **Applied by** | `PolicyGuard::augment_prompt()` |
+| **When** | Every iteration and subcommand |
+| **Override** | Set `allow_direct_github = false` for strict MCP-only write policy |
 
 **Text:**
 
 ```
-IMPORTANT — GitHub operations policy:
-All GitHub mutations (creating or updating issues, pull request reviews,
-comments, branch operations, and merges) MUST be performed exclusively
-through the configured GitHub MCP server tools. Direct use of `gh` CLI
-commands or raw GitHub REST API calls for write operations is not permitted
-in this session.
+IMPORTANT - GitHub operations policy:
+Use `gh` CLI as the default path for GitHub operations (issues, pull requests,
+comments, branch operations, and merges). If a `gh` command is unavailable or
+fails for a tool-capability reason, fall back to the configured GitHub MCP
+tools for that action.
 ```
 
 ### 2. Workflow branch default prompts
@@ -143,8 +142,8 @@ This repository is configured to run with Code Looper.
 ### GitHub mutation policy
 
 All GitHub operations (issue create/update/comment, PR review/comment/merge,
-branch actions) **must** be performed via the GitHub MCP server. Direct `gh`
-CLI mutations are disabled by default.
+branch actions) should use the `gh` CLI by default. If `gh` is unavailable or
+fails for capability reasons, fall back to GitHub MCP tools for that action.
 
 ### Work-log discipline
 
@@ -281,15 +280,17 @@ Linked to pull request #<pr_number>.
 ## How user rules compose with engine prompts
 
 User rules (configured via `[rules]` in the config file) are **prepended** to
-the engine workflow prompt, not replacing it.  This ensures the MCP policy and
+the engine workflow prompt, not replacing it.  This ensures the GitHub policy and
 workflow structure are always present while giving users a way to inject
 standing instructions (coding standards, review checklists, domain context).
+
+In default mode, that policy means `gh`-first with MCP fallback.
 
 The full prompt layering is:
 
 | Layer | Source | Customisable? |
 |-------|--------|--------------|
-| MCP-only preamble | `policy_guard.rs` | Only via `allow_direct_github` (unsafe) |
+| GitHub policy preamble (`gh`-first default) | `policy_guard.rs` | Set `allow_direct_github = false` for strict MCP-only writes |
 | User global rules | `[rules].global` config path | Yes — user-authored markdown |
 | User workflow rules | `[rules.workflows].<branch>` | Yes — user-authored markdown |
 | Engine workflow prompt | `orchestration.rs` / `pr_manager.rs` | Per-rule `prompt_override` in config |

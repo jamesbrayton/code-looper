@@ -165,9 +165,11 @@ pub struct Cli {
     #[arg(long)]
     pub skip_prereq_check: bool,
 
-    /// [UNSAFE] Allow GitHub context resolution via direct `gh` CLI calls
-    /// instead of requiring a GitHub MCP server.  Disables the MCP-only
-    /// write-path enforcement preamble in provider prompts.
+    /// Prefer GitHub operations through direct `gh` CLI calls in provider
+    /// prompts (`gh`-first policy with MCP fallback).
+    ///
+    /// This flag is mainly for explicitness and compatibility with older
+    /// configs; the default runtime policy already enables this behavior.
     #[arg(long)]
     pub allow_direct_github: bool,
 
@@ -592,10 +594,10 @@ mod tests {
     }
 
     #[test]
-    fn cli_defaults_leave_safe_flags_false() {
+    fn cli_defaults_leave_expected_flags() {
         let config = blank_cli().apply_overrides(default_config());
         assert!(!config.skip_prereq_check);
-        assert!(!config.allow_direct_github);
+        assert!(config.allow_direct_github);
         assert!(config.workspace_dir.is_none());
     }
 

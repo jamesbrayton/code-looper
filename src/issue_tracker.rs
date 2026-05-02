@@ -77,9 +77,8 @@ pub enum IssueTrackerError {
 
 /// Abstraction over issue-tracking systems (GitHub Issues, Jira, Linear, …).
 ///
-/// All mutation operations must go through MCP-compliant paths in production
-/// use.  Implementations are responsible for honouring whatever auth and
-/// policy constraints apply to their backend.
+/// Implementations are responsible for honouring whatever auth and policy
+/// constraints apply to their backend.
 #[allow(dead_code)]
 pub trait IssueTracker: Send + Sync {
     fn list_open_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>, IssueTrackerError>;

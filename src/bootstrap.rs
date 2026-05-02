@@ -49,8 +49,8 @@ This repository is configured to run with [Code Looper](https://github.com/james
 ### GitHub mutation policy
 
 All GitHub operations (issue create/update/comment, PR review/comment/merge,
-branch actions) **must** be performed via the GitHub MCP server.  Direct `gh`
-CLI mutations are disabled by default.
+branch actions) should use the `gh` CLI by default. If `gh` is unavailable or
+fails for capability reasons, fall back to GitHub MCP tools for that action.
 
 ### Work-log discipline
 

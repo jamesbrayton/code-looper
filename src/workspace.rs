@@ -55,17 +55,29 @@ impl CheckResult {
 ///    `.github/copilot-instructions.md`).
 /// 2. The instruction file contains the Code Looper section marker
 ///    (`<!-- code-looper begin -->`); skipped when check 1 fails.
-/// 3. An MCP config file (`.mcp.json`) exists and contains a `"github"` key,
-///    indicating the GitHub MCP server is configured.
+/// 3. (Optional) An MCP config file (`.mcp.json`) exists and contains a
+///    `"github"` key.  Only checked when `require_mcp_github_server` is
+///    `true` (i.e. strict MCP-only mode is active).
 pub struct PrerequisiteChecker {
     workspace_dir: PathBuf,
+    require_mcp_github_server: bool,
 }
 
 impl PrerequisiteChecker {
     pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
         Self {
             workspace_dir: workspace_dir.into(),
+            require_mcp_github_server: true,
         }
+    }
+
+    /// Configure whether `.mcp.json` must contain a GitHub MCP server entry.
+    ///
+    /// Default is `true` for backward compatibility. Set to `false` for
+    /// gh-first workflows where MCP is fallback-only.
+    pub fn with_mcp_github_required(mut self, required: bool) -> Self {
+        self.require_mcp_github_server = required;
+        self
     }
 
     /// Run all prerequisite checks and return the aggregate result.
@@ -75,7 +87,9 @@ impl PrerequisiteChecker {
         if let Some(ref path) = instruction_path {
             self.check_instruction_section(path, &mut result);
         }
-        self.check_mcp_config(&mut result);
+        if self.require_mcp_github_server {
+            self.check_mcp_config(&mut result);
+        }
         result
     }
 
@@ -369,6 +383,18 @@ mod tests {
         let result = PrerequisiteChecker::new(dir.path()).run();
         assert!(!result.is_ok());
         assert!(result.failed.iter().any(|d| d.check == "mcp-github-server"));
+    }
+
+    #[test]
+    fn passes_when_mcp_json_missing_if_mcp_not_required() {
+        let dir = setup_dir();
+        write_file(&dir, "CLAUDE.md", &valid_instruction_content());
+
+        let result = PrerequisiteChecker::new(dir.path())
+            .with_mcp_github_required(false)
+            .run();
+        assert!(result.is_ok(), "unexpected failures: {:?}", result.failed);
+        assert!(!result.failed.iter().any(|d| d.check == "mcp-github-server"));
     }
 
     #[test]

@@ -98,11 +98,11 @@
   - Orchestration Policy Engine:
     - Evaluates context, selects workflow branch, generates provider prompt payloads.
   - Policy Guard Layer:
-    - Enforces MCP-only GitHub mutation path and blocks disallowed execution paths.
+    - Enforces GitHub tool selection policy (gh-first with MCP fallback by default; strict MCP-only opt-in).
   - Workspace Bootstrap and Validation:
     - Checks/initializes repository prerequisites (instruction file fragments, skills references, MCP config hints) before loop execution.
   - Context Integrations:
-    - GitHub MCP-backed resolver for PR/issue checks and write actions; abstraction for additional sources.
+    - GitHub resolver backed by `gh` CLI (primary) and MCP tools (fallback); abstraction for additional sources.
   - Telemetry and Logs:
     - Structured logs per iteration and session-level summaries.
 
@@ -146,7 +146,7 @@
     - Prompt source options (inline and file).
     - Adapters for Claude Code CLI, GitHub Copilot CLI, and Codex CLI.
     - Baseline conditional orchestration chain and structured logging.
-    - MCP-only GitHub integration path with startup capability validation.
+    - gh-first GitHub integration with MCP fallback and startup capability validation.
     - Prerequisite checker with actionable diagnostics.
   - v1.1:
     - Pluggable policy definitions via external config.

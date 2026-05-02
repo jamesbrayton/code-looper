@@ -143,7 +143,7 @@ pub struct LoopEngine {
     adapter: Box<dyn ProviderAdapter>,
     /// Optional orchestration policy engine (present when orchestration is enabled).
     policy_engine: Option<PolicyEngine>,
-    /// Policy guard used to augment prompts with MCP-use requirements.
+    /// Policy guard used to augment prompts with the GitHub policy preamble.
     guard: PolicyGuard,
     /// Issue tracker for this run.
     tracker: Box<dyn IssueTracker>,
@@ -572,31 +572,6 @@ impl LoopEngine {
             if let Some(ref action) = pr_plan.triage_action {
                 match action {
                     TriageAction::Merge { pr } => {
-                        if !self.config.allow_direct_github {
-                            warn!(
-                                iteration = i,
-                                pr = pr.number,
-                                "multi-pr: merge blocked — direct gh CLI usage is disabled \
-                                 (set allow_direct_github = true or route merges through MCP)"
-                            );
-                            iteration_records.push(IterationRecord {
-                                iteration: i,
-                                provider: self.config.provider.clone(),
-                                prompt_source: crate::telemetry::PromptSource::TriageMerge,
-                                workflow_branch: None,
-                                outcome: IterationOutcome::PolicyGuardBlock {
-                                    message: "gh pr merge blocked by MCP-only policy".into(),
-                                },
-                                duration_ms: iter_start.elapsed().as_millis(),
-                                retries: 0,
-                                stderr_excerpt: None,
-                                transcript_path: None,
-                                started_at: iter_started_at,
-                            });
-                            summary.iterations_run += 1;
-                            summary.failures += 1;
-                            continue;
-                        }
                         info!(
                             iteration = i,
                             pr = pr.number,
@@ -781,7 +756,7 @@ impl LoopEngine {
                 raw_prompt
             };
 
-            // Augment prompt with MCP-use preamble (no-op when allow_direct_github is set).
+            // Augment prompt with GitHub policy preamble.
             let effective_prompt = self.guard.augment_prompt(&raw_prompt);
 
             // Execute with retry/backoff.
@@ -2653,11 +2628,11 @@ mod tests {
         assert_eq!(summary.failures, 1);
     }
 
-    /// When `allow_direct_github = false`, a `TriageAction::Merge` must be
-    /// recorded as `PolicyGuardBlock` — not `SpawnFailure` — because nothing
-    /// was spawned; the request was rejected by a policy gate (#180).
+    /// Even when `allow_direct_github = false` (strict prompt mode), engine
+    /// merge execution should still run and be recorded as a concrete execution
+    /// failure when `gh` cannot complete (not `PolicyGuardBlock`).
     #[test]
-    fn merge_blocked_by_policy_recorded_as_policy_guard_block() {
+    fn strict_prompt_mode_does_not_block_engine_merge_execution() {
         use crate::config::{PrManagementConfig, PrMode, TelemetryConfig};
         use crate::pr_manager::{PrInfo, TriageAction};
         use crate::pr_strategy::{IterationPlan, PrStrategy};
@@ -2715,8 +2690,8 @@ mod tests {
         assert_eq!(summary.iterations_run, 1);
         assert_eq!(summary.failures, 1);
 
-        // Read the manifest to verify the outcome variant is PolicyGuardBlock,
-        // not SpawnFailure — nothing was spawned; the policy gate rejected it.
+        // Read the manifest to verify we did not classify this as a policy
+        // block: engine merge execution path should run regardless.
         let run_dir = std::fs::read_dir(artifacts_dir.path())
             .unwrap()
             .flatten()
@@ -2728,11 +2703,11 @@ mod tests {
             serde_json::from_str(&raw).expect("manifest.json should be valid JSON");
         assert_eq!(manifest.iterations.len(), 1);
         assert!(
-            matches!(
+            !matches!(
                 &manifest.iterations[0].outcome,
                 IterationOutcome::PolicyGuardBlock { .. }
             ),
-            "expected PolicyGuardBlock, got {:?}",
+            "did not expect PolicyGuardBlock, got {:?}",
             manifest.iterations[0].outcome
         );
     }

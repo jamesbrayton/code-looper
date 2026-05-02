@@ -24,16 +24,14 @@
 /// `require_human_review` is `true` (the default) the engine never merges the
 /// PR itself.
 ///
-/// # MCP-only policy and engine `gh` usage
+/// # GitHub policy and engine `gh` usage
 ///
-/// Per the revised ADR-001, the MCP-only GitHub mutation policy is scoped to
-/// **agent prompts** — the `PolicyGuard` preamble instructs providers to use
-/// MCP server tools for any GitHub writes.  The **engine** (this module and
-/// [`crate::issue_tracker`]) is explicitly permitted to shell out to the `gh`
-/// CLI for its own PR and issue bookkeeping: engine actions are already
-/// audited through the structured logs, per-run manifest, and session
-/// summary.  See `docs/ADRs/ADR-001-mcp-only-github-mutations.md` for the
-/// full rationale and the list of non-goals this decision implies.
+/// The engine defaults to `gh`-first with MCP fallback (ADR-001).  The
+/// `PolicyGuard` preamble instructs providers to use `gh` CLI first and fall
+/// back to MCP tools when `gh` is unavailable.  The **engine** (this module
+/// and [`crate::issue_tracker`]) always uses `gh` directly for its own PR and
+/// issue bookkeeping: engine actions are audited through structured logs, the
+/// per-run manifest, and the session summary.
 use std::process::Command;
 
 use serde::Deserialize;
