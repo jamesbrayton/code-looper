@@ -759,7 +759,7 @@ impl LoopEngine {
             let (raw_prompt, workflow_branch, workflow_policy) =
                 if let Some(ref engine) = self.lifecycle_engine {
                     match engine.select() {
-                        Ok(LifecycleSelection { lifecycle, .. }) => {
+                        Ok(LifecycleSelection { lifecycle, context }) => {
                             let lc_name = lifecycle.to_string();
                             let discovery_policy = self
                                 .config
@@ -772,6 +772,8 @@ impl LoopEngine {
                                 iteration = i,
                                 provider = self.adapter.name(),
                                 lifecycle = %lc_name,
+                                milestone_ready_for_dev = context.milestone_ready_for_dev,
+                                open_pr_count = context.open_pr_count,
                                 "Iteration start (lifecycle engine)"
                             );
                             let p = lifecycle.default_prompt(&discovery_policy, milestone);

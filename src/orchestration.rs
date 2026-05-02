@@ -142,7 +142,6 @@ impl std::fmt::Display for Lifecycle {
 #[derive(Debug, Clone)]
 pub struct LifecycleSelection {
     pub lifecycle: Lifecycle,
-    #[allow(dead_code)]
     pub context: MilestoneContext,
 }
 
